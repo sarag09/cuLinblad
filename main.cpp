@@ -16,8 +16,13 @@ PetscErrorCode FormRHSFunction(TS ts, PetscReal t, Vec rho, Vec rho_dot, void *c
     // rho_dot = rho;
     PetscCall(VecCopy(rho, rho_dot));
 
-    // rho_dot = -gamma * rho
-    PetscCall(VecScale(rho_dot, -user->gamma));
+    PetscScalar *rho_array;
+    PetscCall(VecGetArray(rho_dot, &rho_array));
+
+    // rho_dot = -gamma * rho[0]
+    rho_array[0] = rho_array[0] * (-user->gamma);
+
+    PetscCall(VecRestoreArray(rho_dot, &rho_array));
     
     PetscFunctionReturn(PETSC_SUCCESS);
 }
@@ -47,6 +52,7 @@ int main(int argc, char **argv) {
 
     // Initial Condition
     PetscCall(VecSet(rho, 1.0));
+
 
     //gamma
     AppCtx user;
