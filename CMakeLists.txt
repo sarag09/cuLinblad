@@ -11,7 +11,18 @@ find_package(MPI REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PETSC REQUIRED IMPORTED_TARGET PETSc)
 
-add_executable(run_sim main.cpp)
+# 3. Fetch Pybind11 directly from GitHub
+include(FetchContent)
+FetchContent_Declare(
+    pybind11
+    GIT_REPOSITORY https://github.com/pybind/pybind11.git
+    GIT_TAG v2.11.1
+)    
 
-# 3. Link BOTH PETSc and MPI to our executable
-target_link_libraries(run_sim PkgConfig::PETSC MPI::MPI_CXX)
+FetchContent_MakeAvailable(pybind11)
+
+# 4. Create a Python Module instead of an Executable
+pybind11_add_module(cuLindblad_core main.cpp)
+
+# 5. Link BOTH PETSc and MPI to our executable
+target_link_libraries(cuLindblad_core PRIVATE PkgConfig::PETSC MPI::MPI_CXX)

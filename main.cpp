@@ -1,5 +1,6 @@
 #include <petsc.h>
 #include <complex>
+#include <pybind11/pybind11.h>
 
 // Physics content
 typedef struct {
@@ -71,52 +72,64 @@ PetscErrorCode FormRHSFunction(TS ts, PetscReal t, Vec rho, Vec rho_dot, void *c
 
 }
 
-int main(int argc, char **argv) {
-    PetscCall(PetscInitialize(&argc, &argv, NULL, "Matrix-Free Lindblad\n"));
+// Replaced int main with callable function
+double run_simulation(double coupling_strength, double gamma_rate) {
+    // Initialize PETSc with command line arguments
+    PetscCallAbort(PETSC_COMM_WORLD, PetscInitializeNoArguments());
 
     // Create AppCtx and set parameters
     AppCtx user;
-    user.coupling = 2.0; // Coupling strength
-    user.gamma = 0.5;    // Decay rate
+    user.coupling = coupling_strength; // Coupling strength
+    user.gamma = gamma_rate;    // Decay rate
 
     // Create density matrix vector (16 elements for 4x4 matrix)
     Vec rho;
-    PetscCall(VecCreate(PETSC_COMM_WORLD, &rho));
-    PetscCall(VecSetSizes(rho, PETSC_DECIDE, 32)); // 16 complex numbers = 32 real numbers
-    PetscCall(VecSetFromOptions(rho));
-    PetscCall(VecSetUp(rho));
+    PetscCallAbort(PETSC_COMM_WORLD, VecCreate(PETSC_COMM_WORLD, &rho));
+    PetscCallAbort(PETSC_COMM_WORLD, VecSetSizes(rho, PETSC_DECIDE, 32)); // 16 complex numbers = 32 real numbers
+    PetscCallAbort(PETSC_COMM_WORLD, VecSetFromOptions(rho));
+    PetscCallAbort(PETSC_COMM_WORLD, VecSetUp(rho));
 
     // Set initial state: |10><10| (index 2 has population) - index = 20
     PetscInt inital_index = 2*(2*4 + 2); // |10><10| element
     PetscScalar initial_value = 1.0; // Population of 1 in |10><10|
-    PetscCall(VecSetValue(rho, inital_index, initial_value, INSERT_VALUES));
-    PetscCall(VecAssemblyBegin(rho));
-    PetscCall(VecAssemblyEnd(rho));
+    PetscCallAbort(PETSC_COMM_WORLD, VecSetValue(rho, inital_index, initial_value, INSERT_VALUES));
+    PetscCallAbort(PETSC_COMM_WORLD, VecAssemblyBegin(rho));
+    PetscCallAbort(PETSC_COMM_WORLD, VecAssemblyEnd(rho));
     
 
     // Create TS solver
     TS ts;
-    PetscCall(TSCreate(PETSC_COMM_WORLD, &ts));
-    PetscCall(TSSetRHSFunction(ts, NULL, FormRHSFunction, &user));
-    PetscCall(TSSetTime(ts, 0.0)); // Initial time
-    PetscCall(TSSetMaxTime(ts, 1.0)); // Final time
-    PetscCall(TSSetTimeStep(ts, 0.01)); // Time step size
-    PetscCall(TSSetExactFinalTime(ts, TS_EXACTFINALTIME_MATCHSTEP)); // Match final time to last step
-    PetscCall(TSSetFromOptions(ts));
+    PetscCallAbort(PETSC_COMM_WORLD, TSCreate(PETSC_COMM_WORLD, &ts));
+    PetscCallAbort(PETSC_COMM_WORLD, TSSetRHSFunction(ts, NULL, FormRHSFunction, &user));
+    PetscCallAbort(PETSC_COMM_WORLD, TSSetTime(ts, 0.0)); // Initial time
+    PetscCallAbort(PETSC_COMM_WORLD, TSSetMaxTime(ts, 1.0)); // Final time
+    PetscCallAbort(PETSC_COMM_WORLD, TSSetTimeStep(ts, 0.01)); // Time step size
+    PetscCallAbort(PETSC_COMM_WORLD, TSSetExactFinalTime(ts, TS_EXACTFINALTIME_MATCHSTEP)); // Match final time to last step
+    PetscCallAbort(PETSC_COMM_WORLD, TSSetFromOptions(ts));
+
+    // Hardcode Runge-Kutta since we don't have command line arguments anymore
+    PetscCallAbort(PETSC_COMM_WORLD, TSSetType(ts, TSRK));
 
     // Solve the system
-    PetscCall(TSSolve(ts, rho));
+    PetscCallAbort(PETSC_COMM_WORLD, TSSolve(ts, rho));
 
-    // Print out the final population of |00> (which is at index 0)
+    // Extract the final results
     const PetscScalar *final_rho;
-    PetscCall(VecGetArrayRead(rho, &final_rho));
-    PetscCall(PetscPrintf(PETSC_COMM_WORLD, "\n--- RESULTS ---\n"));
-    PetscCall(PetscPrintf(PETSC_COMM_WORLD, "cuLindblad rho_00 at t=1.0: %f\n", final_rho[0]));
-    PetscCall(VecRestoreArrayRead(rho, &final_rho));
+    PetscCallAbort(PETSC_COMM_WORLD, VecGetArrayRead(rho, &final_rho));
+    double final_population = final_rho[0]; // Extract population of |00> (index 0)
+    PetscCallAbort(PETSC_COMM_WORLD, VecRestoreArrayRead(rho, &final_rho));
 
     // Clean up
-    PetscCall(TSDestroy(&ts));
-    PetscCall(VecDestroy(&rho));
-    PetscCall(PetscFinalize());
-    return 0;
+    PetscCallAbort(PETSC_COMM_WORLD, TSDestroy(&ts));
+    PetscCallAbort(PETSC_COMM_WORLD, VecDestroy(&rho));
+    PetscCallAbort(PETSC_COMM_WORLD, PetscFinalize());
+    return final_population;
+}
+
+// Pybind11 module definition
+namespace py = pybind11;
+PYBIND11_MODULE(cuLindblad_core, m) {
+    m.doc() = "cuLindblad core C++ engine via PETSc";
+    m.def("run_simulation", &run_simulation, "Run the Lindblad simulation with given coupling strength and gamma rate",
+          py::arg("coupling_strength"), py::arg("gamma_rate"));
 }
