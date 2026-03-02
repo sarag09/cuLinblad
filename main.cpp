@@ -1,104 +1,122 @@
 #include <petsc.h>
+#include <complex>
 
 // Physics content
 typedef struct {
-    PetscReal coupling_strength;
+    double coupling;
+    double gamma;
 } AppCtx;
 
-// Matrix free muliplication function
-PetscErrorCode MyMatrixFreeMultiply(Mat H, Vec rho, Vec rho_dot) {
+
+// RHS Function - Matrix free Linblad equation
+PetscErrorCode FormRHSFunction(TS ts, PetscReal t, Vec rho, Vec rho_dot, void *ctx) {
     PetscFunctionBeginUser;
+    AppCtx *user = (AppCtx*)ctx;
 
-    // Unpack physics parameters
-    AppCtx *user;
-    PetscCall(MatShellGetContext(H, &user));
+    // Get raw memory array
+    const PetscScalar *rho_raw;
+    PetscScalar *dot_raw;
+    PetscCall(VecGetArrayRead(rho, &rho_raw));
+    PetscCall(VecGetArray(rho_dot, &dot_raw));
 
-    // Get row arrays
-    const PetscScalar *rho_array;
-    PetscScalar *rho_dot_array;
-    PetscCall(VecGetArrayRead(rho, &rho_array));
-    PetscCall(VecGetArray(rho_dot, &rho_dot_array));
+    // Cast raw array into complex no.
+    auto *rho_c = reinterpret_cast<const std::complex<double>*>(rho_raw);
+    auto *dot_c = reinterpret_cast<std::complex<double>*>(dot_raw);
 
-    // Swaps state 0 and 1 with coupling strength
-    rho_dot_array[0] = user->coupling_strength * rho_array[1];
-    rho_dot_array[1] = user->coupling_strength * rho_array[0];
+    // Derivative array  = 0
+    for(int i = 0; i < 16; i++) {
+        dot_c[i] = std::complex<double>(0.0, 0.0);
+    }
 
-    // Set the rest to zero
-    for (int i = 2; i < 16; i++) {
-        rho_dot_array[i] = 0.0;
+    // Matrix-Free Hamiltonian: -i [H, rho] = -i(H*rho - rho*H)
+    // H only connects index 1 (|01>) and index 2 (|10>) with a value of 2*coupling
+
+    double h_val = 2.0 * user->coupling;
+    std::complex<double> neg_i(0.0, -1.0);
+
+    for(int j=0; j<4; j++) {
+        // H*rho
+        dot_c[1*4 + j] += neg_i * h_val * rho_c[2*4 + j]; // H[1,2] = 2*coupling
+        dot_c[2*4 + j] += neg_i * h_val * rho_c[1*4 + j]; // H[2,1] = 2*coupling
+
+        // rho*H
+        dot_c[j*4 + 1] -= neg_i * h_val * rho_c[j*4 + 2]; // H[1,2] = 2*coupling
+        dot_c[j*4 + 2] -= neg_i * h_val * rho_c[j*4 + 1]; // H[2,1] = 2*coupling
+    }
+
+    // Matrix-Free Decay: L * rho * L^dagger - 0.5 * {L^dagger * L, rho}
+    // L moves population from index 2 to 0, and from 3 to 1.
+    double gamma = user->gamma;
+
+    // Jump term: L * rho * L^dagger (Adds population to lower states)
+    dot_c[0*4 + 0] += gamma * rho_c[2*4 + 2]; // |10><10| decays to |00><00|
+    dot_c[1*4 + 1] += gamma * rho_c[3*4 + 3]; // |11><11| decays to |01><01|
+
+    // Anti-commutator: -0.5 * (L^dagger L * rho + rho * L^dagger L)
+
+    for(int j=0; j<4; j++) {
+        // L^dagger L * rho (Removes population from upper states)
+        dot_c[2*4 + j] -= 0.5 * gamma * rho_c[2*4 + j]; // |10><10| loses population
+        dot_c[3*4 + j] -= 0.5 * gamma * rho_c[3*4 + j]; // |11><11| loses population
+
+        // rho * L^dagger L (Same as above, but on the right)
+        dot_c[j*4 + 2] -= 0.5 * gamma * rho_c[j*4 + 2]; // |10><10| loses population
+        dot_c[j*4 + 3] -= 0.5 * gamma * rho_c[j*4 + 3]; // |11><11| loses population
     }
 
     // Restore arrays
-    PetscCall(VecRestoreArrayRead(rho, &rho_array));
-    PetscCall(VecRestoreArray(rho_dot, &rho_dot_array));
-
+    PetscCall(VecRestoreArrayRead(rho, &rho_raw));
+    PetscCall(VecRestoreArray(rho_dot, &dot_raw));
     PetscFunctionReturn(PETSC_SUCCESS);
-}
 
-
-// RHS Function
-PetscErrorCode FormRHSFunction(TS ts, PetscReal t, Vec rho, Vec rho_dot, void *ctx) {
-    PetscFunctionBeginUser;
-
-    // Pass Matrix H to ctx
-    Mat H = (Mat)ctx;
-
-    // H is a "Shell", this will call MyMatrixFreeMultiply
-    PetscCall(MatMult(H, rho, rho_dot));
-    
-    PetscFunctionReturn(PETSC_SUCCESS);
 }
 
 int main(int argc, char **argv) {
-    PetscCall(PetscInitialize(&argc, &argv, NULL, "Matrix free Demo - Step 6\n"));
+    PetscCall(PetscInitialize(&argc, &argv, NULL, "Matrix-Free Lindblad\n"));
 
-    // Declare the PETSc Vector pointer
-    Vec rho;
-    //  Create the vector attached to the global MPI network
-    PetscCall(VecCreate(PETSC_COMM_WORLD, &rho));
-    //  Set the size (2-qubit density matrix = 4x4 = 16 elements)
-    PetscInt n_states = 4;
-    PetscInt dim = n_states * n_states; 
-    // Tell PETSc: "Figure out how to split this among CPUs automatically, but the total is 'dim'"
-    PetscCall(VecSetSizes(rho, PETSC_DECIDE, dim));
-    // Allow command-line overrides (Crucial for HPC!)
-    PetscCall(VecSetFromOptions(rho));
-    //  Actually allocate the RAM
-    PetscCall(VecSetUp(rho));
-    // Initial Condition
-    PetscCall(VecSet(rho, 1.0));
-
-
-    // coupling strength for the Hamiltonian
+    // Create AppCtx and set parameters
     AppCtx user;
-    user.coupling_strength = 2; 
+    user.coupling = 2.0; // Coupling strength
+    user.gamma = 0.5;    // Decay rate
 
-    // Create shell matrix for the Hamiltonian
-    Mat H;
-    PetscCall(MatCreateShell(PETSC_COMM_WORLD, PETSC_DECIDE, PETSC_DECIDE, dim, dim, &user, &H));
-    PetscCall(MatShellSetOperation(H, MATOP_MULT, (void (*)(void))MyMatrixFreeMultiply));
+    // Create density matrix vector (16 elements for 4x4 matrix)
+    Vec rho;
+    PetscCall(VecCreate(PETSC_COMM_WORLD, &rho));
+    PetscCall(VecSetSizes(rho, PETSC_DECIDE, 32)); // 16 complex numbers = 32 real numbers
+    PetscCall(VecSetFromOptions(rho));
+    PetscCall(VecSetUp(rho));
 
-    // TS Setup
+    // Set initial state: |10><10| (index 2 has population) - index = 20
+    PetscInt inital_index = 2*(2*4 + 2); // |10><10| element
+    PetscScalar initial_value = 1.0; // Population of 1 in |10><10|
+    PetscCall(VecSetValue(rho, inital_index, initial_value, INSERT_VALUES));
+    PetscCall(VecAssemblyBegin(rho));
+    PetscCall(VecAssemblyEnd(rho));
+    
+
+    // Create TS solver
     TS ts;
     PetscCall(TSCreate(PETSC_COMM_WORLD, &ts));
-    PetscCall(TSSetRHSFunction(ts, NULL, FormRHSFunction, H));
-    PetscCall(TSSetTime(ts, 0.0));
-    PetscCall(TSSetMaxTime(ts, 1.0));
-    PetscCall(TSSetTimeStep(ts, 0.1));
+    PetscCall(TSSetRHSFunction(ts, NULL, FormRHSFunction, &user));
+    PetscCall(TSSetTime(ts, 0.0)); // Initial time
+    PetscCall(TSSetMaxTime(ts, 1.0)); // Final time
+    PetscCall(TSSetTimeStep(ts, 0.01)); // Time step size
+    PetscCall(TSSetExactFinalTime(ts, TS_EXACTFINALTIME_MATCHSTEP)); // Match final time to last step
     PetscCall(TSSetFromOptions(ts));
 
-    // Run Simulation
-    PetscCall(PetscPrintf(PETSC_COMM_WORLD, "Starting ODE Solve...\n"));
-    PetscCall(TSSolve(ts,rho));
+    // Solve the system
+    PetscCall(TSSolve(ts, rho));
 
-    // View the final result
-    PetscCall(PetscPrintf(PETSC_COMM_WORLD, "Final Density Matrix at t=1.0:\n"));
-    PetscCall(VecView(rho, PETSC_VIEWER_STDOUT_WORLD));
+    // Print out the final population of |00> (which is at index 0)
+    const PetscScalar *final_rho;
+    PetscCall(VecGetArrayRead(rho, &final_rho));
+    PetscCall(PetscPrintf(PETSC_COMM_WORLD, "\n--- RESULTS ---\n"));
+    PetscCall(PetscPrintf(PETSC_COMM_WORLD, "cuLindblad rho_00 at t=1.0: %f\n", final_rho[0]));
+    PetscCall(VecRestoreArrayRead(rho, &final_rho));
 
-    //  Clean up memory (No memory leaks allowed!)
+    // Clean up
     PetscCall(TSDestroy(&ts));
     PetscCall(VecDestroy(&rho));
-    PetscCall(MatDestroy(&H));
     PetscCall(PetscFinalize());
     return 0;
 }
