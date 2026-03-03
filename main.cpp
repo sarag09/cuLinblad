@@ -1,11 +1,16 @@
 #include <petsc.h>
 #include <complex>
 #include <pybind11/pybind11.h>
+#include <cutensor.h>
+#include <cuda_runtime.h>
+#include <vector>
 
-// Physics content
+// Physics content and gpu tools
 typedef struct {
     double coupling;
     double gamma;
+    cutensorHandle_t cutensor_handle;
+    std::complex<double>* H_rho; // Hamiltonian in gpu
 } AppCtx;
 
 
@@ -14,60 +19,17 @@ PetscErrorCode FormRHSFunction(TS ts, PetscReal t, Vec rho, Vec rho_dot, void *c
     PetscFunctionBeginUser;
     AppCtx *user = (AppCtx*)ctx;
 
-    // Get raw memory array
-    const PetscScalar *rho_raw;
-    PetscScalar *dot_raw;
-    PetscCall(VecGetArrayRead(rho, &rho_raw));
-    PetscCall(VecGetArray(rho_dot, &dot_raw));
+    PetscCall(VecSet(rho_dot, 0.0)); // set output to zero 
 
-    // Cast raw array into complex no.
-    auto *rho_c = reinterpret_cast<const std::complex<double>*>(rho_raw);
-    auto *dot_c = reinterpret_cast<std::complex<double>*>(dot_raw);
-
-    // Derivative array  = 0
-    for(int i = 0; i < 16; i++) {
-        dot_c[i] = std::complex<double>(0.0, 0.0);
-    }
-
-    // Matrix-Free Hamiltonian: -i [H, rho] = -i(H*rho - rho*H)
-    // H only connects index 1 (|01>) and index 2 (|10>) with a value of 2*coupling
-
-    double h_val = 2.0 * user->coupling;
-    std::complex<double> neg_i(0.0, -1.0);
-
-    for(int j=0; j<4; j++) {
-        // H*rho
-        dot_c[1*4 + j] += neg_i * h_val * rho_c[2*4 + j]; // H[1,2] = 2*coupling
-        dot_c[2*4 + j] += neg_i * h_val * rho_c[1*4 + j]; // H[2,1] = 2*coupling
-
-        // rho*H
-        dot_c[j*4 + 1] -= neg_i * h_val * rho_c[j*4 + 2]; // H[1,2] = 2*coupling
-        dot_c[j*4 + 2] -= neg_i * h_val * rho_c[j*4 + 1]; // H[2,1] = 2*coupling
-    }
-
-    // Matrix-Free Decay: L * rho * L^dagger - 0.5 * {L^dagger * L, rho}
-    // L moves population from index 2 to 0, and from 3 to 1.
-    double gamma = user->gamma;
-
-    // Jump term: L * rho * L^dagger (Adds population to lower states)
-    dot_c[0*4 + 0] += gamma * rho_c[2*4 + 2]; // |10><10| decays to |00><00|
-    dot_c[1*4 + 1] += gamma * rho_c[3*4 + 3]; // |11><11| decays to |01><01|
-
-    // Anti-commutator: -0.5 * (L^dagger L * rho + rho * L^dagger L)
-
-    for(int j=0; j<4; j++) {
-        // L^dagger L * rho (Removes population from upper states)
-        dot_c[2*4 + j] -= 0.5 * gamma * rho_c[2*4 + j]; // |10><10| loses population
-        dot_c[3*4 + j] -= 0.5 * gamma * rho_c[3*4 + j]; // |11><11| loses population
-
-        // rho * L^dagger L (Same as above, but on the right)
-        dot_c[j*4 + 2] -= 0.5 * gamma * rho_c[j*4 + 2]; // |10><10| loses population
-        dot_c[j*4 + 3] -= 0.5 * gamma * rho_c[j*4 + 3]; // |11><11| loses population
-    }
+    // Get gpu memory array
+    const PetscScalar *rho_gpu;
+    PetscScalar *dot_gpu;
+    PetscCall(VecCUDAGetArrayRead(rho, &rho_gpu));
+    PetscCall(VecCUDAGetArray(rho_dot, &dot_gpu));
 
     // Restore arrays
-    PetscCall(VecRestoreArrayRead(rho, &rho_raw));
-    PetscCall(VecRestoreArray(rho_dot, &dot_raw));
+    PetscCall(VecCUDARestoreArrayRead(rho, &rho_gpu));
+    PetscCall(VecCUDARestoreArray(rho_dot, &dot_gpu));
     PetscFunctionReturn(PETSC_SUCCESS);
 
 }
@@ -77,15 +39,36 @@ double run_simulation(double coupling_strength, double gamma_rate) {
     // Initialize PETSc with command line arguments
     PetscCallAbort(PETSC_COMM_WORLD, PetscInitializeNoArguments());
 
+    // Initialize cuTENSOR
+    cutensorHandle_t cutensor_handle;
+    cutensorStatus_t cutensor_status = cutensorCreate(&cutensor_handle);
+
+    if (cutensor_status != CUTENSOR_STATUS_SUCCESS) {
+        PetscPrintf(PETSC_COMM_WORLD, "cuTENSOR initialization failed: %s\n", cutensorGetErrorString(cutensor_status));
+        return -1.0; // Return error code on failure
+    }
+
+    PetscPrintf(PETSC_COMM_WORLD, "cuTENSOR initialized successfully.\n");
+
     // Create AppCtx and set parameters
     AppCtx user;
     user.coupling = coupling_strength; // Coupling strength
     user.gamma = gamma_rate;    // Decay rate
 
+    // Build Hamiltionian on CPU and copy to GPU
+    std::vector<std::complex<double>> H_rho(16, std::complex<double>(0.0, 0.0)); // 4x4 matrix = 16 elements
+    H_rho[1*4 + 2] = std::complex<double>(0.0, 2.0 * coupling_strength); // |10><00| element
+    H_rho[2*4 + 1] = std::complex<double>(0.0, 2.0 * coupling_strength); // |00><10| element
+
+    // Allocate GPU memory for Hamiltonian and copy data
+    cudaMalloc((void**)&user.H_rho, 16 * sizeof(std::complex<double>));
+    cudaMemcpy(user.H_rho, H_rho.data(), 16 * sizeof(std::complex<double>), cudaMemcpyHostToDevice);
+
     // Create density matrix vector (16 elements for 4x4 matrix)
     Vec rho;
     PetscCallAbort(PETSC_COMM_WORLD, VecCreate(PETSC_COMM_WORLD, &rho));
     PetscCallAbort(PETSC_COMM_WORLD, VecSetSizes(rho, PETSC_DECIDE, 32)); // 16 complex numbers = 32 real numbers
+    PetscCallAbort(PETSC_COMM_WORLD, VecSetType(rho, VECCUDA)); // Use GPU vector type
     PetscCallAbort(PETSC_COMM_WORLD, VecSetFromOptions(rho));
     PetscCallAbort(PETSC_COMM_WORLD, VecSetUp(rho));
 
@@ -122,6 +105,8 @@ double run_simulation(double coupling_strength, double gamma_rate) {
     // Clean up
     PetscCallAbort(PETSC_COMM_WORLD, TSDestroy(&ts));
     PetscCallAbort(PETSC_COMM_WORLD, VecDestroy(&rho));
+    cutensorDestroy(cutensor_handle);
+    cudaFree(user.H_rho);
     PetscCallAbort(PETSC_COMM_WORLD, PetscFinalize());
     return final_population;
 }

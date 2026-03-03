@@ -1,5 +1,9 @@
 import sys
 import os
+
+# ignore gpu aware error mrssage
+os.environ["PETSC_OPTIONS"] = "-use_gpu_aware_mpi 0"
+
 import numpy as np
 import qutip as qt
 import matplotlib.pyplot as plt
