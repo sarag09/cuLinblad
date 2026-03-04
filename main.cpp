@@ -1,120 +1,123 @@
 #include <petsc.h>
-#include <complex>
-#include <pybind11/pybind11.h>
-#include <cutensor.h>
+#include <petscts.h>
+#include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <vector>
+#include <complex>
 
-// Physics content and gpu tools
+// Application context to hold parameters 
 typedef struct {
-    double coupling;
-    double gamma;
-    cutensorHandle_t cutensor_handle;
-    std::complex<double>* H_rho; // Hamiltonian in gpu
+    PetscInt N; // Hilbert space dimension 
+    cublasHandle_t cublas_handle;
+    cuDoubleComplex *d_H; // Hamiltonian 
 } AppCtx;
 
 
-// RHS Function - Matrix free Linblad equation
-PetscErrorCode FormRHSFunction(TS ts, PetscReal t, Vec rho, Vec rho_dot, void *ctx) {
-    PetscFunctionBeginUser;
-    AppCtx *user = (AppCtx*)ctx;
+//  Matrix free Linblad equation
+// computes rho_dot = -i * (H * rho - rho * H) using cuBLAS
+PetscErrorCode ComputeLiouvillianAction(Mat L, Vec rho_in, Vec rho_dot_out) {
+    AppCtx *ctx;
+    PetscCall(MatShellGetContext(L, &ctx));
 
-    PetscCall(VecSet(rho_dot, 0.0)); // set output to zero 
+    PetscInt N = ctx->N;
 
-    // Get gpu memory array
-    const PetscScalar *rho_gpu;
-    PetscScalar *dot_gpu;
-    PetscCall(VecCUDAGetArrayRead(rho, &rho_gpu));
-    PetscCall(VecCUDAGetArray(rho_dot, &dot_gpu));
+    // Get raw gpu pointers to the input and output vectors
+    const PetscScalar *d_rho;
+    PetscScalar *d_rho_dot;
+    PetscCall(VecCUDAGetArrayRead(rho_in, &d_rho));
+    PetscCall(VecCUDAGetArrayWrite(rho_dot_out, &d_rho_dot));
 
-    // Restore arrays
-    PetscCall(VecCUDARestoreArrayRead(rho, &rho_gpu));
-    PetscCall(VecCUDARestoreArray(rho_dot, &dot_gpu));
-    PetscFunctionReturn(PETSC_SUCCESS);
+    // Cast to cuDoubleComplex for cuBLAS
+    const cuDoubleComplex *d_rho_cu = (const cuDoubleComplex*)d_rho;
+    cuDoubleComplex *d_rho_dot_cu = (cuDoubleComplex*)d_rho_dot;
 
+    // cuBLAS constants
+    cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0); // -i
+    cuDoubleComplex plus_i = make_cuDoubleComplex(0.0, 1.0); // +i
+    cuDoubleComplex zero = make_cuDoubleComplex(0.0, 0.0);
+    cuDoubleComplex one = make_cuDoubleComplex(1.0, 0.0);
+
+    // Compute -i * H * rho
+    cublasZgemm(ctx->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &minus_i, ctx->d_H, N, d_rho_cu, N, &zero, d_rho_dot_cu, N);
+    // Compute rho_dot += +i * rho * H
+    cublasZgemm(ctx->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &plus_i, d_rho_cu, N, ctx->d_H, N, &one, d_rho_dot_cu, N);
+
+    // Restore the GPU arrays
+    PetscCall(VecCUDARestoreArrayRead(rho_in, &d_rho));
+    PetscCall(VecCUDARestoreArrayWrite(rho_dot_out, &d_rho_dot));
+
+    return PETSC_SUCCESS;
 }
 
-// Replaced int main with callable function
-double run_simulation(double coupling_strength, double gamma_rate) {
-    // Initialize PETSc with command line arguments
-    PetscCallAbort(PETSC_COMM_WORLD, PetscInitializeNoArguments());
 
-    // Initialize cuTENSOR
-    cutensorHandle_t cutensor_handle;
-    cutensorStatus_t cutensor_status = cutensorCreate(&cutensor_handle);
+int main(int argc, char **argv) {
+    PetscCall(PetscInitialize(&argc, &argv, NULL, NULL));
 
-    if (cutensor_status != CUTENSOR_STATUS_SUCCESS) {
-        PetscPrintf(PETSC_COMM_WORLD, "cuTENSOR initialization failed: %s\n", cutensorGetErrorString(cutensor_status));
-        return -1.0; // Return error code on failure
-    }
+    AppCtx ctx;
+    ctx.N = 4; // Example Hilbert space dimension
+    PetscInt N_sq = ctx.N * ctx.N;
 
-    PetscPrintf(PETSC_COMM_WORLD, "cuTENSOR initialized successfully.\n");
+    // Initialize cuBLAS
+    cublasCreate(&ctx.cublas_handle);
 
-    // Create AppCtx and set parameters
-    AppCtx user;
-    user.coupling = coupling_strength; // Coupling strength
-    user.gamma = gamma_rate;    // Decay rate
+    // Build Hamiltonian on cpu and copy to gpu
+    std::vector<std::complex<double>> h_H(N_sq, std::complex<double>(0.0, 0.0));
+    h_H[1*4 + 2] = std::complex<double>(4.0, 0.0); // Example Hamiltonian element
+    h_H[2*4 + 1] = std::complex<double>(4.0, 0.0); 
 
-    // Build Hamiltionian on CPU and copy to GPU
-    std::vector<std::complex<double>> H_rho(16, std::complex<double>(0.0, 0.0)); // 4x4 matrix = 16 elements
-    H_rho[1*4 + 2] = std::complex<double>(0.0, 2.0 * coupling_strength); // |10><00| element
-    H_rho[2*4 + 1] = std::complex<double>(0.0, 2.0 * coupling_strength); // |00><10| element
+    // Allocate and copy Hamiltonian to GPU
+    cudaMalloc((void**)&ctx.d_H, N_sq * sizeof(cuDoubleComplex));
+    cudaMemcpy(ctx.d_H, h_H.data(), N_sq * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
 
-    // Allocate GPU memory for Hamiltonian and copy data
-    cudaMalloc((void**)&user.H_rho, 16 * sizeof(std::complex<double>));
-    cudaMemcpy(user.H_rho, H_rho.data(), 16 * sizeof(std::complex<double>), cudaMemcpyHostToDevice);
+    // Create a shell matrix for the Liouvillian
+    Mat L_shell;
+    PetscCall(MatCreateShell(PETSC_COMM_WORLD, PETSC_DECIDE, PETSC_DECIDE, N_sq, N_sq, &ctx, &L_shell));
+    PetscCall(MatShellSetOperation(L_shell, MATOP_MULT, (void(*)(void))ComputeLiouvillianAction));
 
-    // Create density matrix vector (16 elements for 4x4 matrix)
+    // Setup intial state to |00>
     Vec rho;
-    PetscCallAbort(PETSC_COMM_WORLD, VecCreate(PETSC_COMM_WORLD, &rho));
-    PetscCallAbort(PETSC_COMM_WORLD, VecSetSizes(rho, PETSC_DECIDE, 32)); // 16 complex numbers = 32 real numbers
-    PetscCallAbort(PETSC_COMM_WORLD, VecSetType(rho, VECCUDA)); // Use GPU vector type
-    PetscCallAbort(PETSC_COMM_WORLD, VecSetFromOptions(rho));
-    PetscCallAbort(PETSC_COMM_WORLD, VecSetUp(rho));
+    PetscCall(VecCreate(PETSC_COMM_WORLD, &rho));
+    PetscCall(VecSetSizes(rho, PETSC_DECIDE, N_sq));
+    PetscCall(VecSetType(rho, VECCUDA));
+    PetscCall(VecSetFromOptions(rho));
+    PetscCall(VecSetUp(rho));
 
-    // Set initial state: |10><10| (index 2 has population) - index = 20
-    PetscInt inital_index = 2*(2*4 + 2); // |10><10| element
-    PetscScalar initial_value = 1.0; // Population of 1 in |10><10|
-    PetscCallAbort(PETSC_COMM_WORLD, VecSetValue(rho, inital_index, initial_value, INSERT_VALUES));
-    PetscCallAbort(PETSC_COMM_WORLD, VecAssemblyBegin(rho));
-    PetscCallAbort(PETSC_COMM_WORLD, VecAssemblyEnd(rho));
-    
+    // |00><00| has index 0 in the vectorized density matrix
+    PetscCall(VecSetValue(rho, 0, 1.0, INSERT_VALUES));
+    PetscCall(VecAssemblyBegin(rho));
+    PetscCall(VecAssemblyEnd(rho));
 
-    // Create TS solver
+    // Time-stepping with TS
     TS ts;
-    PetscCallAbort(PETSC_COMM_WORLD, TSCreate(PETSC_COMM_WORLD, &ts));
-    PetscCallAbort(PETSC_COMM_WORLD, TSSetRHSFunction(ts, NULL, FormRHSFunction, &user));
-    PetscCallAbort(PETSC_COMM_WORLD, TSSetTime(ts, 0.0)); // Initial time
-    PetscCallAbort(PETSC_COMM_WORLD, TSSetMaxTime(ts, 1.0)); // Final time
-    PetscCallAbort(PETSC_COMM_WORLD, TSSetTimeStep(ts, 0.01)); // Time step size
-    PetscCallAbort(PETSC_COMM_WORLD, TSSetExactFinalTime(ts, TS_EXACTFINALTIME_MATCHSTEP)); // Match final time to last step
-    PetscCallAbort(PETSC_COMM_WORLD, TSSetFromOptions(ts));
+    PetscCall(TSCreate(PETSC_COMM_WORLD, &ts));
+    PetscCall(TSSetProblemType(ts, TS_LINEAR));
+    PetscCall(TSSetRHSFunction(ts, NULL, TSComputeRHSFunctionLinear, NULL));
+    PetscCall(TSSetRHSJacobian(ts, L_shell, L_shell, TSComputeRHSJacobianConstant, NULL));
+    PetscCall(TSSetTimeStep(ts, 0.01));
+    PetscCall(TSSetMaxTime(ts, 1.0));
+    PetscCall(TSSetExactFinalTime(ts, TS_EXACTFINALTIME_STEPOVER));
+    PetscCall(TSSetSolution(ts, rho));
+    PetscCall(TSSetFromOptions(ts));
 
-    // Hardcode Runge-Kutta since we don't have command line arguments anymore
-    PetscCallAbort(PETSC_COMM_WORLD, TSSetType(ts, TSRK));
+    // Run the time-stepping
+    PetscCall(TSSolve(ts, rho));
 
-    // Solve the system
-    PetscCallAbort(PETSC_COMM_WORLD, TSSolve(ts, rho));
-
-    // Extract the final results
-    const PetscScalar *final_rho;
-    PetscCallAbort(PETSC_COMM_WORLD, VecGetArrayRead(rho, &final_rho));
-    double final_population = final_rho[0]; // Extract population of |00> (index 0)
-    PetscCallAbort(PETSC_COMM_WORLD, VecRestoreArrayRead(rho, &final_rho));
+    // Print the final population of |00><00| ---
+    const PetscScalar *rho_final_host;
+    PetscCall(VecGetArrayRead(rho, &rho_final_host));
+    PetscPrintf(PETSC_COMM_WORLD, "\nSimulation Complete!\n");
+    PetscPrintf(PETSC_COMM_WORLD, "Population of |00> at t=1.0: %g + %gi\n\n", 
+                (double)PetscRealPart(rho_final_host[0]), 
+                (double)PetscImaginaryPart(rho_final_host[0]));
+    PetscCall(VecRestoreArrayRead(rho, &rho_final_host));
 
     // Clean up
-    PetscCallAbort(PETSC_COMM_WORLD, TSDestroy(&ts));
-    PetscCallAbort(PETSC_COMM_WORLD, VecDestroy(&rho));
-    cutensorDestroy(cutensor_handle);
-    cudaFree(user.H_rho);
-    PetscCallAbort(PETSC_COMM_WORLD, PetscFinalize());
-    return final_population;
-}
+    PetscCall(MatDestroy(&L_shell));
+    PetscCall(VecDestroy(&rho));
+    cudaFree(ctx.d_H);
+    PetscCall(cublasDestroy(ctx.cublas_handle));
+    PetscCall(TSDestroy(&ts));
 
-// Pybind11 module definition
-namespace py = pybind11;
-PYBIND11_MODULE(cuLindblad_core, m) {
-    m.doc() = "cuLindblad core C++ engine via PETSc";
-    m.def("run_simulation", &run_simulation, "Run the Lindblad simulation with given coupling strength and gamma rate",
-          py::arg("coupling_strength"), py::arg("gamma_rate"));
+    PetscCall(PetscFinalize());
+    return 0;
 }
