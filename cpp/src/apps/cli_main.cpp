@@ -8,6 +8,7 @@
 #include "culindblad/state_layout.hpp"
 #include "culindblad/solver.hpp"
 #include "culindblad/backend.hpp"
+#include "culindblad/cpu_reference.hpp"
 
 int main()
 {
@@ -133,6 +134,24 @@ int main()
     std::cout << "Input vector size: " << rho_in.size() << std::endl;
     std::cout << "Output vector size: " << rho_out.size() << std::endl;
     std::cout << "First output entry: " << rho_out.at(0) << std::endl;
+
+    std::vector<Complex> A = {
+        Complex{1.0, 0.0}, Complex{2.0, 0.0},
+        Complex{3.0, 0.0}, Complex{4.0, 0.0}
+    };
+
+    std::vector<Complex> B = {
+        Complex{5.0, 0.0}, Complex{6.0, 0.0},
+        Complex{7.0, 0.0}, Complex{8.0, 0.0}
+    };
+
+    std::vector<Complex> C = multiply_square_matrices(A, B, 2);
+
+    std::cout << "2x2 matrix multiply result: ";
+    for (const Complex& x : C) {
+        std::cout << x << " ";
+    }
+    std::cout << std::endl;
 
     return 0;
 }
