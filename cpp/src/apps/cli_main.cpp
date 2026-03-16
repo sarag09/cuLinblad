@@ -5,6 +5,7 @@
 #include "culindblad/operator_term.hpp"
 #include "culindblad/model.hpp"
 #include "culindblad/local_dims.hpp"
+#include "culindblad/state_layout.hpp"
 
 int main()
 {
@@ -59,6 +60,23 @@ int main()
     std::cout << "Model first local dim: " << model.local_dims.at(0) << std::endl;
     std::cout << "Hamiltonian term count: " << model.hamiltonian_terms.size() << std::endl;
     std::cout << "Dissipator term count: " << model.dissipator_terms.size() << std::endl;
+
+    StateLayout layout = make_state_layout(model.local_dims);
+
+    std::cout << "Layout Hilbert dimension: " << layout.hilbert_dim << std::endl;
+    std::cout << "Layout density dimension: " << layout.density_dim << std::endl;
+
+    std::cout << "Ket strides: ";
+    for (Index stride : layout.ket_strides) {
+        std::cout << stride << " ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "Bra strides: ";
+    for (Index stride : layout.bra_strides) {
+        std::cout << stride << " ";
+    }
+    std::cout << std::endl;
 
     return 0;
 }
