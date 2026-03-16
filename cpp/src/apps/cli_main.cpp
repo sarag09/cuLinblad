@@ -4,6 +4,7 @@
 #include "culindblad/types.hpp"
 #include "culindblad/operator_term.hpp"
 #include "culindblad/model.hpp"
+#include "culindblad/local_dims.hpp"
 
 int main()
 {
@@ -41,11 +42,18 @@ int main()
     std::cout << "Matrix rows: " << term.row_dim << std::endl;
     std::cout << "Matrix cols: " << term.col_dim << std::endl;
     std::cout << "Stored matrix entries: " << term.matrix.size() << std::endl;
+
     Model model{
         {3, 3, 3},
         {term},
         {}
     };
+
+    Index subsystems = num_subsystems(model.local_dims);
+    Index hilbert_dim = total_hilbert_dim(model.local_dims);
+
+    std::cout << "Subsystem count (helper): " << subsystems << std::endl;
+    std::cout << "Total Hilbert dimension: " << hilbert_dim << std::endl;
 
     std::cout << "Model subsystem count: " << model.local_dims.size() << std::endl;
     std::cout << "Model first local dim: " << model.local_dims.at(0) << std::endl;
