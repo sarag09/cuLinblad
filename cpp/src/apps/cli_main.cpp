@@ -6,6 +6,8 @@
 #include "culindblad/model.hpp"
 #include "culindblad/local_dims.hpp"
 #include "culindblad/state_layout.hpp"
+#include "culindblad/solver.hpp"
+#include "culindblad/backend.hpp"
 
 int main()
 {
@@ -49,6 +51,16 @@ int main()
         {term},
         {}
     };
+
+    Solver solver = make_solver(model);
+
+    std::cout << "Solver created successfully." << std::endl;
+
+    std::cout << "Solver Hilbert dimension: "
+            << solver.layout.hilbert_dim << std::endl;
+
+    std::cout << "Solver density dimension: "
+            << solver.layout.density_dim << std::endl;
 
     Index subsystems = num_subsystems(model.local_dims);
     Index hilbert_dim = total_hilbert_dim(model.local_dims);
@@ -110,6 +122,17 @@ int main()
               << "ket=" << recovered_density.first
               << ", bra=" << recovered_density.second
               << std::endl;
+
+    std::vector<Complex> rho_in(solver.layout.density_dim, Complex{0.0, 0.0});
+    std::vector<Complex> rho_out;
+
+    rho_in[0] = Complex{1.0, 0.0};
+
+    apply_liouvillian(solver, rho_in, rho_out);
+
+    std::cout << "Input vector size: " << rho_in.size() << std::endl;
+    std::cout << "Output vector size: " << rho_out.size() << std::endl;
+    std::cout << "First output entry: " << rho_out.at(0) << std::endl;
 
     return 0;
 }
