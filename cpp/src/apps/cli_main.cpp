@@ -78,5 +78,38 @@ int main()
     }
     std::cout << std::endl;
 
+    std::vector<Index> example_state = {1,0,2};
+
+    Index flat_index = flatten_ket_index(example_state, layout.ket_strides);
+
+    std::cout << "Example state (1,0,2) flattened index: "
+              << flat_index << std::endl;
+
+    std::vector<Index> recovered =
+    unflatten_ket_index(flat_index, layout.ket_strides, layout.local_dims);
+
+    std::cout << "Recovered state: ";
+
+    for (Index x : recovered) {
+        std::cout << x << " ";
+    }
+
+    std::cout << std::endl;     
+
+    Index example_bra_index = 4;
+    Index density_flat =
+        flatten_density_index(flat_index, example_bra_index, layout.hilbert_dim);
+
+    std::cout << "Example density index (ket=11, bra=4) flattened: "
+              << density_flat << std::endl;
+
+    auto recovered_density =
+        unflatten_density_index(density_flat, layout.hilbert_dim);
+
+    std::cout << "Recovered density indices: "
+              << "ket=" << recovered_density.first
+              << ", bra=" << recovered_density.second
+              << std::endl;
+
     return 0;
 }
