@@ -9,6 +9,7 @@
 #include "culindblad/solver.hpp"
 #include "culindblad/backend.hpp"
 #include "culindblad/cpu_reference.hpp"
+#include "culindblad/liouvillian_terms.hpp"
 
 int main()
 {
@@ -152,6 +153,24 @@ int main()
         std::cout << x << " ";
     }
     std::cout << std::endl;
+
+    std::vector<Complex> H2 = {
+        Complex{1.0, 0.0}, Complex{0.0, 0.0},
+        Complex{0.0, 0.0}, Complex{-1.0, 0.0}
+    };
+
+    std::vector<Complex> rho2 = {
+        Complex{0.0, 0.0}, Complex{1.0, 0.0},
+        Complex{1.0, 0.0}, Complex{0.0, 0.0}
+    };
+
+    std::vector<Complex> comm = apply_hamiltonian_commutator(H2, rho2, 2);
+
+    std::cout << "Hamiltonian commutator result: ";
+    for (const Complex& x : comm) {
+        std::cout << x << " ";
+    }
+    std::cout << std::endl;    
 
     return 0;
 }
