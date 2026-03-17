@@ -25,6 +25,7 @@ add_executable(run_sim
     cpp/src/backends/cpu/apply_terms_cpu.cpp
     cpp/src/backends/cpu/backend_cpu_reference.cpp
     cpp/src/core/liouvillian_terms.cpp
+    cpp/src/petsc/petsc_apply.cpp
 )
 
 target_include_directories(run_sim PRIVATE
