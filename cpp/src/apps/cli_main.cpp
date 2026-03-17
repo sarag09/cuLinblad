@@ -10,6 +10,7 @@
 #include "culindblad/petsc_ts_smoke.hpp"
 #include "culindblad/solver.hpp"
 #include "culindblad/types.hpp"
+#include "culindblad/local_apply.hpp"
 
 int main(int argc, char** argv)
 {
@@ -95,27 +96,39 @@ int main(int argc, char** argv)
     std::vector<Complex> rho_in(solver.layout.density_dim, Complex{0.0, 0.0});
     std::vector<Complex> rho_out(solver.layout.density_dim, Complex{0.0, 0.0});
 
-    rho_in[0 * solver.layout.hilbert_dim + 1] = Complex{1.0, 0.0};
+    rho_in[0 * solver.layout.hilbert_dim + 9] = Complex{1.0, 0.0};
 
     ConstStateBuffer in_buf{rho_in.data(), rho_in.size()};
     StateBuffer out_buf{rho_out.data(), rho_out.size()};
 
     apply_liouvillian(solver, in_buf, out_buf);
 
-    std::cout << "Liouvillian output entry (0,1): "
-              << rho_out.at(0 * solver.layout.hilbert_dim + 1) << std::endl;
+    std::cout << "Liouvillian output entry (0,9): "
+            << rho_out.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
     std::cout << "Liouvillian output entry (0,0): "
-              << rho_out.at(0 * solver.layout.hilbert_dim + 0) << std::endl;
+            << rho_out.at(0 * solver.layout.hilbert_dim + 0) << std::endl;
+
+    std::vector<Complex> local_left =
+        apply_one_site_operator_left(z_like, 3, 0, local_dims, in_buf);
+
+    std::cout << "Local left-action entry (0,9): "
+            << local_left.at(0 * solver.layout.hilbert_dim + 9) << std::endl;    
+            
+    std::vector<Complex> local_right =
+    apply_one_site_operator_right(z_like, 3, 0, local_dims, in_buf);
+
+    std::cout << "Local right-action entry (0,9): "
+              << local_right.at(0 * solver.layout.hilbert_dim + 9) << std::endl;        
 
     Complex ts_value{0.0, 0.0};
-    ierr = run_ts_smoke_test(solver, 0, 1, ts_value);
+    ierr = run_ts_smoke_test(solver, 0, 9, ts_value);
     if (ierr != 0) {
         std::cerr << "run_ts_smoke_test failed." << std::endl;
         PetscFinalize();
         return 1;
     }
 
-    std::cout << "TS evolved entry (0,1): " << ts_value << std::endl;
+    std::cout << "TS evolved entry (0,9): " << ts_value << std::endl;
 
     PetscFinalize();
     return 0;
