@@ -5,6 +5,7 @@
 #include "culindblad/local_dims.hpp"
 #include "culindblad/state_layout.hpp"
 #include "culindblad/types.hpp"
+#include "culindblad/local_operator_utils.hpp"
 
 namespace culindblad {
 
@@ -178,6 +179,50 @@ std::vector<Complex> apply_one_site_commutator(
 
     for (Index idx = 0; idx < left.size(); ++idx) {
         result[idx] = minus_i * (left[idx] - right[idx]);
+    }
+
+    return result;
+}
+
+std::vector<Complex> apply_one_site_dissipator(
+    const std::vector<Complex>& local_op,
+    Index local_dim,
+    Index target_site,
+    const std::vector<Index>& local_dims,
+    ConstStateBuffer rho)
+{
+    const std::vector<Complex> local_op_dag =
+        local_conjugate_transpose(local_op, local_dim);
+
+    const std::vector<Complex> local_op_dag_op =
+        local_multiply_square(local_op_dag, local_op, local_dim);
+
+    const std::vector<Complex> left_once =
+        apply_one_site_operator_left(local_op, local_dim, target_site, local_dims, rho);
+
+    ConstStateBuffer left_once_buf{left_once.data(), left_once.size()};
+
+    const std::vector<Complex> jump =
+        apply_one_site_operator_right(
+            local_op_dag, local_dim, target_site, local_dims, left_once_buf);
+
+    const std::vector<Complex> left =
+        apply_one_site_operator_left(
+            local_op_dag_op, local_dim, target_site, local_dims, rho);
+
+    const std::vector<Complex> right =
+        apply_one_site_operator_right(
+            local_op_dag_op, local_dim, target_site, local_dims, rho);
+
+    if (jump.size() != left.size() || jump.size() != right.size()) {
+        throw std::runtime_error("apply_one_site_dissipator: term sizes do not match");
+    }
+
+    std::vector<Complex> result(jump.size(), Complex{0.0, 0.0});
+    const Complex half{0.5, 0.0};
+
+    for (Index idx = 0; idx < jump.size(); ++idx) {
+        result[idx] = jump[idx] - half * (left[idx] + right[idx]);
     }
 
     return result;

@@ -153,6 +153,29 @@ int main(int argc, char** argv)
     std::cout << "Local L^dag L entry (1,1): "
               << lowering_norm.at(1 * 3 + 1) << std::endl;
 
+    std::vector<Complex> local_diss =
+        apply_one_site_dissipator(lowering, 3, 0, local_dims, in_buf);
+
+    std::cout << "Local dissipator entry (0,9): "
+              << local_diss.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
+
+    std::vector<Complex> embedded_L =
+        embed_one_site_operator(lowering, 3, 0, local_dims);
+
+    std::vector<Complex> dense_diss =
+        apply_dissipator(
+            embedded_L,
+            rho_compare_buf,
+            solver.layout.hilbert_dim);
+
+    std::cout << "Embedded dense dissipator entry (0,9): "
+              << dense_diss.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
+
+    std::cout << "Difference local-vs-dense dissipator at (0,9): "
+              << (local_diss.at(0 * solver.layout.hilbert_dim + 9)
+                  - dense_diss.at(0 * solver.layout.hilbert_dim + 9))
+              << std::endl;              
+
     Complex ts_value{0.0, 0.0};
     ierr = run_ts_smoke_test(solver, 0, 9, ts_value);
     if (ierr != 0) {

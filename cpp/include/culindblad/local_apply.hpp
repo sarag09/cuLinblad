@@ -28,4 +28,11 @@ std::vector<Complex> apply_one_site_commutator(
     const std::vector<Index>& local_dims,
     ConstStateBuffer rho);
 
+std::vector<Complex> apply_one_site_dissipator(
+    const std::vector<Complex>& local_op,
+    Index local_dim,
+    Index target_site,
+    const std::vector<Index>& local_dims,
+    ConstStateBuffer rho);
+
 } // namespace culindblad
