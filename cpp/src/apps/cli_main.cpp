@@ -44,37 +44,31 @@ int main(int argc, char** argv)
         Complex{0.0, 0.0}, Complex{0.0, 0.0}, Complex{0.0, 0.0}
     };
 
-    std::vector<Complex> full_H1 = embed_one_site_operator(z_like, 3, 0, local_dims);
-    std::vector<Complex> full_H2 = embed_one_site_operator(half_z_like, 3, 0, local_dims);
-    std::vector<Complex> full_L  = embed_one_site_operator(lowering, 3, 0, local_dims);
-
-    const Index hilbert_dim = 27;
-
     OperatorTerm term1{
         TermKind::Hamiltonian,
         "q1_z_like",
         {0},
-        full_H1,
-        hilbert_dim,
-        hilbert_dim
+        z_like,
+        3,
+        3
     };
 
     OperatorTerm term2{
         TermKind::Hamiltonian,
         "q1_half_z_like",
         {0},
-        full_H2,
-        hilbert_dim,
-        hilbert_dim
+        half_z_like,
+        3,
+        3
     };
 
     OperatorTerm dissipator_term{
         TermKind::Dissipator,
         "q1_lowering",
         {0},
-        full_L,
-        hilbert_dim,
-        hilbert_dim
+        lowering,
+        3,
+        3
     };
 
     Model model{
