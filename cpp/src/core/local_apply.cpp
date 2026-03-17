@@ -156,4 +156,31 @@ std::vector<Complex> apply_one_site_operator_right(
     return result;
 }
 
+std::vector<Complex> apply_one_site_commutator(
+    const std::vector<Complex>& local_op,
+    Index local_dim,
+    Index target_site,
+    const std::vector<Index>& local_dims,
+    ConstStateBuffer rho)
+{
+    const std::vector<Complex> left =
+        apply_one_site_operator_left(local_op, local_dim, target_site, local_dims, rho);
+
+    const std::vector<Complex> right =
+        apply_one_site_operator_right(local_op, local_dim, target_site, local_dims, rho);
+
+    if (left.size() != right.size()) {
+        throw std::runtime_error("apply_one_site_commutator: left/right sizes do not match");
+    }
+
+    std::vector<Complex> result(left.size(), Complex{0.0, 0.0});
+    const Complex minus_i{0.0, -1.0};
+
+    for (Index idx = 0; idx < left.size(); ++idx) {
+        result[idx] = minus_i * (left[idx] - right[idx]);
+    }
+
+    return result;
+}
+
 } // namespace culindblad

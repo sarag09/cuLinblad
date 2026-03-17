@@ -11,6 +11,7 @@
 #include "culindblad/solver.hpp"
 #include "culindblad/types.hpp"
 #include "culindblad/local_apply.hpp"
+#include "culindblad/liouvillian_terms.hpp"
 
 int main(int argc, char** argv)
 {
@@ -118,7 +119,32 @@ int main(int argc, char** argv)
     apply_one_site_operator_right(z_like, 3, 0, local_dims, in_buf);
 
     std::cout << "Local right-action entry (0,9): "
-              << local_right.at(0 * solver.layout.hilbert_dim + 9) << std::endl;        
+              << local_right.at(0 * solver.layout.hilbert_dim + 9) << std::endl;  
+              
+    std::vector<Complex> local_comm =
+        apply_one_site_commutator(z_like, 3, 0, local_dims, in_buf);
+
+    std::cout << "Local commutator entry (0,9): "
+              << local_comm.at(0 * solver.layout.hilbert_dim + 9) << std::endl;   
+              
+    std::vector<Complex> embedded_z =
+        embed_one_site_operator(z_like, 3, 0, local_dims);
+
+    ConstStateBuffer rho_compare_buf{rho_in.data(), rho_in.size()};
+
+    std::vector<Complex> dense_comm =
+        apply_hamiltonian_commutator(
+            embedded_z,
+            rho_compare_buf,
+            solver.layout.hilbert_dim);
+
+    std::cout << "Embedded dense commutator entry (0,9): "
+              << dense_comm.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
+
+    std::cout << "Difference local-vs-dense at (0,9): "
+              << (local_comm.at(0 * solver.layout.hilbert_dim + 9)
+                  - dense_comm.at(0 * solver.layout.hilbert_dim + 9))
+              << std::endl;              
 
     Complex ts_value{0.0, 0.0};
     ierr = run_ts_smoke_test(solver, 0, 9, ts_value);
