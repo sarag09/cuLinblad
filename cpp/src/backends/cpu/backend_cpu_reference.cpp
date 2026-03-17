@@ -11,14 +11,16 @@ namespace culindblad {
 
 void apply_liouvillian_cpu_reference(
     const Solver& solver,
-    const std::vector<Complex>& rho_in,
-    std::vector<Complex>& rho_out)
+    ConstStateBuffer rho_in,
+    StateBuffer rho_out)
 {
-    if (rho_in.size() != solver.layout.density_dim) {
+    if (rho_in.size != solver.layout.density_dim) {
         throw std::runtime_error("apply_liouvillian_cpu_reference: rho_in has wrong size");
     }
 
-    rho_out.assign(solver.layout.density_dim, Complex{0.0, 0.0});
+    for (Index i = 0; i < rho_out.size; ++i) {
+    rho_out[i] = Complex{0.0, 0.0};
+    }
 
     for (const OperatorTerm& H_term : solver.model.hamiltonian_terms) {
         if (H_term.row_dim != solver.layout.hilbert_dim ||
@@ -59,8 +61,8 @@ void apply_liouvillian_cpu_reference(
 
 void apply_liouvillian(
     const Solver& solver,
-    const std::vector<Complex>& rho_in,
-    std::vector<Complex>& rho_out)
+    ConstStateBuffer rho_in,
+    StateBuffer rho_out)
 {
     apply_liouvillian_cpu_reference(solver, rho_in, rho_out);
 }

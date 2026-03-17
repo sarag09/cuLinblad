@@ -28,19 +28,22 @@ std::vector<Complex> conjugate_transpose(
 
 std::vector<Complex> apply_hamiltonian_commutator(
     const std::vector<Complex>& H,
-    const std::vector<Complex>& rho,
+    ConstStateBuffer rho,
     Index dim)
 {
     if (H.size() != dim * dim) {
         throw std::runtime_error("apply_hamiltonian_commutator: H has wrong size");
     }
 
-    if (rho.size() != dim * dim) {
+    if (rho.size != dim * dim) {
         throw std::runtime_error("apply_hamiltonian_commutator: rho has wrong size");
     }
 
-    const std::vector<Complex> H_rho = multiply_square_matrices(H, rho, dim);
-    const std::vector<Complex> rho_H = multiply_square_matrices(rho, H, dim);
+    ConstStateBuffer H_buf{H.data(), H.size()};
+    ConstStateBuffer rho_buf{rho.data, rho.size};
+
+    const std::vector<Complex> H_rho = multiply_square_matrices(H_buf, rho_buf, dim);
+    const std::vector<Complex> rho_H = multiply_square_matrices(rho_buf, H_buf, dim);
 
     std::vector<Complex> result(dim * dim, Complex{0.0, 0.0});
     const Complex minus_i{0.0, -1.0};
@@ -54,24 +57,33 @@ std::vector<Complex> apply_hamiltonian_commutator(
 
 std::vector<Complex> apply_dissipator(
     const std::vector<Complex>& L,
-    const std::vector<Complex>& rho,
+    ConstStateBuffer rho,
     Index dim)
 {
     if (L.size() != dim * dim) {
         throw std::runtime_error("apply_dissipator: L has wrong size");
     }
 
-    if (rho.size() != dim * dim) {
+    if (rho.size != dim * dim) {
         throw std::runtime_error("apply_dissipator: rho has wrong size");
     }
 
-    const std::vector<Complex> L_dag = conjugate_transpose(L, dim);
-    const std::vector<Complex> L_rho = multiply_square_matrices(L, rho, dim);
-    const std::vector<Complex> jump = multiply_square_matrices(L_rho, L_dag, dim);
+    ConstStateBuffer L_buf{L.data(), L.size()};
+    ConstStateBuffer rho_buf{rho.data, rho.size};
 
-    const std::vector<Complex> L_dag_L = multiply_square_matrices(L_dag, L, dim);
-    const std::vector<Complex> left = multiply_square_matrices(L_dag_L, rho, dim);
-    const std::vector<Complex> right = multiply_square_matrices(rho, L_dag_L, dim);
+    const std::vector<Complex> L_dag = conjugate_transpose(L, dim);
+    ConstStateBuffer L_dag_buf{L_dag.data(), L_dag.size()};
+
+    const std::vector<Complex> L_rho = multiply_square_matrices(L_buf, rho_buf, dim);
+    ConstStateBuffer L_rho_buf{L_rho.data(), L_rho.size()};
+
+    const std::vector<Complex> jump = multiply_square_matrices(L_rho_buf, L_dag_buf, dim);
+
+    const std::vector<Complex> L_dag_L = multiply_square_matrices(L_dag_buf, L_buf, dim);
+    ConstStateBuffer L_dag_L_buf{L_dag_L.data(), L_dag_L.size()};
+
+    const std::vector<Complex> left = multiply_square_matrices(L_dag_L_buf, rho_buf, dim);
+    const std::vector<Complex> right = multiply_square_matrices(rho_buf, L_dag_L_buf, dim);
 
     std::vector<Complex> result(dim * dim, Complex{0.0, 0.0});
     const Complex half{0.5, 0.0};

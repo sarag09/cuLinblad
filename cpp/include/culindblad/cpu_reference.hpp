@@ -2,13 +2,14 @@
 
 #include <vector>
 
+#include "culindblad/state_buffer.hpp"
 #include "culindblad/types.hpp"
 
 namespace culindblad {
 
 std::vector<Complex> multiply_square_matrices(
-    const std::vector<Complex>& A,
-    const std::vector<Complex>& B,
+    ConstStateBuffer A,
+    ConstStateBuffer B,
     Index dim);
 
 } // namespace culindblad

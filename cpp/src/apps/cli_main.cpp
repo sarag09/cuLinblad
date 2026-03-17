@@ -71,11 +71,14 @@ int main()
 
     // Build a test density matrix with only rho_(0,1) = 1.
     std::vector<Complex> rho_in(solver.layout.density_dim, Complex{0.0, 0.0});
-    std::vector<Complex> rho_out;
+    std::vector<Complex> rho_out(solver.layout.density_dim, Complex{0.0, 0.0});
 
     rho_in[0 * solver.layout.hilbert_dim + 1] = Complex{1.0, 0.0};
 
-    apply_liouvillian(solver, rho_in, rho_out);
+    ConstStateBuffer in_buf{rho_in.data(), rho_in.size()};
+    StateBuffer out_buf{rho_out.data(), rho_out.size()};
+
+    apply_liouvillian(solver, in_buf, out_buf);
 
     std::cout << "Input vector size: " << rho_in.size() << std::endl;
     std::cout << "Output vector size: " << rho_out.size() << std::endl;

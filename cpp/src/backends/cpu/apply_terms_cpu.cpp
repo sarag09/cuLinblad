@@ -1,20 +1,21 @@
 #include <stdexcept>
 #include <vector>
 
+#include "culindblad/cpu_reference.hpp"
 #include "culindblad/types.hpp"
 
 namespace culindblad {
 
 std::vector<Complex> multiply_square_matrices(
-    const std::vector<Complex>& A,
-    const std::vector<Complex>& B,
+    ConstStateBuffer A,
+    ConstStateBuffer B,
     Index dim)
 {
-    if (A.size() != dim * dim) {
+    if (A.size != dim * dim) {
         throw std::runtime_error("multiply_square_matrices: A has wrong size");
     }
 
-    if (B.size() != dim * dim) {
+    if (B.size != dim * dim) {
         throw std::runtime_error("multiply_square_matrices: B has wrong size");
     }
 

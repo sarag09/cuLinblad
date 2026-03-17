@@ -1,19 +1,20 @@
 #pragma once
 
-#include <vector>
-
+#include "culindblad/state_buffer.hpp"
 #include "culindblad/types.hpp"
+
+#include <vector>
 
 namespace culindblad {
 
 std::vector<Complex> apply_hamiltonian_commutator(
     const std::vector<Complex>& H,
-    const std::vector<Complex>& rho,
+    ConstStateBuffer rho,
     Index dim);
 
 std::vector<Complex> apply_dissipator(
     const std::vector<Complex>& L,
-    const std::vector<Complex>& rho,
-    Index dim);    
+    ConstStateBuffer rho,
+    Index dim);
 
 } // namespace culindblad
