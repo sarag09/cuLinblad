@@ -39,10 +39,22 @@ int main()
         27
     };
 
+    std::vector<Complex> full_L(27 * 27, Complex{0.0, 0.0});
+    full_L[0 * 27 + 1] = Complex{1.0, 0.0};
+
+    OperatorTerm dissipator_term{
+        TermKind::Dissipator,
+        "example_full_dissipator",
+        {0, 1, 2},
+        full_L,
+        27,
+        27
+    };
+
     Model model{
         {3, 3, 3},
         {term1, term2},
-        {}
+        {dissipator_term}
     };
 
     Solver solver = make_solver(model);
@@ -69,24 +81,8 @@ int main()
     std::cout << "Output vector size: " << rho_out.size() << std::endl;
     std::cout << "Liouvillian output entry (0,1): "
               << rho_out.at(0 * solver.layout.hilbert_dim + 1) << std::endl;
-
-    std::vector<Complex> L2 = {
-        Complex{0.0, 0.0}, Complex{1.0, 0.0},
-        Complex{0.0, 0.0}, Complex{0.0, 0.0}
-    };
-
-    std::vector<Complex> rho_diss = {
-        Complex{0.0, 0.0}, Complex{0.0, 0.0},
-        Complex{0.0, 0.0}, Complex{1.0, 0.0}
-    };
-
-    std::vector<Complex> diss = apply_dissipator(L2, rho_diss, 2);
-
-    std::cout << "Dissipator result: ";
-    for (const Complex& x : diss) {
-        std::cout << x << " ";
-    }
-    std::cout << std::endl;              
+    std::cout << "Liouvillian output entry (0,0): "
+              << rho_out.at(0 * solver.layout.hilbert_dim + 0) << std::endl;                        
 
     return 0;
 }
