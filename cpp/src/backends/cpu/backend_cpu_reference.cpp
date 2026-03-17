@@ -18,6 +18,10 @@ void apply_liouvillian_cpu_reference(
         throw std::runtime_error("apply_liouvillian_cpu_reference: rho_in has wrong size");
     }
 
+    if (rho_out.size != solver.layout.density_dim) {
+        throw std::runtime_error("apply_liouvillian_cpu_reference: rho_out has wrong size");
+    }
+        
     for (Index i = 0; i < rho_out.size; ++i) {
     rho_out[i] = Complex{0.0, 0.0};
     }

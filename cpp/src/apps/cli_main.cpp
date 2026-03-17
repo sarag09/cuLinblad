@@ -1,5 +1,6 @@
 #include <iostream>
 #include <vector>
+#include <petscvec.h>
 
 #include "culindblad/backend.hpp"
 #include "culindblad/model.hpp"
@@ -9,9 +10,14 @@
 #include "culindblad/state_layout.hpp"
 #include "culindblad/types.hpp"
 
-int main()
+int main(int argc, char** argv)
 {
     using namespace culindblad;
+    PetscErrorCode ierr = PetscInitialize(&argc, &argv, nullptr, nullptr);
+    if (ierr != 0) {
+        std::cerr << "PetscInitialize failed." << std::endl;
+        return 1;
+    }
 
     std::vector<Complex> full_H1(27 * 27, Complex{0.0, 0.0});
     full_H1[0 * 27 + 0] = Complex{1.0, 0.0};
@@ -85,7 +91,97 @@ int main()
     std::cout << "Liouvillian output entry (0,1): "
               << rho_out.at(0 * solver.layout.hilbert_dim + 1) << std::endl;
     std::cout << "Liouvillian output entry (0,0): "
-              << rho_out.at(0 * solver.layout.hilbert_dim + 0) << std::endl;                        
+              << rho_out.at(0 * solver.layout.hilbert_dim + 0) << std::endl;  
+              
+    Vec x = nullptr;
+    Vec y = nullptr;
+
+    ierr = VecCreateSeq(PETSC_COMM_SELF, solver.layout.density_dim, &x);
+    if (ierr != 0) {
+        std::cerr << "VecCreateSeq for x failed." << std::endl;
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = VecCreateSeq(PETSC_COMM_SELF, solver.layout.density_dim, &y);
+    if (ierr != 0) {
+        std::cerr << "VecCreateSeq for y failed." << std::endl;
+        VecDestroy(&x);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = VecSet(x, 0.0);
+    if (ierr != 0) {
+        std::cerr << "VecSet failed." << std::endl;
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = VecSet(y, 0.0);
+    if (ierr != 0) {
+        std::cerr << "VecSet failed." << std::endl;
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    PetscScalar* x_ptr = nullptr;
+    PetscScalar* y_ptr = nullptr;
+
+    ierr = VecGetArray(x, &x_ptr);
+    if (ierr != 0) {
+        std::cerr << "VecGetArray for x failed." << std::endl;
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = VecGetArray(y, &y_ptr);
+    if (ierr != 0) {
+        std::cerr << "VecGetArray for y failed." << std::endl;
+        VecRestoreArray(x, &x_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    x_ptr[0 * solver.layout.hilbert_dim + 1] = PetscScalar(1.0);
+
+    ConstStateBuffer petsc_in{
+        reinterpret_cast<const Complex*>(x_ptr),
+        solver.layout.density_dim
+    };
+
+    StateBuffer petsc_out{
+        reinterpret_cast<Complex*>(y_ptr),
+        solver.layout.density_dim
+    };
+
+    apply_liouvillian(solver, petsc_in, petsc_out);
+
+    std::cout << "PETSc Vec output entry (0,1): "
+              << petsc_out[0 * solver.layout.hilbert_dim + 1] << std::endl;
+
+    ierr = VecRestoreArray(x, &x_ptr);
+    if (ierr != 0) {
+        std::cerr << "VecRestoreArray for x failed." << std::endl;
+    }
+
+    ierr = VecRestoreArray(y, &y_ptr);
+    if (ierr != 0) {
+        std::cerr << "VecRestoreArray for y failed." << std::endl;
+    }
+
+    VecDestroy(&x);
+    VecDestroy(&y);              
+              
+    PetscFinalize();          
 
     return 0;
 }
