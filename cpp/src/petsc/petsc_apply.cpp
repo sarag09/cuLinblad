@@ -20,15 +20,8 @@ PetscErrorCode apply_liouvillian_vec(
     PetscInt x_size = 0;
     PetscInt y_size = 0;
 
-    ierr = VecGetSize(x, &x_size);
-    if (ierr != 0) {
-        return ierr;
-    }
-
-    ierr = VecGetSize(y, &y_size);
-    if (ierr != 0) {
-        return ierr;
-    }
+    PetscCall(VecGetSize(x, &x_size));
+    PetscCall(VecGetSize(y, &y_size));
 
     if (static_cast<Index>(x_size) != solver.layout.density_dim) {
         std::cerr << "apply_liouvillian_vec: x has wrong size." << std::endl;
@@ -43,10 +36,7 @@ PetscErrorCode apply_liouvillian_vec(
     const PetscScalar* x_ptr = nullptr;
     PetscScalar* y_ptr = nullptr;
 
-    ierr = VecGetArrayRead(x, &x_ptr);
-    if (ierr != 0) {
-        return ierr;
-    }
+    PetscCall(VecGetArrayRead(x, &x_ptr));
 
     ierr = VecGetArray(y, &y_ptr);
     if (ierr != 0) {
@@ -79,10 +69,7 @@ PetscErrorCode apply_liouvillian_vec(
         return ierr;
     }
 
-    ierr = VecRestoreArray(y, &y_ptr);
-    if (ierr != 0) {
-        return ierr;
-    }
+    PetscCall(VecRestoreArray(y, &y_ptr));
 
     return 0;
 }

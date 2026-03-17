@@ -11,6 +11,7 @@
 #include "culindblad/types.hpp"
 #include "culindblad/petsc_apply.hpp"
 #include "culindblad/petsc_shell.hpp"
+#include "culindblad/petsc_ts_rhs.hpp"
 
 int main(int argc, char** argv)
 {
@@ -275,7 +276,199 @@ int main(int argc, char** argv)
     VecDestroy(&y_shell);    
 
     VecDestroy(&x);
-    VecDestroy(&y);            
+    VecDestroy(&y); 
+    
+    Vec x_ts = nullptr;
+    TS ts = nullptr;
+
+    ierr = VecCreateSeq(PETSC_COMM_SELF, solver.layout.density_dim, &x_ts);
+    if (ierr != 0) {
+        std::cerr << "VecCreateSeq for x_ts failed." << std::endl;
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = VecSet(x_ts, 0.0);
+    if (ierr != 0) {
+        std::cerr << "VecSet for x_ts failed." << std::endl;
+        VecDestroy(&x_ts);
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    PetscScalar* x_ts_ptr = nullptr;
+    ierr = VecGetArray(x_ts, &x_ts_ptr);
+    if (ierr != 0) {
+        std::cerr << "VecGetArray for x_ts failed." << std::endl;
+        VecDestroy(&x_ts);
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    x_ts_ptr[0 * solver.layout.hilbert_dim + 1] = PetscScalar(1.0);
+
+    ierr = VecRestoreArray(x_ts, &x_ts_ptr);
+    if (ierr != 0) {
+        std::cerr << "VecRestoreArray for x_ts failed." << std::endl;
+        VecDestroy(&x_ts);
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = TSCreate(PETSC_COMM_SELF, &ts);
+    if (ierr != 0) {
+        std::cerr << "TSCreate failed." << std::endl;
+        VecDestroy(&x_ts);
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = TSSetType(ts, TSRK);
+    if (ierr != 0) {
+        std::cerr << "TSSetType failed." << std::endl;
+        TSDestroy(&ts);
+        VecDestroy(&x_ts);
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = TSSetRHSFunction(ts, nullptr, ts_rhs_function, &solver);
+    if (ierr != 0) {
+        std::cerr << "TSSetRHSFunction failed." << std::endl;
+        TSDestroy(&ts);
+        VecDestroy(&x_ts);
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = TSSetTime(ts, 0.0);
+    if (ierr != 0) {
+        std::cerr << "TSSetTime failed." << std::endl;
+        TSDestroy(&ts);
+        VecDestroy(&x_ts);
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = TSSetTimeStep(ts, 1.0e-3);
+    if (ierr != 0) {
+        std::cerr << "TSSetTimeStep failed." << std::endl;
+        TSDestroy(&ts);
+        VecDestroy(&x_ts);
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = TSSetMaxSteps(ts, 1);
+    if (ierr != 0) {
+        std::cerr << "TSSetMaxSteps failed." << std::endl;
+        TSDestroy(&ts);
+        VecDestroy(&x_ts);
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = TSSetMaxTime(ts, 1.0e-3);
+    if (ierr != 0) {
+        std::cerr << "TSSetMaxTime failed." << std::endl;
+        TSDestroy(&ts);
+        VecDestroy(&x_ts);
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = TSSetExactFinalTime(ts, TS_EXACTFINALTIME_MATCHSTEP);
+    if (ierr != 0) {
+        std::cerr << "TSSetExactFinalTime failed." << std::endl;
+        TSDestroy(&ts);
+        VecDestroy(&x_ts);
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = TSSetFromOptions(ts);
+    if (ierr != 0) {
+        std::cerr << "TSSetFromOptions failed." << std::endl;
+        TSDestroy(&ts);
+        VecDestroy(&x_ts);
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = TSSolve(ts, x_ts);
+    if (ierr != 0) {
+        std::cerr << "TSSolve failed." << std::endl;
+        TSDestroy(&ts);
+        VecDestroy(&x_ts);
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = VecGetArray(x_ts, &x_ts_ptr);
+    if (ierr != 0) {
+        std::cerr << "VecGetArray for evolved x_ts failed." << std::endl;
+        TSDestroy(&ts);
+        VecDestroy(&x_ts);
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    std::cout << "TS evolved entry (0,1): "
+              << reinterpret_cast<Complex*>(x_ts_ptr)[0 * solver.layout.hilbert_dim + 1]
+              << std::endl;
+
+    ierr = VecRestoreArray(x_ts, &x_ts_ptr);
+    if (ierr != 0) {
+        std::cerr << "VecRestoreArray for evolved x_ts failed." << std::endl;
+    }
+
+    TSDestroy(&ts);
+    VecDestroy(&x_ts);    
               
     PetscFinalize();          
 
