@@ -22,23 +22,25 @@ inline void apply_liouvillian(
         throw std::runtime_error("apply_liouvillian: dissipators are not implemented yet");
     }
 
-    if (solver.model.hamiltonian_terms.size() != 1) {
-        throw std::runtime_error(
-            "apply_liouvillian: expected exactly one Hamiltonian term in this prototype");
+    rho_out.assign(solver.layout.density_dim, Complex{0.0, 0.0});
+
+    for (const OperatorTerm& H_term : solver.model.hamiltonian_terms) {
+        if (H_term.row_dim != solver.layout.hilbert_dim ||
+            H_term.col_dim != solver.layout.hilbert_dim) {
+            throw std::runtime_error(
+                "apply_liouvillian: Hamiltonian term must be a full-system dense operator");
+        }
+
+        const std::vector<Complex> contribution =
+            apply_hamiltonian_commutator(
+                H_term.matrix,
+                rho_in,
+                solver.layout.hilbert_dim);
+
+        for (Index idx = 0; idx < solver.layout.density_dim; ++idx) {
+            rho_out[idx] += contribution[idx];
+        }
     }
-
-    const OperatorTerm& H_term = solver.model.hamiltonian_terms.at(0);
-
-    if (H_term.row_dim != solver.layout.hilbert_dim ||
-        H_term.col_dim != solver.layout.hilbert_dim) {
-        throw std::runtime_error(
-            "apply_liouvillian: Hamiltonian term must be a full-system dense operator");
-    }
-
-    rho_out = apply_hamiltonian_commutator(
-        H_term.matrix,
-        rho_in,
-        solver.layout.hilbert_dim);
 }
 
 } // namespace culindblad

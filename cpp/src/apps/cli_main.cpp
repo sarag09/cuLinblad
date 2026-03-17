@@ -12,24 +12,35 @@ int main()
 {
     using namespace culindblad;
 
-    // Full-system example model with subsystem ordering (q1, q2, c1),
-    // each subsystem treated as a qutrit, so total Hilbert dimension is 3^3 = 27.
-    std::vector<Complex> full_H(27 * 27, Complex{0.0, 0.0});
-    full_H[0 * 27 + 0] = Complex{1.0, 0.0};
-    full_H[1 * 27 + 1] = Complex{-1.0, 0.0};
+    std::vector<Complex> full_H1(27 * 27, Complex{0.0, 0.0});
+    full_H1[0 * 27 + 0] = Complex{1.0, 0.0};
+    full_H1[1 * 27 + 1] = Complex{-1.0, 0.0};
 
-    OperatorTerm term{
+    std::vector<Complex> full_H2(27 * 27, Complex{0.0, 0.0});
+    full_H2[0 * 27 + 0] = Complex{0.5, 0.0};
+    full_H2[1 * 27 + 1] = Complex{-0.5, 0.0};
+
+    OperatorTerm term1{
         TermKind::Hamiltonian,
-        "example_full_hamiltonian",
+        "example_full_hamiltonian_1",
         {0, 1, 2},
-        full_H,
+        full_H1,
+        27,
+        27
+    };
+
+    OperatorTerm term2{
+        TermKind::Hamiltonian,
+        "example_full_hamiltonian_2",
+        {0, 1, 2},
+        full_H2,
         27,
         27
     };
 
     Model model{
         {3, 3, 3},
-        {term},
+        {term1, term2},
         {}
     };
 
