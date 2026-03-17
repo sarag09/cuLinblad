@@ -40,17 +40,17 @@ PetscErrorCode apply_liouvillian_vec(
         return PETSC_ERR_ARG_SIZ;
     }
 
-    PetscScalar* x_ptr = nullptr;
+    const PetscScalar* x_ptr = nullptr;
     PetscScalar* y_ptr = nullptr;
 
-    ierr = VecGetArray(x, &x_ptr);
+    ierr = VecGetArrayRead(x, &x_ptr);
     if (ierr != 0) {
         return ierr;
     }
 
     ierr = VecGetArray(y, &y_ptr);
     if (ierr != 0) {
-        VecRestoreArray(x, &x_ptr);
+        VecRestoreArrayRead(x, &x_ptr);
         return ierr;
     }
 
@@ -68,12 +68,12 @@ PetscErrorCode apply_liouvillian_vec(
         apply_liouvillian(solver, in_buf, out_buf);
     } catch (const std::exception& ex) {
         std::cerr << "apply_liouvillian_vec exception: " << ex.what() << std::endl;
-        VecRestoreArray(x, &x_ptr);
+        VecRestoreArrayRead(x, &x_ptr);
         VecRestoreArray(y, &y_ptr);
         return PETSC_ERR_LIB;
     }
 
-    ierr = VecRestoreArray(x, &x_ptr);
+    ierr = VecRestoreArrayRead(x, &x_ptr);
     if (ierr != 0) {
         VecRestoreArray(y, &y_ptr);
         return ierr;

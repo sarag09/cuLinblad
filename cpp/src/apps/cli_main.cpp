@@ -10,6 +10,7 @@
 #include "culindblad/state_layout.hpp"
 #include "culindblad/types.hpp"
 #include "culindblad/petsc_apply.hpp"
+#include "culindblad/petsc_shell.hpp"
 
 int main(int argc, char** argv)
 {
@@ -178,6 +179,100 @@ int main(int argc, char** argv)
     if (ierr != 0) {
         std::cerr << "VecRestoreArray for y failed." << std::endl;
     }
+
+    Vec y_shell = nullptr;
+    Mat L_shell = nullptr;
+
+    ierr = VecCreateSeq(PETSC_COMM_SELF, solver.layout.density_dim, &y_shell);
+    if (ierr != 0) {
+        std::cerr << "VecCreateSeq for y_shell failed." << std::endl;
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = VecSet(y_shell, 0.0);
+    if (ierr != 0) {
+        std::cerr << "VecSet for y_shell failed." << std::endl;
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        VecDestroy(&y_shell);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = MatCreateShell(
+        PETSC_COMM_SELF,
+        solver.layout.density_dim,
+        solver.layout.density_dim,
+        solver.layout.density_dim,
+        solver.layout.density_dim,
+        &solver,
+        &L_shell);
+    if (ierr != 0) {
+        std::cerr << "MatCreateShell failed." << std::endl;
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        VecDestroy(&y_shell);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = MatShellSetOperation(
+        L_shell,
+        MATOP_MULT,
+        reinterpret_cast<void (*)()>(matshell_apply));
+    if (ierr != 0) {
+        std::cerr << "MatShellSetOperation failed." << std::endl;
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        VecDestroy(&y_shell);
+        MatDestroy(&L_shell);
+        PetscFinalize();
+        return 1;
+    }
+
+    ierr = MatMult(L_shell, x, y_shell);
+    if (ierr != 0) {
+        std::cerr << "MatMult on shell matrix failed." << std::endl;
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        VecDestroy(&y_shell);
+        MatDestroy(&L_shell);
+        PetscFinalize();
+        return 1;
+    }
+
+    PetscScalar* y_shell_ptr = nullptr;
+    ierr = VecGetArray(y_shell, &y_shell_ptr);
+    if (ierr != 0) {
+        std::cerr << "VecGetArray for y_shell failed." << std::endl;
+        VecRestoreArray(y, &y_ptr);
+        VecDestroy(&x);
+        VecDestroy(&y);
+        VecDestroy(&y_shell);
+        MatDestroy(&L_shell);
+        PetscFinalize();
+        return 1;
+    }
+
+    std::cout << "MatShell output entry (0,1): "
+              << reinterpret_cast<Complex*>(y_shell_ptr)[0 * solver.layout.hilbert_dim + 1]
+              << std::endl;
+
+    ierr = VecRestoreArray(y_shell, &y_shell_ptr);
+    if (ierr != 0) {
+        std::cerr << "VecRestoreArray for y_shell failed." << std::endl;
+    }
+
+    MatDestroy(&L_shell);
+    VecDestroy(&y_shell);    
 
     VecDestroy(&x);
     VecDestroy(&y);            
