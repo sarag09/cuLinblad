@@ -31,6 +31,7 @@ add_executable(run_sim
     cpp/src/petsc/petsc_ts_smoke.cpp
     cpp/src/core/local_operator_embed.cpp
     cpp/src/core/local_apply.cpp
+    cpp/src/core/local_operator_utils.cpp
 )
 
 target_include_directories(run_sim PRIVATE

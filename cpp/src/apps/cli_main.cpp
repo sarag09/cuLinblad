@@ -12,6 +12,7 @@
 #include "culindblad/types.hpp"
 #include "culindblad/local_apply.hpp"
 #include "culindblad/liouvillian_terms.hpp"
+#include "culindblad/local_operator_utils.hpp"
 
 int main(int argc, char** argv)
 {
@@ -145,6 +146,12 @@ int main(int argc, char** argv)
               << (local_comm.at(0 * solver.layout.hilbert_dim + 9)
                   - dense_comm.at(0 * solver.layout.hilbert_dim + 9))
               << std::endl;              
+
+    std::vector<Complex> lowering_dag = local_conjugate_transpose(lowering, 3);
+    std::vector<Complex> lowering_norm = local_multiply_square(lowering_dag, lowering, 3);
+
+    std::cout << "Local L^dag L entry (1,1): "
+              << lowering_norm.at(1 * 3 + 1) << std::endl;
 
     Complex ts_value{0.0, 0.0};
     ierr = run_ts_smoke_test(solver, 0, 9, ts_value);
