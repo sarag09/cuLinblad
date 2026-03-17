@@ -28,6 +28,7 @@ add_executable(run_sim
     cpp/src/petsc/petsc_apply.cpp
     cpp/src/petsc/petsc_shell.cpp
     cpp/src/petsc/petsc_ts_rhs.cpp
+    cpp/src/petsc/petsc_ts_smoke.cpp
 )
 
 target_include_directories(run_sim PRIVATE
