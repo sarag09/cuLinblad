@@ -23,6 +23,7 @@ find_package(CUDAToolkit REQUIRED)
 add_executable(run_sim
     cpp/src/apps/cli_main.cpp
     cpp/src/backends/cpu/apply_terms_cpu.cpp
+    cpp/src/backends/cpu/backend_cpu_reference.cpp
     cpp/src/core/liouvillian_terms.cpp
 )
 

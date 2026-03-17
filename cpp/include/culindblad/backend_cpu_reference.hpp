@@ -7,7 +7,7 @@
 
 namespace culindblad {
 
-void apply_liouvillian(
+void apply_liouvillian_cpu_reference(
     const Solver& solver,
     const std::vector<Complex>& rho_in,
     std::vector<Complex>& rho_out);
