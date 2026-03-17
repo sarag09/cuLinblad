@@ -11,4 +11,9 @@ std::vector<Complex> apply_hamiltonian_commutator(
     const std::vector<Complex>& rho,
     Index dim);
 
+std::vector<Complex> apply_dissipator(
+    const std::vector<Complex>& L,
+    const std::vector<Complex>& rho,
+    Index dim);    
+
 } // namespace culindblad

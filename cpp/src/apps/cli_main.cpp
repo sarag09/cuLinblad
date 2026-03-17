@@ -4,6 +4,7 @@
 #include "culindblad/backend.hpp"
 #include "culindblad/model.hpp"
 #include "culindblad/operator_term.hpp"
+#include "culindblad/liouvillian_terms.hpp"
 #include "culindblad/solver.hpp"
 #include "culindblad/state_layout.hpp"
 #include "culindblad/types.hpp"
@@ -68,6 +69,24 @@ int main()
     std::cout << "Output vector size: " << rho_out.size() << std::endl;
     std::cout << "Liouvillian output entry (0,1): "
               << rho_out.at(0 * solver.layout.hilbert_dim + 1) << std::endl;
+
+    std::vector<Complex> L2 = {
+        Complex{0.0, 0.0}, Complex{1.0, 0.0},
+        Complex{0.0, 0.0}, Complex{0.0, 0.0}
+    };
+
+    std::vector<Complex> rho_diss = {
+        Complex{0.0, 0.0}, Complex{0.0, 0.0},
+        Complex{0.0, 0.0}, Complex{1.0, 0.0}
+    };
+
+    std::vector<Complex> diss = apply_dissipator(L2, rho_diss, 2);
+
+    std::cout << "Dissipator result: ";
+    for (const Complex& x : diss) {
+        std::cout << x << " ";
+    }
+    std::cout << std::endl;              
 
     return 0;
 }
