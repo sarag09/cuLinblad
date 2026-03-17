@@ -13,6 +13,7 @@
 #include "culindblad/local_apply.hpp"
 #include "culindblad/liouvillian_terms.hpp"
 #include "culindblad/local_operator_utils.hpp"
+#include "culindblad/two_site_operator_embed.hpp"
 
 int main(int argc, char** argv)
 {
@@ -168,7 +169,25 @@ int main(int argc, char** argv)
     std::cout << "Difference local-vs-dense dissipator at (0,9): "
               << (local_diss.at(0 * solver.layout.hilbert_dim + 9)
                   - dense_diss.at(0 * solver.layout.hilbert_dim + 9))
-              << std::endl;              
+              << std::endl;  
+              
+    std::vector<Complex> zz_two_site(9 * 9, Complex{0.0, 0.0});
+    for (Index a = 0; a < 3; ++a) {
+        for (Index b = 0; b < 3; ++b) {
+            const double za = (a == 0 ? 1.0 : (a == 1 ? -1.0 : 0.0));
+            const double zb = (b == 0 ? 1.0 : (b == 1 ? -1.0 : 0.0));
+            const Index idx = a * 3 + b;
+            zz_two_site[idx * 9 + idx] = Complex{za * zb, 0.0};
+        }
+    }
+
+    std::vector<Complex> full_zz_q1q2 =
+        embed_two_site_operator(zz_two_site, 3, 3, 0, 1, local_dims);
+
+    std::cout << "Two-site embedded operator entry (0,0): "
+              << full_zz_q1q2.at(0 * solver.layout.hilbert_dim + 0) << std::endl;
+    std::cout << "Two-site embedded operator entry (9,9): "
+              << full_zz_q1q2.at(9 * solver.layout.hilbert_dim + 9) << std::endl;              
 
     Complex ts_value{0.0, 0.0};
     ierr = run_ts_smoke_test(solver, 0, 9, ts_value);
