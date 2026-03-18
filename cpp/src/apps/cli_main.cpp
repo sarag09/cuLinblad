@@ -187,7 +187,65 @@ int main(int argc, char** argv)
     std::cout << "Two-site embedded operator entry (0,0): "
               << full_zz_q1q2.at(0 * solver.layout.hilbert_dim + 0) << std::endl;
     std::cout << "Two-site embedded operator entry (9,9): "
-              << full_zz_q1q2.at(9 * solver.layout.hilbert_dim + 9) << std::endl;              
+              << full_zz_q1q2.at(9 * solver.layout.hilbert_dim + 9) << std::endl;       
+              
+    std::vector<Complex> two_site_left =
+        apply_two_site_operator_left(zz_two_site, 3, 3, 0, 1, local_dims, in_buf);
+
+    std::cout << "Two-site left-action entry (0,9): "
+              << two_site_left.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
+              
+    std::vector<Complex> two_site_right =
+        apply_two_site_operator_right(zz_two_site, 3, 3, 0, 1, local_dims, in_buf);
+
+    std::cout << "Two-site right-action entry (0,9): "
+              << two_site_right.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
+
+    std::vector<Complex> two_site_comm =
+        apply_two_site_commutator(zz_two_site, 3, 3, 0, 1, local_dims, in_buf);
+
+    std::cout << "Two-site commutator entry (0,9): "
+              << two_site_comm.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
+
+    std::vector<Complex> dense_two_site_comm =
+        apply_hamiltonian_commutator(
+            full_zz_q1q2,
+            rho_compare_buf,
+            solver.layout.hilbert_dim);
+
+    std::cout << "Embedded dense two-site commutator entry (0,9): "
+              << dense_two_site_comm.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
+
+    std::cout << "Difference two-site local-vs-dense commutator at (0,9): "
+              << (two_site_comm.at(0 * solver.layout.hilbert_dim + 9)
+                  - dense_two_site_comm.at(0 * solver.layout.hilbert_dim + 9))
+              << std::endl;
+
+    std::vector<Complex> lowering_two_site(9 * 9, Complex{0.0, 0.0});
+    lowering_two_site[0 * 9 + 3] = Complex{1.0, 0.0};
+
+    std::vector<Complex> two_site_diss =
+        apply_two_site_dissipator(lowering_two_site, 3, 3, 0, 1, local_dims, in_buf);
+
+    std::vector<Complex> dense_two_site_L =
+        embed_two_site_operator(lowering_two_site, 3, 3, 0, 1, local_dims);
+
+    std::vector<Complex> dense_two_site_diss =
+        apply_dissipator(
+            dense_two_site_L,
+            rho_compare_buf,
+            solver.layout.hilbert_dim);
+
+    std::cout << "Two-site dissipator entry (0,9): "
+              << two_site_diss.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
+
+    std::cout << "Embedded dense two-site dissipator entry (0,9): "
+              << dense_two_site_diss.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
+
+    std::cout << "Difference two-site local-vs-dense dissipator at (0,9): "
+              << (two_site_diss.at(0 * solver.layout.hilbert_dim + 9)
+                  - dense_two_site_diss.at(0 * solver.layout.hilbert_dim + 9))
+              << std::endl;              
 
     Complex ts_value{0.0, 0.0};
     ierr = run_ts_smoke_test(solver, 0, 9, ts_value);
