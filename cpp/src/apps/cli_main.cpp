@@ -106,23 +106,22 @@ int main(int argc, char** argv)
             << rho_out.at(0 * solver.layout.hilbert_dim + 0) << std::endl;
 
     std::vector<Complex> local_left =
-        apply_one_site_operator_left(z_like, 3, 0, local_dims, in_buf);
+        apply_k_site_operator_left(z_like, {0}, local_dims, in_buf);
 
-    std::cout << "Local left-action entry (0,9): "
-            << local_left.at(0 * solver.layout.hilbert_dim + 9) << std::endl;    
-            
+    std::cout << "k-site left-action entry (0,9): "
+              << local_left.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
+
     std::vector<Complex> local_right =
-    apply_one_site_operator_right(z_like, 3, 0, local_dims, in_buf);
+        apply_k_site_operator_right(z_like, {0}, local_dims, in_buf);
 
-    std::cout << "Local right-action entry (0,9): "
-              << local_right.at(0 * solver.layout.hilbert_dim + 9) << std::endl;  
-              
+    std::cout << "k-site right-action entry (0,9): "
+              << local_right.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
+
     std::vector<Complex> local_comm =
-        apply_one_site_commutator(z_like, 3, 0, local_dims, in_buf);
+        apply_k_site_commutator(z_like, {0}, local_dims, in_buf);
 
-    std::cout << "Local commutator entry (0,9): "
-              << local_comm.at(0 * solver.layout.hilbert_dim + 9) << std::endl;   
-              
+    std::cout << "k-site commutator entry (0,9): "
+              << local_comm.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
     std::vector<Complex> embedded_z =
         embed_one_site_operator(z_like, 3, 0, local_dims);
 
@@ -149,9 +148,9 @@ int main(int argc, char** argv)
               << lowering_norm.at(1 * 3 + 1) << std::endl;
 
     std::vector<Complex> local_diss =
-        apply_one_site_dissipator(lowering, 3, 0, local_dims, in_buf);
+        apply_k_site_dissipator(lowering, {0}, local_dims, in_buf);
 
-    std::cout << "Local dissipator entry (0,9): "
+    std::cout << "k-site dissipator entry (0,9): "
               << local_diss.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
 
     std::vector<Complex> embedded_L =
@@ -190,21 +189,21 @@ int main(int argc, char** argv)
               << full_zz_q1q2.at(9 * solver.layout.hilbert_dim + 9) << std::endl;       
               
     std::vector<Complex> two_site_left =
-        apply_two_site_operator_left(zz_two_site, 3, 3, 0, 1, local_dims, in_buf);
+        apply_k_site_operator_left(zz_two_site, {0, 1}, local_dims, in_buf);
 
-    std::cout << "Two-site left-action entry (0,9): "
+    std::cout << "k-site two-target left-action entry (0,9): "
               << two_site_left.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
-              
-    std::vector<Complex> two_site_right =
-        apply_two_site_operator_right(zz_two_site, 3, 3, 0, 1, local_dims, in_buf);
 
-    std::cout << "Two-site right-action entry (0,9): "
+    std::vector<Complex> two_site_right =
+        apply_k_site_operator_right(zz_two_site, {0, 1}, local_dims, in_buf);
+
+    std::cout << "k-site two-target right-action entry (0,9): "
               << two_site_right.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
 
     std::vector<Complex> two_site_comm =
-        apply_two_site_commutator(zz_two_site, 3, 3, 0, 1, local_dims, in_buf);
+        apply_k_site_commutator(zz_two_site, {0, 1}, local_dims, in_buf);
 
-    std::cout << "Two-site commutator entry (0,9): "
+    std::cout << "k-site two-target commutator entry (0,9): "
               << two_site_comm.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
 
     std::vector<Complex> dense_two_site_comm =
@@ -225,7 +224,10 @@ int main(int argc, char** argv)
     lowering_two_site[0 * 9 + 3] = Complex{1.0, 0.0};
 
     std::vector<Complex> two_site_diss =
-        apply_two_site_dissipator(lowering_two_site, 3, 3, 0, 1, local_dims, in_buf);
+        apply_k_site_dissipator(lowering_two_site, {0, 1}, local_dims, in_buf);
+
+    std::cout << "k-site two-target dissipator entry (0,9): "
+              << two_site_diss.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
 
     std::vector<Complex> dense_two_site_L =
         embed_two_site_operator(lowering_two_site, 3, 3, 0, 1, local_dims);
@@ -236,17 +238,84 @@ int main(int argc, char** argv)
             rho_compare_buf,
             solver.layout.hilbert_dim);
 
-    std::cout << "Two-site dissipator entry (0,9): "
-              << two_site_diss.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
-
     std::cout << "Embedded dense two-site dissipator entry (0,9): "
               << dense_two_site_diss.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
 
     std::cout << "Difference two-site local-vs-dense dissipator at (0,9): "
               << (two_site_diss.at(0 * solver.layout.hilbert_dim + 9)
                   - dense_two_site_diss.at(0 * solver.layout.hilbert_dim + 9))
-              << std::endl;              
+              << std::endl;
+              
+    OperatorTerm two_site_h_term{
+        TermKind::Hamiltonian,
+        "q1_q2_zz",
+        {0, 1},
+        zz_two_site,
+        9,
+        9
+    };
 
+    OperatorTerm two_site_L_term{
+        TermKind::Dissipator,
+        "q1_q2_jump",
+        {0, 1},
+        lowering_two_site,
+        9,
+        9
+    };    
+
+    Model two_site_h_model{
+        local_dims,
+        {two_site_h_term},
+        {}
+    };
+
+    Solver two_site_h_solver = make_solver(two_site_h_model);
+
+    std::vector<Complex> rho_two_site(two_site_h_solver.layout.density_dim, Complex{0.0, 0.0});
+    std::vector<Complex> out_two_site_h(two_site_h_solver.layout.density_dim, Complex{0.0, 0.0});
+
+    rho_two_site[0 * two_site_h_solver.layout.hilbert_dim + 9] = Complex{1.0, 0.0};
+
+    ConstStateBuffer in_two_site{rho_two_site.data(), rho_two_site.size()};
+    StateBuffer out_two_site_h_buf{out_two_site_h.data(), out_two_site_h.size()};
+
+    apply_liouvillian(two_site_h_solver, in_two_site, out_two_site_h_buf);
+
+    std::cout << "Backend two-site Hamiltonian-only entry (0,9): "
+              << out_two_site_h.at(0 * two_site_h_solver.layout.hilbert_dim + 9) << std::endl;
+
+    Model two_site_d_model{
+        local_dims,
+        {},
+        {two_site_L_term}
+    };
+
+    Solver two_site_d_solver = make_solver(two_site_d_model);
+
+    std::vector<Complex> out_two_site_d(two_site_d_solver.layout.density_dim, Complex{0.0, 0.0});
+    StateBuffer out_two_site_d_buf{out_two_site_d.data(), out_two_site_d.size()};
+
+    apply_liouvillian(two_site_d_solver, in_two_site, out_two_site_d_buf);
+
+    std::cout << "Backend two-site dissipator-only entry (0,9): "
+              << out_two_site_d.at(0 * two_site_d_solver.layout.hilbert_dim + 9) << std::endl;
+
+    Model two_site_total_model{
+        local_dims,
+        {two_site_h_term},
+        {two_site_L_term}
+    };
+
+    Solver two_site_total_solver = make_solver(two_site_total_model);
+
+    std::vector<Complex> out_two_site_total(two_site_total_solver.layout.density_dim, Complex{0.0, 0.0});
+    StateBuffer out_two_site_total_buf{out_two_site_total.data(), out_two_site_total.size()};
+
+    apply_liouvillian(two_site_total_solver, in_two_site, out_two_site_total_buf);
+
+    std::cout << "Backend two-site total entry (0,9): "
+              << out_two_site_total.at(0 * two_site_total_solver.layout.hilbert_dim + 9) << std::endl;
     Complex ts_value{0.0, 0.0};
     ierr = run_ts_smoke_test(solver, 0, 9, ts_value);
     if (ierr != 0) {

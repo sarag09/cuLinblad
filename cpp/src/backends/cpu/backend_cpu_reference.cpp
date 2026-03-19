@@ -5,6 +5,7 @@
 #include "culindblad/backend_cpu_reference.hpp"
 #include "culindblad/liouvillian_terms.hpp"
 #include "culindblad/local_apply.hpp"
+#include "culindblad/local_term_utils.hpp"
 #include "culindblad/solver.hpp"
 #include "culindblad/types.hpp"
 
@@ -30,23 +31,13 @@ void apply_liouvillian_cpu_reference(
     for (const OperatorTerm& H_term : solver.model.hamiltonian_terms) {
         std::vector<Complex> contribution;
 
-        const bool is_one_site_local =
-            (H_term.sites.size() == 1) &&
-            (H_term.row_dim == solver.model.local_dims.at(H_term.sites.at(0))) &&
-            (H_term.col_dim == solver.model.local_dims.at(H_term.sites.at(0)));
-
-        const bool is_full_dense =
-            (H_term.row_dim == solver.layout.hilbert_dim) &&
-            (H_term.col_dim == solver.layout.hilbert_dim);
-
-        if (is_one_site_local) {
-            contribution = apply_one_site_commutator(
+        if (term_is_local_k_site(H_term, solver.model.local_dims)) {
+            contribution = apply_k_site_commutator(
                 H_term.matrix,
-                H_term.row_dim,
-                H_term.sites.at(0),
+                H_term.sites,
                 solver.model.local_dims,
                 rho_in);
-        } else if (is_full_dense) {
+        } else if (term_is_full_dense(H_term, solver.layout.hilbert_dim)) {
             contribution = apply_hamiltonian_commutator(
                 H_term.matrix,
                 rho_in,
@@ -64,23 +55,13 @@ void apply_liouvillian_cpu_reference(
     for (const OperatorTerm& L_term : solver.model.dissipator_terms) {
         std::vector<Complex> contribution;
 
-        const bool is_one_site_local =
-            (L_term.sites.size() == 1) &&
-            (L_term.row_dim == solver.model.local_dims.at(L_term.sites.at(0))) &&
-            (L_term.col_dim == solver.model.local_dims.at(L_term.sites.at(0)));
-
-        const bool is_full_dense =
-            (L_term.row_dim == solver.layout.hilbert_dim) &&
-            (L_term.col_dim == solver.layout.hilbert_dim);
-
-        if (is_one_site_local) {
-            contribution = apply_one_site_dissipator(
+        if (term_is_local_k_site(L_term, solver.model.local_dims)) {
+            contribution = apply_k_site_dissipator(
                 L_term.matrix,
-                L_term.row_dim,
-                L_term.sites.at(0),
+                L_term.sites,
                 solver.model.local_dims,
                 rho_in);
-        } else if (is_full_dense) {
+        } else if (term_is_full_dense(L_term, solver.layout.hilbert_dim)) {
             contribution = apply_dissipator(
                 L_term.matrix,
                 rho_in,

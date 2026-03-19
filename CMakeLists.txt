@@ -33,6 +33,7 @@ add_executable(run_sim
     cpp/src/core/local_apply.cpp
     cpp/src/core/local_operator_utils.cpp
     cpp/src/core/two_site_operator_embed.cpp
+    cpp/src/core/local_term_utils.cpp
 )
 
 target_include_directories(run_sim PRIVATE
