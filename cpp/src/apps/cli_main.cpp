@@ -4,16 +4,14 @@
 #include <petscts.h>
 
 #include "culindblad/backend.hpp"
-#include "culindblad/local_operator_embed.hpp"
+#include "culindblad/k_site_operator_embed.hpp"
+#include "culindblad/local_apply.hpp"
 #include "culindblad/model.hpp"
 #include "culindblad/operator_term.hpp"
 #include "culindblad/petsc_ts_smoke.hpp"
 #include "culindblad/solver.hpp"
 #include "culindblad/types.hpp"
-#include "culindblad/local_apply.hpp"
 #include "culindblad/liouvillian_terms.hpp"
-#include "culindblad/local_operator_utils.hpp"
-#include "culindblad/two_site_operator_embed.hpp"
 
 int main(int argc, char** argv)
 {
@@ -25,7 +23,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    const std::vector<Index> local_dims = {3, 3, 3};
+    const std::vector<Index> local_dims = {3, 3, 3, 3};
 
     std::vector<Complex> z_like = {
         Complex{1.0, 0.0},  Complex{0.0, 0.0},  Complex{0.0, 0.0},
@@ -33,298 +31,110 @@ int main(int argc, char** argv)
         Complex{0.0, 0.0},  Complex{0.0, 0.0},  Complex{0.0, 0.0}
     };
 
-    std::vector<Complex> half_z_like = {
-        Complex{0.5, 0.0},  Complex{0.0, 0.0},  Complex{0.0, 0.0},
-        Complex{0.0, 0.0},  Complex{-0.5, 0.0}, Complex{0.0, 0.0},
-        Complex{0.0, 0.0},  Complex{0.0, 0.0},  Complex{0.0, 0.0}
-    };
+    std::vector<Complex> zzz_three_site(27 * 27, Complex{0.0, 0.0});
+    for (Index a = 0; a < 3; ++a) {
+        for (Index b = 0; b < 3; ++b) {
+            for (Index c = 0; c < 3; ++c) {
+                const double za = (a == 0 ? 1.0 : (a == 1 ? -1.0 : 0.0));
+                const double zb = (b == 0 ? 1.0 : (b == 1 ? -1.0 : 0.0));
+                const double zc = (c == 0 ? 1.0 : (c == 1 ? -1.0 : 0.0));
+                const Index idx = a * 9 + b * 3 + c;
+                zzz_three_site[idx * 27 + idx] = Complex{za * zb * zc, 0.0};
+            }
+        }
+    }
 
-    std::vector<Complex> lowering = {
-        Complex{0.0, 0.0}, Complex{1.0, 0.0}, Complex{0.0, 0.0},
-        Complex{0.0, 0.0}, Complex{0.0, 0.0}, Complex{0.0, 0.0},
-        Complex{0.0, 0.0}, Complex{0.0, 0.0}, Complex{0.0, 0.0}
-    };
+    std::vector<Complex> lowering_three_site(27 * 27, Complex{0.0, 0.0});
+    lowering_three_site[0 * 27 + 9] = Complex{1.0, 0.0};
 
-    OperatorTerm term1{
+    OperatorTerm h_term{
         TermKind::Hamiltonian,
-        "q1_z_like",
-        {0},
-        z_like,
-        3,
-        3
+        "q1_q2_q3_zzz",
+        {0, 1, 2},
+        zzz_three_site,
+        27,
+        27
     };
 
-    OperatorTerm term2{
-        TermKind::Hamiltonian,
-        "q1_half_z_like",
-        {0},
-        half_z_like,
-        3,
-        3
-    };
-
-    OperatorTerm dissipator_term{
+    OperatorTerm d_term{
         TermKind::Dissipator,
-        "q1_lowering",
-        {0},
-        lowering,
-        3,
-        3
+        "q1_q2_q3_jump",
+        {0, 1, 2},
+        lowering_three_site,
+        27,
+        27
     };
 
     Model model{
         local_dims,
-        {term1, term2},
-        {dissipator_term}
+        {h_term},
+        {d_term}
     };
 
     Solver solver = make_solver(model);
 
-    std::cout << "cuLindblad smoke test" << std::endl;
+    std::cout << "cuLindblad k-site smoke test" << std::endl;
     std::cout << "Hilbert dimension: " << solver.layout.hilbert_dim << std::endl;
     std::cout << "Density dimension: " << solver.layout.density_dim << std::endl;
-
-    std::cout << "Ket strides: ";
-    for (Index stride : solver.layout.ket_strides) {
-        std::cout << stride << " ";
-    }
-    std::cout << std::endl;
 
     std::vector<Complex> rho_in(solver.layout.density_dim, Complex{0.0, 0.0});
     std::vector<Complex> rho_out(solver.layout.density_dim, Complex{0.0, 0.0});
 
-    rho_in[0 * solver.layout.hilbert_dim + 9] = Complex{1.0, 0.0};
+    rho_in[0 * solver.layout.hilbert_dim + 27] = Complex{1.0, 0.0};
 
     ConstStateBuffer in_buf{rho_in.data(), rho_in.size()};
     StateBuffer out_buf{rho_out.data(), rho_out.size()};
 
     apply_liouvillian(solver, in_buf, out_buf);
 
-    std::cout << "Liouvillian output entry (0,9): "
-            << rho_out.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
-    std::cout << "Liouvillian output entry (0,0): "
-            << rho_out.at(0 * solver.layout.hilbert_dim + 0) << std::endl;
-
-    std::vector<Complex> local_left =
-        apply_k_site_operator_left(z_like, {0}, local_dims, in_buf);
-
-    std::cout << "k-site left-action entry (0,9): "
-              << local_left.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
-
-    std::vector<Complex> local_right =
-        apply_k_site_operator_right(z_like, {0}, local_dims, in_buf);
-
-    std::cout << "k-site right-action entry (0,9): "
-              << local_right.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
+    std::cout << "Backend k-site total entry (0,27): "
+              << rho_out.at(0 * solver.layout.hilbert_dim + 27) << std::endl;
 
     std::vector<Complex> local_comm =
-        apply_k_site_commutator(z_like, {0}, local_dims, in_buf);
+        apply_k_site_commutator(zzz_three_site, {0, 1, 2}, local_dims, in_buf);
 
-    std::cout << "k-site commutator entry (0,9): "
-              << local_comm.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
-    std::vector<Complex> embedded_z =
-        embed_one_site_operator(z_like, 3, 0, local_dims);
-
-    ConstStateBuffer rho_compare_buf{rho_in.data(), rho_in.size()};
+    std::vector<Complex> dense_h =
+        embed_k_site_operator(zzz_three_site, {0, 1, 2}, local_dims);
 
     std::vector<Complex> dense_comm =
-        apply_hamiltonian_commutator(
-            embedded_z,
-            rho_compare_buf,
-            solver.layout.hilbert_dim);
+        apply_hamiltonian_commutator(dense_h, in_buf, solver.layout.hilbert_dim);
 
-    std::cout << "Embedded dense commutator entry (0,9): "
-              << dense_comm.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
-
-    std::cout << "Difference local-vs-dense at (0,9): "
-              << (local_comm.at(0 * solver.layout.hilbert_dim + 9)
-                  - dense_comm.at(0 * solver.layout.hilbert_dim + 9))
-              << std::endl;              
-
-    std::vector<Complex> lowering_dag = local_conjugate_transpose(lowering, 3);
-    std::vector<Complex> lowering_norm = local_multiply_square(lowering_dag, lowering, 3);
-
-    std::cout << "Local L^dag L entry (1,1): "
-              << lowering_norm.at(1 * 3 + 1) << std::endl;
+    std::cout << "k-site commutator entry (0,27): "
+              << local_comm.at(0 * solver.layout.hilbert_dim + 27) << std::endl;
+    std::cout << "Dense embedded commutator entry (0,27): "
+              << dense_comm.at(0 * solver.layout.hilbert_dim + 27) << std::endl;
+    std::cout << "Difference k-site-vs-dense commutator at (0,27): "
+              << (local_comm.at(0 * solver.layout.hilbert_dim + 27)
+                  - dense_comm.at(0 * solver.layout.hilbert_dim + 27))
+              << std::endl;
 
     std::vector<Complex> local_diss =
-        apply_k_site_dissipator(lowering, {0}, local_dims, in_buf);
+        apply_k_site_dissipator(lowering_three_site, {0, 1, 2}, local_dims, in_buf);
 
-    std::cout << "k-site dissipator entry (0,9): "
-              << local_diss.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
-
-    std::vector<Complex> embedded_L =
-        embed_one_site_operator(lowering, 3, 0, local_dims);
+    std::vector<Complex> dense_L =
+        embed_k_site_operator(lowering_three_site, {0, 1, 2}, local_dims);
 
     std::vector<Complex> dense_diss =
-        apply_dissipator(
-            embedded_L,
-            rho_compare_buf,
-            solver.layout.hilbert_dim);
+        apply_dissipator(dense_L, in_buf, solver.layout.hilbert_dim);
 
-    std::cout << "Embedded dense dissipator entry (0,9): "
-              << dense_diss.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
-
-    std::cout << "Difference local-vs-dense dissipator at (0,9): "
-              << (local_diss.at(0 * solver.layout.hilbert_dim + 9)
-                  - dense_diss.at(0 * solver.layout.hilbert_dim + 9))
-              << std::endl;  
-              
-    std::vector<Complex> zz_two_site(9 * 9, Complex{0.0, 0.0});
-    for (Index a = 0; a < 3; ++a) {
-        for (Index b = 0; b < 3; ++b) {
-            const double za = (a == 0 ? 1.0 : (a == 1 ? -1.0 : 0.0));
-            const double zb = (b == 0 ? 1.0 : (b == 1 ? -1.0 : 0.0));
-            const Index idx = a * 3 + b;
-            zz_two_site[idx * 9 + idx] = Complex{za * zb, 0.0};
-        }
-    }
-
-    std::vector<Complex> full_zz_q1q2 =
-        embed_two_site_operator(zz_two_site, 3, 3, 0, 1, local_dims);
-
-    std::cout << "Two-site embedded operator entry (0,0): "
-              << full_zz_q1q2.at(0 * solver.layout.hilbert_dim + 0) << std::endl;
-    std::cout << "Two-site embedded operator entry (9,9): "
-              << full_zz_q1q2.at(9 * solver.layout.hilbert_dim + 9) << std::endl;       
-              
-    std::vector<Complex> two_site_left =
-        apply_k_site_operator_left(zz_two_site, {0, 1}, local_dims, in_buf);
-
-    std::cout << "k-site two-target left-action entry (0,9): "
-              << two_site_left.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
-
-    std::vector<Complex> two_site_right =
-        apply_k_site_operator_right(zz_two_site, {0, 1}, local_dims, in_buf);
-
-    std::cout << "k-site two-target right-action entry (0,9): "
-              << two_site_right.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
-
-    std::vector<Complex> two_site_comm =
-        apply_k_site_commutator(zz_two_site, {0, 1}, local_dims, in_buf);
-
-    std::cout << "k-site two-target commutator entry (0,9): "
-              << two_site_comm.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
-
-    std::vector<Complex> dense_two_site_comm =
-        apply_hamiltonian_commutator(
-            full_zz_q1q2,
-            rho_compare_buf,
-            solver.layout.hilbert_dim);
-
-    std::cout << "Embedded dense two-site commutator entry (0,9): "
-              << dense_two_site_comm.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
-
-    std::cout << "Difference two-site local-vs-dense commutator at (0,9): "
-              << (two_site_comm.at(0 * solver.layout.hilbert_dim + 9)
-                  - dense_two_site_comm.at(0 * solver.layout.hilbert_dim + 9))
+    std::cout << "k-site dissipator entry (0,27): "
+              << local_diss.at(0 * solver.layout.hilbert_dim + 27) << std::endl;
+    std::cout << "Dense embedded dissipator entry (0,27): "
+              << dense_diss.at(0 * solver.layout.hilbert_dim + 27) << std::endl;
+    std::cout << "Difference k-site-vs-dense dissipator at (0,27): "
+              << (local_diss.at(0 * solver.layout.hilbert_dim + 27)
+                  - dense_diss.at(0 * solver.layout.hilbert_dim + 27))
               << std::endl;
 
-    std::vector<Complex> lowering_two_site(9 * 9, Complex{0.0, 0.0});
-    lowering_two_site[0 * 9 + 3] = Complex{1.0, 0.0};
-
-    std::vector<Complex> two_site_diss =
-        apply_k_site_dissipator(lowering_two_site, {0, 1}, local_dims, in_buf);
-
-    std::cout << "k-site two-target dissipator entry (0,9): "
-              << two_site_diss.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
-
-    std::vector<Complex> dense_two_site_L =
-        embed_two_site_operator(lowering_two_site, 3, 3, 0, 1, local_dims);
-
-    std::vector<Complex> dense_two_site_diss =
-        apply_dissipator(
-            dense_two_site_L,
-            rho_compare_buf,
-            solver.layout.hilbert_dim);
-
-    std::cout << "Embedded dense two-site dissipator entry (0,9): "
-              << dense_two_site_diss.at(0 * solver.layout.hilbert_dim + 9) << std::endl;
-
-    std::cout << "Difference two-site local-vs-dense dissipator at (0,9): "
-              << (two_site_diss.at(0 * solver.layout.hilbert_dim + 9)
-                  - dense_two_site_diss.at(0 * solver.layout.hilbert_dim + 9))
-              << std::endl;
-              
-    OperatorTerm two_site_h_term{
-        TermKind::Hamiltonian,
-        "q1_q2_zz",
-        {0, 1},
-        zz_two_site,
-        9,
-        9
-    };
-
-    OperatorTerm two_site_L_term{
-        TermKind::Dissipator,
-        "q1_q2_jump",
-        {0, 1},
-        lowering_two_site,
-        9,
-        9
-    };    
-
-    Model two_site_h_model{
-        local_dims,
-        {two_site_h_term},
-        {}
-    };
-
-    Solver two_site_h_solver = make_solver(two_site_h_model);
-
-    std::vector<Complex> rho_two_site(two_site_h_solver.layout.density_dim, Complex{0.0, 0.0});
-    std::vector<Complex> out_two_site_h(two_site_h_solver.layout.density_dim, Complex{0.0, 0.0});
-
-    rho_two_site[0 * two_site_h_solver.layout.hilbert_dim + 9] = Complex{1.0, 0.0};
-
-    ConstStateBuffer in_two_site{rho_two_site.data(), rho_two_site.size()};
-    StateBuffer out_two_site_h_buf{out_two_site_h.data(), out_two_site_h.size()};
-
-    apply_liouvillian(two_site_h_solver, in_two_site, out_two_site_h_buf);
-
-    std::cout << "Backend two-site Hamiltonian-only entry (0,9): "
-              << out_two_site_h.at(0 * two_site_h_solver.layout.hilbert_dim + 9) << std::endl;
-
-    Model two_site_d_model{
-        local_dims,
-        {},
-        {two_site_L_term}
-    };
-
-    Solver two_site_d_solver = make_solver(two_site_d_model);
-
-    std::vector<Complex> out_two_site_d(two_site_d_solver.layout.density_dim, Complex{0.0, 0.0});
-    StateBuffer out_two_site_d_buf{out_two_site_d.data(), out_two_site_d.size()};
-
-    apply_liouvillian(two_site_d_solver, in_two_site, out_two_site_d_buf);
-
-    std::cout << "Backend two-site dissipator-only entry (0,9): "
-              << out_two_site_d.at(0 * two_site_d_solver.layout.hilbert_dim + 9) << std::endl;
-
-    Model two_site_total_model{
-        local_dims,
-        {two_site_h_term},
-        {two_site_L_term}
-    };
-
-    Solver two_site_total_solver = make_solver(two_site_total_model);
-
-    std::vector<Complex> out_two_site_total(two_site_total_solver.layout.density_dim, Complex{0.0, 0.0});
-    StateBuffer out_two_site_total_buf{out_two_site_total.data(), out_two_site_total.size()};
-
-    apply_liouvillian(two_site_total_solver, in_two_site, out_two_site_total_buf);
-
-    std::cout << "Backend two-site total entry (0,9): "
-              << out_two_site_total.at(0 * two_site_total_solver.layout.hilbert_dim + 9) << std::endl;
     Complex ts_value{0.0, 0.0};
-    ierr = run_ts_smoke_test(solver, 0, 9, ts_value);
+    ierr = run_ts_smoke_test(solver, 0, 27, ts_value);
     if (ierr != 0) {
         std::cerr << "run_ts_smoke_test failed." << std::endl;
         PetscFinalize();
         return 1;
     }
 
-    std::cout << "TS evolved entry (0,9): " << ts_value << std::endl;
+    std::cout << "TS evolved entry (0,27): " << ts_value << std::endl;
 
     PetscFinalize();
     return 0;
