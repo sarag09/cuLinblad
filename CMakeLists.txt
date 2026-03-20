@@ -33,6 +33,10 @@ add_executable(run_sim
     cpp/src/core/local_operator_utils.cpp
     cpp/src/core/local_term_utils.cpp
     cpp/src/core/k_site_operator_embed.cpp
+    cpp/src/core/k_site_plan.cpp
+    cpp/src/core/k_site_tensor_view.cpp
+    cpp/src/core/k_site_block_map.cpp
+    cpp/src/core/k_site_grouped_apply.cpp
 )
 
 target_include_directories(run_sim PRIVATE

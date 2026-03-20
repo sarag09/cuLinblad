@@ -12,6 +12,10 @@
 #include "culindblad/solver.hpp"
 #include "culindblad/types.hpp"
 #include "culindblad/liouvillian_terms.hpp"
+#include "culindblad/k_site_plan.hpp"
+#include "culindblad/k_site_tensor_view.hpp"
+#include "culindblad/k_site_block_map.hpp"
+#include "culindblad/k_site_grouped_apply.hpp"
 
 int main(int argc, char** argv)
 {
@@ -77,6 +81,56 @@ int main(int argc, char** argv)
     std::cout << "Hilbert dimension: " << solver.layout.hilbert_dim << std::endl;
     std::cout << "Density dimension: " << solver.layout.density_dim << std::endl;
 
+    KSiteTensorView view = make_k_site_tensor_view({0, 1, 2}, local_dims);
+
+    std::cout << "k-site target dim product: " << view.ket_target_dim << std::endl;
+    std::cout << "k-site complement dim product: " << view.ket_complement_dim << std::endl;
+    std::cout << "density target block size: " << view.density_target_block_size << std::endl;
+    std::cout << "density complement block size: " << view.density_complement_block_size << std::endl;
+
+    std::cout << "grouped sites: ";
+    for (Index s : view.ket_grouped_sites) {
+        std::cout << s << " ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "original-to-grouped positions: ";
+    for (Index p : view.ket_original_to_grouped_position) {
+        std::cout << p << " ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "\n--- Non-contiguous k-site test ---" << std::endl;
+
+    KSiteTensorView view_nc = make_k_site_tensor_view({0, 2}, local_dims);
+
+    std::cout << "k-site target dim product: " << view_nc.ket_target_dim << std::endl;
+    std::cout << "k-site complement dim product: " << view_nc.ket_complement_dim << std::endl;
+
+    std::cout << "grouped sites: ";
+    for (Index s : view_nc.ket_grouped_sites) {
+        std::cout << s << " ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "original-to-grouped positions: ";
+    for (Index p : view_nc.ket_original_to_grouped_position) {
+        std::cout << p << " ";
+    }
+    std::cout << std::endl;    
+
+    KSiteBlockMap block_map = make_k_site_block_map({0, 1, 2}, local_dims);
+
+    std::cout << "block map (target=0, comp=0) -> flat ket: "
+              << block_map.grouped_to_flat_ket[0 * view.ket_complement_dim + 0] << std::endl;
+
+    std::cout << "block map (target=9, comp=0) -> flat ket: "
+              << block_map.grouped_to_flat_ket[9 * view.ket_complement_dim + 0] << std::endl;          
+
+    KSitePlan plan = make_k_site_plan({0, 1, 2}, local_dims);
+    std::cout << "k-site target dim product: " << plan.target_dim_product << std::endl;
+    std::cout << "k-site complement dim product: " << plan.complement_dim_product << std::endl;    
+
     std::vector<Complex> rho_in(solver.layout.density_dim, Complex{0.0, 0.0});
     std::vector<Complex> rho_out(solver.layout.density_dim, Complex{0.0, 0.0});
 
@@ -84,6 +138,25 @@ int main(int argc, char** argv)
 
     ConstStateBuffer in_buf{rho_in.data(), rho_in.size()};
     StateBuffer out_buf{rho_out.data(), rho_out.size()};
+
+    std::vector<Complex> grouped_left =
+        apply_k_site_operator_left_grouped_reference(
+            zzz_three_site, {0, 1, 2}, local_dims, in_buf);
+
+    std::vector<Complex> direct_left =
+        apply_k_site_operator_left(
+            zzz_three_site, {0, 1, 2}, local_dims, in_buf);
+
+    std::cout << "Grouped left-action entry (0,27): "
+              << grouped_left.at(0 * solver.layout.hilbert_dim + 27) << std::endl;
+
+    std::cout << "Direct k-site left-action entry (0,27): "
+              << direct_left.at(0 * solver.layout.hilbert_dim + 27) << std::endl;
+
+    std::cout << "Difference grouped-vs-direct left-action at (0,27): "
+              << (grouped_left.at(0 * solver.layout.hilbert_dim + 27)
+                  - direct_left.at(0 * solver.layout.hilbert_dim + 27))
+              << std::endl;         
 
     apply_liouvillian(solver, in_buf, out_buf);
 
