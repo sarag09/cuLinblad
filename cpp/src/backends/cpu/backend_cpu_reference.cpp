@@ -3,7 +3,7 @@
 
 #include "culindblad/backend.hpp"
 #include "culindblad/backend_cpu_reference.hpp"
-#include "culindblad/k_site_grouped_apply.hpp"
+#include "culindblad/grouped_contraction_backend.hpp"
 #include "culindblad/liouvillian_terms.hpp"
 #include "culindblad/local_term_utils.hpp"
 #include "culindblad/solver.hpp"
@@ -32,7 +32,7 @@ void apply_liouvillian_cpu_reference(
         std::vector<Complex> contribution;
 
         if (term_is_local_k_site(H_term, solver.model.local_dims)) {
-            contribution = apply_k_site_commutator_grouped_reference(
+            contribution = apply_grouped_commutator(
                 H_term.matrix,
                 H_term.sites,
                 solver.model.local_dims,
@@ -56,7 +56,7 @@ void apply_liouvillian_cpu_reference(
         std::vector<Complex> contribution;
 
         if (term_is_local_k_site(L_term, solver.model.local_dims)) {
-            contribution = apply_k_site_dissipator_grouped_reference(
+            contribution = apply_grouped_dissipator(
                 L_term.matrix,
                 L_term.sites,
                 solver.model.local_dims,
