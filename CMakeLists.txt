@@ -35,6 +35,11 @@ add_executable(run_sim
     cpp/src/petsc/petsc_shell.cpp
     cpp/src/petsc/petsc_ts_rhs.cpp
     cpp/src/petsc/petsc_ts_smoke.cpp
+    cpp/src/backends/cuda/cutensor_contraction_desc.cpp
+    cpp/src/backends/cuda/cutensor_ops.cpp
+    cpp/src/backends/cuda/cutensor_tensor_descs.cpp
+    cpp/src/backends/cuda/cutensor_operation_desc.cpp
+    cpp/src/backends/cuda/cutensor_plan.cpp
 )
 
 target_include_directories(run_sim PRIVATE
@@ -46,4 +51,5 @@ target_link_libraries(run_sim PRIVATE
     MPI::MPI_CXX
     CUDA::cudart
     CUDA::cublas
+    ${CUTENSOR_LIB}
 )

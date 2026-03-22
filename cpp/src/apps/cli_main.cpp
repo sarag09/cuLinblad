@@ -18,6 +18,11 @@
 #include "culindblad/petsc_ts_smoke.hpp"
 #include "culindblad/solver.hpp"
 #include "culindblad/types.hpp"
+#include "culindblad/cutensor_contraction_desc.hpp"
+#include "culindblad/cutensor_ops.hpp"
+#include "culindblad/cutensor_tensor_descs.hpp"
+#include "culindblad/cutensor_operation_desc.hpp"
+#include "culindblad/cutensor_plan.hpp"
 
 int main(int argc, char** argv)
 {
@@ -216,6 +221,128 @@ int main(int argc, char** argv)
     apply_liouvillian(solver, in_buf, out_buf);
     std::cout << "Backend k-site total entry (0,27): "
               << rho_out.at(0 * solver.layout.hilbert_dim + 27) << std::endl;
+
+    CuTensorContractionDesc cutensor_left =
+        make_cutensor_left_contraction_desc({0, 1, 2}, local_dims);
+
+    CuTensorContractionDesc cutensor_right =
+        make_cutensor_right_contraction_desc({0, 1, 2}, local_dims);
+
+    std::cout << "cutensor left debug name: " << cutensor_left.debug_name << std::endl;
+
+    std::cout << "cutensor left operator modes: ";
+    for (int32_t m : cutensor_left.operator_modes) {
+        std::cout << m << " ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "cutensor left input modes: ";
+    for (int32_t m : cutensor_left.input_modes) {
+        std::cout << m << " ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "cutensor left output modes: ";
+    for (int32_t m : cutensor_left.output_modes) {
+        std::cout << m << " ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "cutensor left input extents: ";
+    for (int64_t e : cutensor_left.input_extents) {
+        std::cout << e << " ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "cutensor right debug name: " << cutensor_right.debug_name << std::endl;
+
+    std::cout << "cutensor right operator modes: ";
+    for (int32_t m : cutensor_right.operator_modes) {
+        std::cout << m << " ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "cutensor right input modes: ";
+    for (int32_t m : cutensor_right.input_modes) {
+        std::cout << m << " ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "cutensor right output modes: ";
+    for (int32_t m : cutensor_right.output_modes) {
+        std::cout << m << " ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "cutensor right input extents: ";
+    for (int64_t e : cutensor_right.input_extents) {
+        std::cout << e << " ";
+    }
+    std::cout << std::endl;
+    
+    const bool cutensor_left_valid =
+        validate_cutensor_contraction_desc(cutensor_left);
+    const bool cutensor_right_valid =
+        validate_cutensor_contraction_desc(cutensor_right);
+
+    std::cout << "cutensor left descriptor valid: "
+              << (cutensor_left_valid ? "true" : "false") << std::endl;
+    std::cout << "cutensor right descriptor valid: "
+              << (cutensor_right_valid ? "true" : "false") << std::endl;
+
+    const bool cutensor_handle_ok =
+        initialize_cutensor_handle_for_desc(cutensor_left);
+
+    std::cout << "cutensor handle initialization: "
+              << (cutensor_handle_ok ? "true" : "false") << std::endl;    
+
+    CuTensorTensorDescs cutensor_tensor_descs{};
+    const bool cutensor_tensor_descs_ok =
+        create_cutensor_tensor_descs(cutensor_left, cutensor_tensor_descs);
+
+    std::cout << "cutensor tensor descriptor creation: "
+              << (cutensor_tensor_descs_ok ? "true" : "false") << std::endl;
+
+    if (cutensor_tensor_descs_ok) {
+        const bool cutensor_tensor_descs_destroy_ok =
+            destroy_cutensor_tensor_descs(cutensor_tensor_descs);
+
+        std::cout << "cutensor tensor descriptor destruction: "
+                  << (cutensor_tensor_descs_destroy_ok ? "true" : "false") << std::endl;
+    }
+    
+    CuTensorOperationDesc cutensor_op_desc{};
+    const bool cutensor_op_desc_ok =
+        create_cutensor_left_operation_desc(cutensor_left, cutensor_op_desc);
+
+    std::cout << "cutensor operation descriptor creation: "
+              << (cutensor_op_desc_ok ? "true" : "false") << std::endl;
+
+    if (cutensor_op_desc_ok) {
+        const bool cutensor_op_desc_destroy_ok =
+            destroy_cutensor_left_operation_desc(cutensor_op_desc);
+
+        std::cout << "cutensor operation descriptor destruction: "
+                  << (cutensor_op_desc_destroy_ok ? "true" : "false") << std::endl;
+    }   
+    
+    CuTensorPlanBundle plan_bundle{};
+    const bool plan_ok =
+        create_cutensor_plan(cutensor_left, plan_bundle);
+
+    std::cout << "cutensor plan creation: "
+              << (plan_ok ? "true" : "false") << std::endl;
+
+    if (plan_ok) {
+        std::cout << "workspace size: "
+                  << plan_bundle.workspace_size << std::endl;
+
+        const bool plan_destroy_ok =
+            destroy_cutensor_plan(plan_bundle);
+
+        std::cout << "cutensor plan destruction: "
+                  << (plan_destroy_ok ? "true" : "false") << std::endl;
+    }  
 
     Complex ts_value{0.0, 0.0};
     ierr = run_ts_smoke_test(solver, 0, 27, ts_value);
