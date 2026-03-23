@@ -27,6 +27,8 @@
 #include "culindblad/petsc_ts_smoke.hpp"
 #include "culindblad/solver.hpp"
 #include "culindblad/types.hpp"
+#include "culindblad/time_dependence.hpp"
+#include "culindblad/time_dependent_term.hpp"
 
 int main(int argc, char** argv)
 {
@@ -94,10 +96,29 @@ int main(int argc, char** argv)
         27
     };
 
+    TimeDependentTerm td_h_term_1{
+        "q1_q2_q3_drive_1",
+        {0, 1, 2},
+        zzz_three_site,
+        27,
+        27,
+        make_cosine_time_scalar(2.0, 3.0, 0.0)
+    };
+
+    TimeDependentTerm td_h_term_2{
+        "q1_q2_q3_drive_2",
+        {0, 1, 2},
+        zzz_three_site,
+        27,
+        27,
+        make_cosine_time_scalar(0.5, 5.0, 0.25)
+    };
+
     Model model{
         local_dims,
         {h_term},
-        {d_term}
+        {d_term},
+        {td_h_term_1, td_h_term_2}
     };
 
     Solver solver = make_solver(model);
@@ -510,6 +531,29 @@ int main(int argc, char** argv)
                   << (destroy_all_ok ? "true" : "false") << std::endl;
     }
 
+    TimeDependentTerm td_drive{
+        "q1_q2_q3_drive",
+        {0, 1, 2},
+        zzz_three_site,
+        27,
+        27,
+        make_cosine_time_scalar(2.0, 3.0, 0.0)
+    };
+
+    std::vector<Complex> rho_out_timed(solver.layout.density_dim, Complex{0.0, 0.0});
+    StateBuffer out_buf_timed{rho_out_timed.data(), rho_out_timed.size()};
+
+    const double timed_test_t = 0.5;
+    apply_liouvillian_at_time(solver, timed_test_t, in_buf, out_buf_timed);
+
+    std::cout << "time-dependent coefficient 1 at t=0.5: "
+              << evaluate_time_scalar(td_h_term_1.coefficient, timed_test_t) << std::endl;
+    std::cout << "time-dependent coefficient 2 at t=0.5: "
+              << evaluate_time_scalar(td_h_term_2.coefficient, timed_test_t) << std::endl;
+    std::cout << "Timed backend k-site total entry (0,27): "
+              << rho_out_timed.at(0 * solver.layout.hilbert_dim + 27) << std::endl;    
+              
+    std::cout << "Running TS smoke test with time-dependent RHS" << std::endl;              
     Complex ts_value{0.0, 0.0};
     ierr = run_ts_smoke_test(solver, 0, 27, ts_value);
     if (ierr != 0) {

@@ -1,15 +1,19 @@
 #pragma once
 
-#include <vector>
-
 #include "culindblad/solver.hpp"
-#include "culindblad/types.hpp"
+#include "culindblad/state_buffer.hpp"
 
 namespace culindblad {
 
 void apply_liouvillian_cpu_reference(
     const Solver& solver,
-    const std::vector<Complex>& rho_in,
-    std::vector<Complex>& rho_out);
+    ConstStateBuffer rho_in,
+    StateBuffer rho_out);
+
+void apply_liouvillian_cpu_reference_at_time(
+    const Solver& solver,
+    double t,
+    ConstStateBuffer rho_in,
+    StateBuffer rho_out);
 
 } // namespace culindblad

@@ -10,4 +10,10 @@ void apply_liouvillian(
     ConstStateBuffer rho_in,
     StateBuffer rho_out);
 
+void apply_liouvillian_at_time(
+    const Solver& solver,
+    double t,
+    ConstStateBuffer rho_in,
+    StateBuffer rho_out);
+
 } // namespace culindblad

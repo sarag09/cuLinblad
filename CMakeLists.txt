@@ -50,6 +50,8 @@ add_executable(run_sim
     cpp/src/backends/cuda/cutensor_executor.cpp
     cpp/src/backends/cuda/cutensor_dissipator.cpp
     cpp/src/backends/cuda/cuda_elementwise.cu
+    cpp/src/core/time_dependence.cpp
+    cpp/src/core/time_dependent_term.cpp
 )
 
 target_include_directories(run_sim PRIVATE
