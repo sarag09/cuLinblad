@@ -11,11 +11,11 @@ struct CuTensorOperationDesc {
     cutensorOperationDescriptor_t op_desc;
 };
 
-bool create_cutensor_left_operation_desc(
+bool create_cutensor_operation_desc(
     const CuTensorContractionDesc& desc,
     CuTensorOperationDesc& op_desc_bundle);
 
-bool destroy_cutensor_left_operation_desc(
+bool destroy_cutensor_operation_desc(
     CuTensorOperationDesc& op_desc_bundle);
 
 } // namespace culindblad

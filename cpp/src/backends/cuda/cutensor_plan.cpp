@@ -8,14 +8,13 @@ bool create_cutensor_plan(
     const CuTensorContractionDesc& desc,
     CuTensorPlanBundle& plan_bundle)
 {
-    if (!create_cutensor_left_operation_desc(desc, plan_bundle.op_bundle)) {
+    if (!create_cutensor_operation_desc(desc, plan_bundle.op_bundle)) {
         return false;
     }
 
     auto& handle = plan_bundle.op_bundle.tensor_descs.handle;
     auto& op_desc = plan_bundle.op_bundle.op_desc;
 
-    // Step 1 — create plan preference
     const cutensorStatus_t pref_status =
         cutensorCreatePlanPreference(
             handle,
@@ -24,11 +23,10 @@ bool create_cutensor_plan(
             CUTENSOR_JIT_MODE_NONE);
 
     if (pref_status != CUTENSOR_STATUS_SUCCESS) {
-        destroy_cutensor_left_operation_desc(plan_bundle.op_bundle);
+        destroy_cutensor_operation_desc(plan_bundle.op_bundle);
         return false;
     }
 
-    // Step 2 — query workspace size
     const cutensorStatus_t ws_status =
         cutensorEstimateWorkspaceSize(
             handle,
@@ -39,11 +37,10 @@ bool create_cutensor_plan(
 
     if (ws_status != CUTENSOR_STATUS_SUCCESS) {
         cutensorDestroyPlanPreference(plan_bundle.preference);
-        destroy_cutensor_left_operation_desc(plan_bundle.op_bundle);
+        destroy_cutensor_operation_desc(plan_bundle.op_bundle);
         return false;
     }
 
-    // Step 3 — create plan
     const cutensorStatus_t plan_status =
         cutensorCreatePlan(
             handle,
@@ -54,7 +51,7 @@ bool create_cutensor_plan(
 
     if (plan_status != CUTENSOR_STATUS_SUCCESS) {
         cutensorDestroyPlanPreference(plan_bundle.preference);
-        destroy_cutensor_left_operation_desc(plan_bundle.op_bundle);
+        destroy_cutensor_operation_desc(plan_bundle.op_bundle);
         return false;
     }
 
@@ -74,7 +71,7 @@ bool destroy_cutensor_plan(
         ok = false;
     }
 
-    if (!destroy_cutensor_left_operation_desc(plan_bundle.op_bundle)) {
+    if (!destroy_cutensor_operation_desc(plan_bundle.op_bundle)) {
         ok = false;
     }
 

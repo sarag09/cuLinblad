@@ -4,10 +4,11 @@
 
 #include "culindblad/cutensor_contraction_desc.hpp"
 #include "culindblad/cutensor_tensor_descs.hpp"
+#include "culindblad/k_site_contraction_api.hpp"
 
 namespace culindblad {
 
-bool create_cutensor_left_operation_desc(
+bool create_cutensor_operation_desc(
     const CuTensorContractionDesc& desc,
     CuTensorOperationDesc& op_desc_bundle)
 {
@@ -39,7 +40,7 @@ bool create_cutensor_left_operation_desc(
     return true;
 }
 
-bool destroy_cutensor_left_operation_desc(
+bool destroy_cutensor_operation_desc(
     CuTensorOperationDesc& op_desc_bundle)
 {
     bool ok = true;

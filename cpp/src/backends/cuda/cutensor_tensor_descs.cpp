@@ -2,12 +2,34 @@
 
 #include <cutensor.h>
 #include <cuda_runtime.h>
-#include <cstdint>
+
+#include <vector>
 
 #include "culindblad/cutensor_contraction_desc.hpp"
 #include "culindblad/cutensor_ops.hpp"
 
 namespace culindblad {
+
+namespace {
+
+std::vector<int64_t> make_row_major_strides(
+    const std::vector<int64_t>& extents)
+{
+    std::vector<int64_t> strides(extents.size(), 1);
+
+    if (extents.empty()) {
+        return strides;
+    }
+
+    strides.back() = 1;
+    for (Index i = extents.size() - 1; i > 0; --i) {
+        strides[i - 1] = strides[i] * extents[i];
+    }
+
+    return strides;
+}
+
+} // namespace
 
 bool create_cutensor_tensor_descs(
     const CuTensorContractionDesc& desc,
@@ -25,12 +47,19 @@ bool create_cutensor_tensor_descs(
     constexpr uint32_t alignment = 256;
     constexpr cudaDataType_t data_type = CUDA_C_64F;
 
+    const std::vector<int64_t> op_strides =
+        make_row_major_strides(desc.operator_extents);
+    const std::vector<int64_t> input_strides =
+        make_row_major_strides(desc.input_extents);
+    const std::vector<int64_t> output_strides =
+        make_row_major_strides(desc.output_extents);
+
     const cutensorStatus_t op_status = cutensorCreateTensorDescriptor(
         tensor_descs.handle,
         &tensor_descs.op_desc,
         static_cast<uint32_t>(desc.operator_extents.size()),
         desc.operator_extents.data(),
-        nullptr,
+        op_strides.data(),
         data_type,
         alignment);
 
@@ -44,7 +73,7 @@ bool create_cutensor_tensor_descs(
         &tensor_descs.input_desc,
         static_cast<uint32_t>(desc.input_extents.size()),
         desc.input_extents.data(),
-        nullptr,
+        input_strides.data(),
         data_type,
         alignment);
 
@@ -59,7 +88,7 @@ bool create_cutensor_tensor_descs(
         &tensor_descs.output_desc,
         static_cast<uint32_t>(desc.output_extents.size()),
         desc.output_extents.data(),
-        nullptr,
+        output_strides.data(),
         data_type,
         alignment);
 

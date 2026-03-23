@@ -1,11 +1,17 @@
 cmake_minimum_required(VERSION 3.14)
 project(cuLindblad LANGUAGES CXX CUDA)
 
+cmake_policy(SET CMP0104 NEW)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 86)
+endif()
 
 find_package(MPI REQUIRED)
 
@@ -40,6 +46,10 @@ add_executable(run_sim
     cpp/src/backends/cuda/cutensor_tensor_descs.cpp
     cpp/src/backends/cuda/cutensor_operation_desc.cpp
     cpp/src/backends/cuda/cutensor_plan.cpp
+    cpp/src/backends/cuda/cutensor_execute.cpp
+    cpp/src/backends/cuda/cutensor_executor.cpp
+    cpp/src/backends/cuda/cutensor_dissipator.cpp
+    cpp/src/backends/cuda/cuda_elementwise.cu
 )
 
 target_include_directories(run_sim PRIVATE

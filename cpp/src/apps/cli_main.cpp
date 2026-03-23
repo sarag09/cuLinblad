@@ -1,9 +1,18 @@
+#include <complex>
 #include <iostream>
 #include <vector>
 
 #include <petscts.h>
 
 #include "culindblad/backend.hpp"
+#include "culindblad/cutensor_contraction_desc.hpp"
+#include "culindblad/cutensor_dissipator.hpp"
+#include "culindblad/cutensor_execute.hpp"
+#include "culindblad/cutensor_executor.hpp"
+#include "culindblad/cutensor_operation_desc.hpp"
+#include "culindblad/cutensor_ops.hpp"
+#include "culindblad/cutensor_plan.hpp"
+#include "culindblad/cutensor_tensor_descs.hpp"
 #include "culindblad/grouped_contraction_backend.hpp"
 #include "culindblad/k_site_block_map.hpp"
 #include "culindblad/k_site_contraction_api.hpp"
@@ -18,11 +27,6 @@
 #include "culindblad/petsc_ts_smoke.hpp"
 #include "culindblad/solver.hpp"
 #include "culindblad/types.hpp"
-#include "culindblad/cutensor_contraction_desc.hpp"
-#include "culindblad/cutensor_ops.hpp"
-#include "culindblad/cutensor_tensor_descs.hpp"
-#include "culindblad/cutensor_operation_desc.hpp"
-#include "culindblad/cutensor_plan.hpp"
 
 int main(int argc, char** argv)
 {
@@ -51,6 +55,26 @@ int main(int argc, char** argv)
 
     std::vector<Complex> lowering_three_site(27 * 27, Complex{0.0, 0.0});
     lowering_three_site[0 * 27 + 9] = Complex{1.0, 0.0};
+
+    std::vector<Complex> lowering_three_site_dag(27 * 27, Complex{0.0, 0.0});
+    for (Index row = 0; row < 27; ++row) {
+        for (Index col = 0; col < 27; ++col) {
+            lowering_three_site_dag[row * 27 + col] =
+                std::conj(lowering_three_site[col * 27 + row]);
+        }
+    }
+
+    std::vector<Complex> lowering_three_site_dag_op(27 * 27, Complex{0.0, 0.0});
+    for (Index i = 0; i < 27; ++i) {
+        for (Index j = 0; j < 27; ++j) {
+            Complex accum{0.0, 0.0};
+            for (Index k = 0; k < 27; ++k) {
+                accum += lowering_three_site_dag[i * 27 + k]
+                      * lowering_three_site[k * 27 + j];
+            }
+            lowering_three_site_dag_op[i * 27 + j] = accum;
+        }
+    }
 
     OperatorTerm h_term{
         TermKind::Hamiltonian,
@@ -196,10 +220,8 @@ int main(int argc, char** argv)
 
     std::cout << "Backend grouped left entry (0,27): "
               << grouped_left.at(0 * solver.layout.hilbert_dim + 27) << std::endl;
-
     std::cout << "Backend grouped right entry (0,27): "
               << grouped_right.at(0 * solver.layout.hilbert_dim + 27) << std::endl;
-
     std::cout << "Backend grouped commutator entry (0,27): "
               << grouped_comm.at(0 * solver.layout.hilbert_dim + 27) << std::endl;
     std::cout << "Dense embedded commutator entry (0,27): "
@@ -224,62 +246,32 @@ int main(int argc, char** argv)
 
     CuTensorContractionDesc cutensor_left =
         make_cutensor_left_contraction_desc({0, 1, 2}, local_dims);
-
     CuTensorContractionDesc cutensor_right =
         make_cutensor_right_contraction_desc({0, 1, 2}, local_dims);
 
+    std::vector<Complex> grouped_input(27 * 3 * 27 * 3, Complex{0.0, 0.0});
+    std::vector<Complex> grouped_output_left(27 * 3 * 27 * 3, Complex{0.0, 0.0});
+    std::vector<Complex> grouped_output_right(27 * 3 * 27 * 3, Complex{0.0, 0.0});
+
+    for (Index ket_flat = 0; ket_flat < solver.layout.hilbert_dim; ++ket_flat) {
+        const Index ket_target = ket_flat / 3;
+        const Index ket_comp = ket_flat % 3;
+
+        for (Index bra_flat = 0; bra_flat < solver.layout.hilbert_dim; ++bra_flat) {
+            const Index bra_target = bra_flat / 3;
+            const Index bra_comp = bra_flat % 3;
+
+            const Index grouped_idx =
+                ((ket_target * 3 + ket_comp) * 27 + bra_target) * 3 + bra_comp;
+
+            grouped_input[grouped_idx] =
+                rho_in[ket_flat * solver.layout.hilbert_dim + bra_flat];
+        }
+    }
+
     std::cout << "cutensor left debug name: " << cutensor_left.debug_name << std::endl;
-
-    std::cout << "cutensor left operator modes: ";
-    for (int32_t m : cutensor_left.operator_modes) {
-        std::cout << m << " ";
-    }
-    std::cout << std::endl;
-
-    std::cout << "cutensor left input modes: ";
-    for (int32_t m : cutensor_left.input_modes) {
-        std::cout << m << " ";
-    }
-    std::cout << std::endl;
-
-    std::cout << "cutensor left output modes: ";
-    for (int32_t m : cutensor_left.output_modes) {
-        std::cout << m << " ";
-    }
-    std::cout << std::endl;
-
-    std::cout << "cutensor left input extents: ";
-    for (int64_t e : cutensor_left.input_extents) {
-        std::cout << e << " ";
-    }
-    std::cout << std::endl;
-
     std::cout << "cutensor right debug name: " << cutensor_right.debug_name << std::endl;
 
-    std::cout << "cutensor right operator modes: ";
-    for (int32_t m : cutensor_right.operator_modes) {
-        std::cout << m << " ";
-    }
-    std::cout << std::endl;
-
-    std::cout << "cutensor right input modes: ";
-    for (int32_t m : cutensor_right.input_modes) {
-        std::cout << m << " ";
-    }
-    std::cout << std::endl;
-
-    std::cout << "cutensor right output modes: ";
-    for (int32_t m : cutensor_right.output_modes) {
-        std::cout << m << " ";
-    }
-    std::cout << std::endl;
-
-    std::cout << "cutensor right input extents: ";
-    for (int64_t e : cutensor_right.input_extents) {
-        std::cout << e << " ";
-    }
-    std::cout << std::endl;
-    
     const bool cutensor_left_valid =
         validate_cutensor_contraction_desc(cutensor_left);
     const bool cutensor_right_valid =
@@ -292,44 +284,38 @@ int main(int argc, char** argv)
 
     const bool cutensor_handle_ok =
         initialize_cutensor_handle_for_desc(cutensor_left);
-
     std::cout << "cutensor handle initialization: "
-              << (cutensor_handle_ok ? "true" : "false") << std::endl;    
+              << (cutensor_handle_ok ? "true" : "false") << std::endl;
 
     CuTensorTensorDescs cutensor_tensor_descs{};
     const bool cutensor_tensor_descs_ok =
         create_cutensor_tensor_descs(cutensor_left, cutensor_tensor_descs);
-
     std::cout << "cutensor tensor descriptor creation: "
               << (cutensor_tensor_descs_ok ? "true" : "false") << std::endl;
 
     if (cutensor_tensor_descs_ok) {
         const bool cutensor_tensor_descs_destroy_ok =
             destroy_cutensor_tensor_descs(cutensor_tensor_descs);
-
         std::cout << "cutensor tensor descriptor destruction: "
                   << (cutensor_tensor_descs_destroy_ok ? "true" : "false") << std::endl;
     }
-    
+
     CuTensorOperationDesc cutensor_op_desc{};
     const bool cutensor_op_desc_ok =
-        create_cutensor_left_operation_desc(cutensor_left, cutensor_op_desc);
-
+        create_cutensor_operation_desc(cutensor_left, cutensor_op_desc);
     std::cout << "cutensor operation descriptor creation: "
               << (cutensor_op_desc_ok ? "true" : "false") << std::endl;
 
     if (cutensor_op_desc_ok) {
         const bool cutensor_op_desc_destroy_ok =
-            destroy_cutensor_left_operation_desc(cutensor_op_desc);
-
+            destroy_cutensor_operation_desc(cutensor_op_desc);
         std::cout << "cutensor operation descriptor destruction: "
                   << (cutensor_op_desc_destroy_ok ? "true" : "false") << std::endl;
-    }   
-    
+    }
+
     CuTensorPlanBundle plan_bundle{};
     const bool plan_ok =
         create_cutensor_plan(cutensor_left, plan_bundle);
-
     std::cout << "cutensor plan creation: "
               << (plan_ok ? "true" : "false") << std::endl;
 
@@ -339,10 +325,190 @@ int main(int argc, char** argv)
 
         const bool plan_destroy_ok =
             destroy_cutensor_plan(plan_bundle);
-
         std::cout << "cutensor plan destruction: "
                   << (plan_destroy_ok ? "true" : "false") << std::endl;
-    }  
+    }
+
+    const bool cutensor_left_exec_ok =
+        execute_cutensor_left_contraction(
+            cutensor_left,
+            zzz_three_site,
+            grouped_input,
+            grouped_output_left);
+    std::cout << "cutensor left execution: "
+              << (cutensor_left_exec_ok ? "true" : "false") << std::endl;
+
+    if (cutensor_left_exec_ok) {
+        const Index grouped_out_idx =
+            ((0 * 3 + 0) * 27 + 9) * 3 + 0;
+        std::cout << "cutensor grouped left entry ((0,0),(9,0)): "
+                  << grouped_output_left.at(grouped_out_idx) << std::endl;
+    }
+
+    const bool cutensor_right_exec_ok =
+        execute_cutensor_right_contraction(
+            cutensor_right,
+            zzz_three_site,
+            grouped_input,
+            grouped_output_right);
+    std::cout << "cutensor right execution: "
+              << (cutensor_right_exec_ok ? "true" : "false") << std::endl;
+
+    if (cutensor_right_exec_ok) {
+        const Index grouped_out_idx =
+            ((0 * 3 + 0) * 27 + 9) * 3 + 0;
+        std::cout << "cutensor grouped right entry ((0,0),(9,0)): "
+                  << grouped_output_right.at(grouped_out_idx) << std::endl;
+    }
+
+    if (cutensor_left_exec_ok && cutensor_right_exec_ok) {
+        std::vector<Complex> gpu_grouped_comm(grouped_output_left.size(), Complex{0.0, 0.0});
+        const Complex minus_i{0.0, -1.0};
+
+        for (Index idx = 0; idx < gpu_grouped_comm.size(); ++idx) {
+            gpu_grouped_comm[idx] =
+                minus_i * (grouped_output_left[idx] - grouped_output_right[idx]);
+        }
+
+        const Index grouped_out_idx =
+            ((0 * 3 + 0) * 27 + 9) * 3 + 0;
+        std::cout << "cutensor grouped commutator entry ((0,0),(9,0)): "
+                  << gpu_grouped_comm.at(grouped_out_idx) << std::endl;
+    }
+
+    CuTensorExecutor staged_left_executor{};
+    const bool staged_left_executor_ok =
+        create_cutensor_executor(
+            cutensor_left,
+            zzz_three_site.size() * sizeof(Complex),
+            grouped_input.size() * sizeof(Complex),
+            grouped_output_left.size() * sizeof(Complex),
+            staged_left_executor);
+    std::cout << "staged cutensor executor creation: "
+              << (staged_left_executor_ok ? "true" : "false") << std::endl;
+
+    if (staged_left_executor_ok) {
+        const bool staged_upload_ok =
+            upload_cutensor_executor_inputs(
+                staged_left_executor,
+                zzz_three_site,
+                grouped_input);
+        std::cout << "staged cutensor upload: "
+                  << (staged_upload_ok ? "true" : "false") << std::endl;
+
+        bool staged_exec_ok = false;
+        bool staged_download_ok = false;
+
+        if (staged_upload_ok) {
+            staged_exec_ok =
+                execute_cutensor_executor_device(staged_left_executor);
+            std::cout << "staged cutensor device execution: "
+                      << (staged_exec_ok ? "true" : "false") << std::endl;
+        }
+
+        if (staged_exec_ok) {
+            staged_download_ok =
+                download_cutensor_executor_output(
+                    staged_left_executor,
+                    grouped_output_left);
+            std::cout << "staged cutensor download: "
+                      << (staged_download_ok ? "true" : "false") << std::endl;
+        }
+
+        if (staged_download_ok) {
+            const Index grouped_out_idx =
+                ((0 * 3 + 0) * 27 + 9) * 3 + 0;
+            std::cout << "staged cutensor grouped left entry ((0,0),(9,0)): "
+                      << grouped_output_left.at(grouped_out_idx) << std::endl;
+        }
+
+        const bool staged_destroy_ok =
+            destroy_cutensor_executor(staged_left_executor);
+        std::cout << "staged cutensor executor destruction: "
+                  << (staged_destroy_ok ? "true" : "false") << std::endl;
+    }
+
+    std::vector<Complex> grouped_output_diss_gpu_staged(
+        27 * 3 * 27 * 3, Complex{0.0, 0.0});
+
+    CuTensorExecutor jump_left_executor{};
+    CuTensorExecutor jump_right_executor{};
+    CuTensorExecutor norm_left_executor{};
+    CuTensorExecutor norm_right_executor{};
+
+    const std::size_t grouped_bytes =
+        grouped_input.size() * sizeof(Complex);
+    const std::size_t local_bytes =
+        lowering_three_site.size() * sizeof(Complex);
+
+    const bool jump_left_ok =
+        create_cutensor_executor(
+            cutensor_left,
+            local_bytes,
+            grouped_bytes,
+            grouped_bytes,
+            jump_left_executor);
+
+    const bool jump_right_ok =
+        create_cutensor_executor(
+            cutensor_right,
+            local_bytes,
+            grouped_bytes,
+            grouped_bytes,
+            jump_right_executor);
+
+    const bool norm_left_ok =
+        create_cutensor_executor(
+            cutensor_left,
+            local_bytes,
+            grouped_bytes,
+            grouped_bytes,
+            norm_left_executor);
+
+    const bool norm_right_ok =
+        create_cutensor_executor(
+            cutensor_right,
+            local_bytes,
+            grouped_bytes,
+            grouped_bytes,
+            norm_right_executor);
+
+    std::cout << "staged dissipator executor creation: "
+              << ((jump_left_ok && jump_right_ok && norm_left_ok && norm_right_ok) ? "true" : "false")
+              << std::endl;
+
+    if (jump_left_ok && jump_right_ok && norm_left_ok && norm_right_ok) {
+        const bool staged_diss_ok =
+            execute_cutensor_dissipator_staged(
+                jump_left_executor,
+                jump_right_executor,
+                norm_left_executor,
+                norm_right_executor,
+                lowering_three_site,
+                lowering_three_site_dag,
+                lowering_three_site_dag_op,
+                grouped_input,
+                grouped_output_diss_gpu_staged);
+
+        std::cout << "staged cutensor dissipator execution: "
+                  << (staged_diss_ok ? "true" : "false") << std::endl;
+
+        if (staged_diss_ok) {
+            const Index grouped_out_idx =
+                ((0 * 3 + 0) * 27 + 9) * 3 + 0;
+            std::cout << "staged cutensor grouped dissipator entry ((0,0),(9,0)): "
+                      << grouped_output_diss_gpu_staged.at(grouped_out_idx) << std::endl;
+        }
+
+        const bool destroy_all_ok =
+            destroy_cutensor_executor(jump_left_executor) &&
+            destroy_cutensor_executor(jump_right_executor) &&
+            destroy_cutensor_executor(norm_left_executor) &&
+            destroy_cutensor_executor(norm_right_executor);
+
+        std::cout << "staged dissipator executor destruction: "
+                  << (destroy_all_ok ? "true" : "false") << std::endl;
+    }
 
     Complex ts_value{0.0, 0.0};
     ierr = run_ts_smoke_test(solver, 0, 27, ts_value);
