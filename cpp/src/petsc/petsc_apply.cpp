@@ -74,4 +74,30 @@ PetscErrorCode apply_liouvillian_vec(
     return 0;
 }
 
+PetscErrorCode petsc_cuda_vec_smoke_test(
+    const Solver& solver,
+    Index row,
+    Index col,
+    Complex& value_out)
+{
+    Vec x = nullptr;
+
+    PetscCall(VecCreate(PETSC_COMM_SELF, &x));
+    PetscCall(VecSetSizes(x, PETSC_DECIDE, solver.layout.density_dim));
+    PetscCall(VecSetType(x, VECCUDA));
+    PetscCall(VecSet(x, 0.0));
+
+    PetscScalar* x_ptr = nullptr;
+    PetscCall(VecGetArray(x, &x_ptr));
+    x_ptr[row * solver.layout.hilbert_dim + col] = PetscScalar(1.0);
+    PetscCall(VecRestoreArray(x, &x_ptr));
+
+    PetscCall(VecGetArray(x, &x_ptr));
+    value_out = reinterpret_cast<Complex*>(x_ptr)[row * solver.layout.hilbert_dim + col];
+    PetscCall(VecRestoreArray(x, &x_ptr));
+
+    PetscCall(VecDestroy(&x));
+    return 0;
+}
+
 } // namespace culindblad

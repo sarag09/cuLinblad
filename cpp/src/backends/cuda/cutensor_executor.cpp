@@ -6,6 +6,7 @@
 
 #include "culindblad/cutensor_plan.hpp"
 #include "culindblad/types.hpp"
+#include "culindblad/pinned_host_buffer.hpp"
 
 namespace culindblad {
 
@@ -49,6 +50,7 @@ bool create_cutensor_executor(
     executor.op_bytes = op_bytes;
     executor.input_bytes = input_bytes;
     executor.output_bytes = output_bytes;
+    executor.operator_resident = false;
 
     if (!create_cutensor_plan(desc, executor.plan_bundle)) {
         return false;
@@ -140,6 +142,7 @@ bool upload_cutensor_executor_operator(
         return false;
     }
 
+    executor.operator_resident = true;
     return true;
 }
 
@@ -262,6 +265,82 @@ bool execute_cutensor_executor(
     }
 
     if (!download_cutensor_executor_output(executor, output_tensor)) {
+        return false;
+    }
+
+    return true;
+}
+
+bool execute_cutensor_executor_with_resident_operator(
+    CuTensorExecutor& executor,
+    const std::vector<Complex>& input_tensor,
+    std::vector<Complex>& output_tensor)
+{
+    if (!executor.operator_resident) {
+        return false;
+    }
+
+    if (!upload_cutensor_executor_input(executor, input_tensor)) {
+        return false;
+    }
+
+    if (!execute_cutensor_executor_device(executor)) {
+        return false;
+    }
+
+    if (!download_cutensor_executor_output(executor, output_tensor)) {
+        return false;
+    }
+
+    return true;
+}
+
+bool execute_cutensor_executor_with_resident_operator_pinned(
+    CuTensorExecutor& executor,
+    const PinnedComplexBuffer& input_buffer,
+    PinnedComplexBuffer& output_buffer)
+{
+    if (!executor.operator_resident) {
+        return false;
+    }
+
+    if (input_buffer.size * sizeof(Complex) != executor.input_bytes) {
+        return false;
+    }
+
+    if (output_buffer.size * sizeof(Complex) != executor.output_bytes) {
+        return false;
+    }
+
+    if (!cuda_copy_h2d_async(
+            executor.d_input,
+            input_buffer.data,
+            executor.input_bytes,
+            executor.stream)) {
+        return false;
+    }
+
+    if (cudaMemsetAsync(
+            executor.d_output,
+            0,
+            executor.output_bytes,
+            executor.stream) != cudaSuccess) {
+        return false;
+    }
+
+    if (!execute_cutensor_executor_device(executor)) {
+        return false;
+    }
+
+    if (!cuda_copy_d2h_async(
+            output_buffer.data,
+            executor.d_output,
+            executor.output_bytes,
+            executor.stream)) {
+        return false;
+    }
+
+    if (cudaStreamSynchronize(executor.stream) != cudaSuccess) {
         return false;
     }
 

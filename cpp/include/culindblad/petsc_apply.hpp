@@ -11,4 +11,10 @@ PetscErrorCode apply_liouvillian_vec(
     Vec x,
     Vec y);
 
+PetscErrorCode petsc_cuda_vec_smoke_test(
+    const Solver& solver,
+    Index row,
+    Index col,
+    Complex& value_out);    
+
 } // namespace culindblad

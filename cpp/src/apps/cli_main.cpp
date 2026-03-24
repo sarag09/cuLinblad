@@ -29,6 +29,10 @@
 #include "culindblad/types.hpp"
 #include "culindblad/time_dependence.hpp"
 #include "culindblad/time_dependent_term.hpp"
+#include "culindblad/cutensor_executor_cache.hpp"
+#include "culindblad/pinned_host_buffer.hpp"
+#include "culindblad/grouped_state_layout.hpp"
+#include "culindblad/petsc_apply.hpp"
 
 int main(int argc, char** argv)
 {
@@ -270,25 +274,28 @@ int main(int argc, char** argv)
     CuTensorContractionDesc cutensor_right =
         make_cutensor_right_contraction_desc({0, 1, 2}, local_dims);
 
-    std::vector<Complex> grouped_input(27 * 3 * 27 * 3, Complex{0.0, 0.0});
-    std::vector<Complex> grouped_output_left(27 * 3 * 27 * 3, Complex{0.0, 0.0});
-    std::vector<Complex> grouped_output_right(27 * 3 * 27 * 3, Complex{0.0, 0.0});
+    GroupedStateLayout grouped_layout =
+        make_grouped_state_layout({0, 1, 2}, local_dims);
 
-    for (Index ket_flat = 0; ket_flat < solver.layout.hilbert_dim; ++ket_flat) {
-        const Index ket_target = ket_flat / 3;
-        const Index ket_comp = ket_flat % 3;
+    std::vector<Complex> grouped_input(grouped_layout.grouped_size, Complex{0.0, 0.0});
+    std::vector<Complex> grouped_output_left(grouped_layout.grouped_size, Complex{0.0, 0.0});
+    std::vector<Complex> grouped_output_right(grouped_layout.grouped_size, Complex{0.0, 0.0});
 
-        for (Index bra_flat = 0; bra_flat < solver.layout.hilbert_dim; ++bra_flat) {
-            const Index bra_target = bra_flat / 3;
-            const Index bra_comp = bra_flat % 3;
+    regroup_flat_density_to_grouped(
+        grouped_layout,
+        rho_in,
+        grouped_input);    
 
-            const Index grouped_idx =
-                ((ket_target * 3 + ket_comp) * 27 + bra_target) * 3 + bra_comp;
+    std::vector<Complex> flat_roundtrip(rho_in.size(), Complex{0.0, 0.0});
+    regroup_grouped_to_flat_density(
+        grouped_layout,
+        grouped_input,
+        flat_roundtrip);
 
-            grouped_input[grouped_idx] =
-                rho_in[ket_flat * solver.layout.hilbert_dim + bra_flat];
-        }
-    }
+    std::cout << "grouped layout roundtrip difference at flat (0,27): "
+              << (flat_roundtrip.at(0 * solver.layout.hilbert_dim + 27)
+                  - rho_in.at(0 * solver.layout.hilbert_dim + 27))
+              << std::endl;        
 
     std::cout << "cutensor left debug name: " << cutensor_left.debug_name << std::endl;
     std::cout << "cutensor right debug name: " << cutensor_right.debug_name << std::endl;
@@ -449,13 +456,216 @@ int main(int argc, char** argv)
                   << (staged_destroy_ok ? "true" : "false") << std::endl;
     }
 
-    std::vector<Complex> grouped_output_diss_gpu_staged(
-        27 * 3 * 27 * 3, Complex{0.0, 0.0});
+    CuTensorExecutor resident_left_executor{};
+    const bool resident_left_executor_ok =
+        create_cutensor_executor(
+            cutensor_left,
+            zzz_three_site.size() * sizeof(Complex),
+            grouped_input.size() * sizeof(Complex),
+            grouped_output_left.size() * sizeof(Complex),
+            resident_left_executor);
 
-    CuTensorExecutor jump_left_executor{};
-    CuTensorExecutor jump_right_executor{};
-    CuTensorExecutor norm_left_executor{};
-    CuTensorExecutor norm_right_executor{};
+    std::cout << "resident cutensor executor creation: "
+              << (resident_left_executor_ok ? "true" : "false") << std::endl;
+
+    if (resident_left_executor_ok) {
+        const bool resident_upload_ok =
+            upload_cutensor_executor_operator(
+                resident_left_executor,
+                zzz_three_site);
+
+        std::cout << "resident cutensor operator upload: "
+                  << (resident_upload_ok ? "true" : "false") << std::endl;
+
+        std::vector<Complex> resident_output(grouped_output_left.size(), Complex{0.0, 0.0});
+
+        bool resident_exec_ok = false;
+        if (resident_upload_ok) {
+            resident_exec_ok =
+                execute_cutensor_executor_with_resident_operator(
+                    resident_left_executor,
+                    grouped_input,
+                    resident_output);
+
+            std::cout << "resident cutensor execution: "
+                      << (resident_exec_ok ? "true" : "false") << std::endl;
+        }
+
+        if (resident_exec_ok) {
+            const Index grouped_out_idx =
+                ((0 * 3 + 0) * 27 + 9) * 3 + 0;
+
+            std::cout << "resident cutensor grouped left entry ((0,0),(9,0)): "
+                      << resident_output.at(grouped_out_idx) << std::endl;
+        }
+
+        const bool resident_destroy_ok =
+            destroy_cutensor_executor(resident_left_executor);
+
+        std::cout << "resident cutensor executor destruction: "
+                  << (resident_destroy_ok ? "true" : "false") << std::endl;
+    }    
+
+    PinnedComplexBuffer pinned_input{};
+    PinnedComplexBuffer pinned_output{};
+
+    const bool pinned_input_ok =
+        create_pinned_complex_buffer(grouped_input.size(), pinned_input);
+    const bool pinned_output_ok =
+        create_pinned_complex_buffer(grouped_output_left.size(), pinned_output);
+
+    std::cout << "pinned input buffer creation: "
+              << (pinned_input_ok ? "true" : "false") << std::endl;
+    std::cout << "pinned output buffer creation: "
+              << (pinned_output_ok ? "true" : "false") << std::endl;
+
+    if (pinned_input_ok && pinned_output_ok) {
+        for (Index i = 0; i < grouped_input.size(); ++i) {
+            pinned_input.data[i] = grouped_input[i];
+            pinned_output.data[i] = Complex{0.0, 0.0};
+        }
+
+        CuTensorExecutor pinned_executor{};
+        const bool pinned_executor_ok =
+            create_cutensor_executor(
+                cutensor_left,
+                zzz_three_site.size() * sizeof(Complex),
+                grouped_input.size() * sizeof(Complex),
+                grouped_output_left.size() * sizeof(Complex),
+                pinned_executor);
+
+        std::cout << "pinned cutensor executor creation: "
+                  << (pinned_executor_ok ? "true" : "false") << std::endl;
+
+        if (pinned_executor_ok) {
+            const bool pinned_op_upload_ok =
+                upload_cutensor_executor_operator(
+                    pinned_executor,
+                    zzz_three_site);
+
+            std::cout << "pinned cutensor operator upload: "
+                      << (pinned_op_upload_ok ? "true" : "false") << std::endl;
+
+            bool pinned_exec_ok = false;
+            if (pinned_op_upload_ok) {
+                pinned_exec_ok =
+                    execute_cutensor_executor_with_resident_operator_pinned(
+                        pinned_executor,
+                        pinned_input,
+                        pinned_output);
+
+                std::cout << "pinned cutensor execution: "
+                          << (pinned_exec_ok ? "true" : "false") << std::endl;
+            }
+
+            if (pinned_exec_ok) {
+                const Index grouped_out_idx =
+                    ((0 * 3 + 0) * 27 + 9) * 3 + 0;
+
+                std::cout << "pinned cutensor grouped left entry ((0,0),(9,0)): "
+                          << pinned_output.data[grouped_out_idx] << std::endl;
+            }
+
+            const bool pinned_executor_destroy_ok =
+                destroy_cutensor_executor(pinned_executor);
+
+            std::cout << "pinned cutensor executor destruction: "
+                      << (pinned_executor_destroy_ok ? "true" : "false") << std::endl;
+        }
+    }
+
+    const bool pinned_input_destroy_ok =
+        destroy_pinned_complex_buffer(pinned_input);
+    const bool pinned_output_destroy_ok =
+        destroy_pinned_complex_buffer(pinned_output);
+
+    std::cout << "pinned input buffer destruction: "
+              << (pinned_input_destroy_ok ? "true" : "false") << std::endl;
+    std::cout << "pinned output buffer destruction: "
+              << (pinned_output_destroy_ok ? "true" : "false") << std::endl;    
+
+    CuTensorExecutorCache executor_cache{};
+
+    CuTensorExecutor* cached_left_executor_1 = nullptr;
+    CuTensorExecutor* cached_left_executor_2 = nullptr;
+
+    const bool cache_create_1_ok =
+        get_or_create_cutensor_executor(
+            executor_cache,
+            "left_zzz_q123",
+            cutensor_left,
+            zzz_three_site.size() * sizeof(Complex),
+            grouped_input.size() * sizeof(Complex),
+            grouped_output_left.size() * sizeof(Complex),
+            cached_left_executor_1);
+
+    const bool cache_create_2_ok =
+        get_or_create_cutensor_executor(
+            executor_cache,
+            "left_zzz_q123",
+            cutensor_left,
+            zzz_three_site.size() * sizeof(Complex),
+            grouped_input.size() * sizeof(Complex),
+            grouped_output_left.size() * sizeof(Complex),
+            cached_left_executor_2);
+
+    std::cout << "cutensor executor cache first lookup: "
+              << (cache_create_1_ok ? "true" : "false") << std::endl;
+
+    std::cout << "cutensor executor cache second lookup: "
+              << (cache_create_2_ok ? "true" : "false") << std::endl;
+
+    std::cout << "cutensor executor cache reused same object: "
+              << ((cached_left_executor_1 == cached_left_executor_2) ? "true" : "false")
+              << std::endl;
+
+    if (cache_create_1_ok && cached_left_executor_1 != nullptr) {
+        const bool cache_operator_upload_ok =
+            upload_cutensor_executor_operator(
+                *cached_left_executor_1,
+                zzz_three_site);
+
+        std::cout << "cutensor executor cache operator upload: "
+                  << (cache_operator_upload_ok ? "true" : "false") << std::endl;
+
+        std::vector<Complex> cached_output(grouped_output_left.size(), Complex{0.0, 0.0});
+
+        bool cache_exec_ok = false;
+        if (cache_operator_upload_ok) {
+            cache_exec_ok =
+                execute_cutensor_executor_with_resident_operator(
+                    *cached_left_executor_1,
+                    grouped_input,
+                    cached_output);
+
+            std::cout << "cutensor executor cache execution: "
+                      << (cache_exec_ok ? "true" : "false") << std::endl;
+        }
+
+        if (cache_exec_ok) {
+            const Index grouped_out_idx =
+                ((0 * 3 + 0) * 27 + 9) * 3 + 0;
+
+            std::cout << "cutensor executor cache grouped left entry ((0,0),(9,0)): "
+                      << cached_output.at(grouped_out_idx) << std::endl;
+        }
+    }
+
+    const bool cache_destroy_ok =
+        destroy_cutensor_executor_cache(executor_cache);
+
+    std::cout << "cutensor executor cache destruction: "
+              << (cache_destroy_ok ? "true" : "false") << std::endl;    
+
+    std::vector<Complex> grouped_output_diss_gpu_staged(
+        grouped_layout.grouped_size, Complex{0.0, 0.0});
+
+    CuTensorExecutorCache dissipator_executor_cache{};
+
+    CuTensorExecutor* jump_left_executor = nullptr;
+    CuTensorExecutor* jump_right_executor = nullptr;
+    CuTensorExecutor* norm_left_executor = nullptr;
+    CuTensorExecutor* norm_right_executor = nullptr;
 
     const std::size_t grouped_bytes =
         grouped_input.size() * sizeof(Complex);
@@ -463,7 +673,9 @@ int main(int argc, char** argv)
         lowering_three_site.size() * sizeof(Complex);
 
     const bool jump_left_ok =
-        create_cutensor_executor(
+        get_or_create_cutensor_executor(
+            dissipator_executor_cache,
+            "jump_left_q123",
             cutensor_left,
             local_bytes,
             grouped_bytes,
@@ -471,7 +683,9 @@ int main(int argc, char** argv)
             jump_left_executor);
 
     const bool jump_right_ok =
-        create_cutensor_executor(
+        get_or_create_cutensor_executor(
+            dissipator_executor_cache,
+            "jump_right_q123",
             cutensor_right,
             local_bytes,
             grouped_bytes,
@@ -479,7 +693,9 @@ int main(int argc, char** argv)
             jump_right_executor);
 
     const bool norm_left_ok =
-        create_cutensor_executor(
+        get_or_create_cutensor_executor(
+            dissipator_executor_cache,
+            "norm_left_q123",
             cutensor_left,
             local_bytes,
             grouped_bytes,
@@ -487,49 +703,104 @@ int main(int argc, char** argv)
             norm_left_executor);
 
     const bool norm_right_ok =
-        create_cutensor_executor(
+        get_or_create_cutensor_executor(
+            dissipator_executor_cache,
+            "norm_right_q123",
             cutensor_right,
             local_bytes,
             grouped_bytes,
             grouped_bytes,
             norm_right_executor);
 
-    std::cout << "staged dissipator executor creation: "
+    std::cout << "cached staged dissipator executor lookup: "
               << ((jump_left_ok && jump_right_ok && norm_left_ok && norm_right_ok) ? "true" : "false")
               << std::endl;
 
+    bool cached_operator_uploads_ok = false;
     if (jump_left_ok && jump_right_ok && norm_left_ok && norm_right_ok) {
+        const bool jump_left_upload_ok =
+            upload_cutensor_executor_operator(*jump_left_executor, lowering_three_site);
+        const bool jump_right_upload_ok =
+            upload_cutensor_executor_operator(*jump_right_executor, lowering_three_site_dag);
+        const bool norm_left_upload_ok =
+            upload_cutensor_executor_operator(*norm_left_executor, lowering_three_site_dag_op);
+        const bool norm_right_upload_ok =
+            upload_cutensor_executor_operator(*norm_right_executor, lowering_three_site_dag_op);
+
+        cached_operator_uploads_ok =
+            jump_left_upload_ok &&
+            jump_right_upload_ok &&
+            norm_left_upload_ok &&
+            norm_right_upload_ok;
+
+        std::cout << "cached staged dissipator operator uploads: "
+                  << (cached_operator_uploads_ok ? "true" : "false") << std::endl;
+    }
+
+    if (cached_operator_uploads_ok) {
         const bool staged_diss_ok =
             execute_cutensor_dissipator_staged(
-                jump_left_executor,
-                jump_right_executor,
-                norm_left_executor,
-                norm_right_executor,
+                *jump_left_executor,
+                *jump_right_executor,
+                *norm_left_executor,
+                *norm_right_executor,
                 lowering_three_site,
                 lowering_three_site_dag,
                 lowering_three_site_dag_op,
                 grouped_input,
                 grouped_output_diss_gpu_staged);
 
-        std::cout << "staged cutensor dissipator execution: "
+        std::cout << "cached staged cutensor dissipator execution: "
                   << (staged_diss_ok ? "true" : "false") << std::endl;
 
         if (staged_diss_ok) {
             const Index grouped_out_idx =
                 ((0 * 3 + 0) * 27 + 9) * 3 + 0;
-            std::cout << "staged cutensor grouped dissipator entry ((0,0),(9,0)): "
+
+            std::cout << "cached staged cutensor grouped dissipator entry ((0,0),(9,0)): "
                       << grouped_output_diss_gpu_staged.at(grouped_out_idx) << std::endl;
         }
-
-        const bool destroy_all_ok =
-            destroy_cutensor_executor(jump_left_executor) &&
-            destroy_cutensor_executor(jump_right_executor) &&
-            destroy_cutensor_executor(norm_left_executor) &&
-            destroy_cutensor_executor(norm_right_executor);
-
-        std::cout << "staged dissipator executor destruction: "
-                  << (destroy_all_ok ? "true" : "false") << std::endl;
     }
+
+    const bool dissipator_cache_destroy_ok =
+        destroy_cutensor_executor_cache(dissipator_executor_cache);
+
+    std::cout << "cached staged dissipator executor destruction: "
+              << (dissipator_cache_destroy_ok ? "true" : "false") << std::endl;
+
+    CuTensorExecutorCache reuse_check_cache{};
+    CuTensorExecutor* reuse_a = nullptr;
+    CuTensorExecutor* reuse_b = nullptr;
+
+    const bool reuse_a_ok =
+        get_or_create_cutensor_executor(
+            reuse_check_cache,
+            "reuse_left_q123",
+            cutensor_left,
+            zzz_three_site.size() * sizeof(Complex),
+            grouped_input.size() * sizeof(Complex),
+            grouped_output_left.size() * sizeof(Complex),
+            reuse_a);
+
+    const bool reuse_b_ok =
+        get_or_create_cutensor_executor(
+            reuse_check_cache,
+            "reuse_left_q123",
+            cutensor_left,
+            zzz_three_site.size() * sizeof(Complex),
+            grouped_input.size() * sizeof(Complex),
+            grouped_output_left.size() * sizeof(Complex),
+            reuse_b);
+
+    std::cout << "reuse-check cache same executor: "
+              << ((reuse_a_ok && reuse_b_ok && reuse_a == reuse_b) ? "true" : "false")
+              << std::endl;
+
+    const bool reuse_check_cache_destroy_ok =
+        destroy_cutensor_executor_cache(reuse_check_cache);
+
+    std::cout << "reuse-check cache destruction: "
+              << (reuse_check_cache_destroy_ok ? "true" : "false") << std::endl;              
 
     TimeDependentTerm td_drive{
         "q1_q2_q3_drive",
@@ -551,7 +822,18 @@ int main(int argc, char** argv)
     std::cout << "time-dependent coefficient 2 at t=0.5: "
               << evaluate_time_scalar(td_h_term_2.coefficient, timed_test_t) << std::endl;
     std::cout << "Timed backend k-site total entry (0,27): "
-              << rho_out_timed.at(0 * solver.layout.hilbert_dim + 27) << std::endl;    
+              << rho_out_timed.at(0 * solver.layout.hilbert_dim + 27) << std::endl; 
+              
+    Complex petsc_cuda_value{0.0, 0.0};
+    ierr = petsc_cuda_vec_smoke_test(solver, 0, 27, petsc_cuda_value);
+    if (ierr != 0) {
+        std::cerr << "petsc_cuda_vec_smoke_test failed." << std::endl;
+        PetscFinalize();
+        return 1;
+    }
+
+    std::cout << "PETSc VECCUDA smoke entry (0,27): "
+              << petsc_cuda_value << std::endl;              
               
     std::cout << "Running TS smoke test with time-dependent RHS" << std::endl;              
     Complex ts_value{0.0, 0.0};

@@ -7,6 +7,7 @@
 #include "culindblad/cutensor_contraction_desc.hpp"
 #include "culindblad/cutensor_plan.hpp"
 #include "culindblad/types.hpp"
+#include "culindblad/pinned_host_buffer.hpp"
 
 namespace culindblad {
 
@@ -23,6 +24,8 @@ struct CuTensorExecutor {
     size_t op_bytes;
     size_t input_bytes;
     size_t output_bytes;
+
+    bool operator_resident;
 };
 
 bool create_cutensor_executor(
@@ -65,4 +68,13 @@ bool execute_cutensor_executor(
     const std::vector<Complex>& input_tensor,
     std::vector<Complex>& output_tensor);
 
+bool execute_cutensor_executor_with_resident_operator(
+    CuTensorExecutor& executor,
+    const std::vector<Complex>& input_tensor,
+    std::vector<Complex>& output_tensor);
+
+bool execute_cutensor_executor_with_resident_operator_pinned(
+    CuTensorExecutor& executor,
+    const PinnedComplexBuffer& input_buffer,
+    PinnedComplexBuffer& output_buffer);    
 } // namespace culindblad

@@ -52,6 +52,9 @@ add_executable(run_sim
     cpp/src/backends/cuda/cuda_elementwise.cu
     cpp/src/core/time_dependence.cpp
     cpp/src/core/time_dependent_term.cpp
+    cpp/src/backends/cuda/cutensor_executor_cache.cpp
+    cpp/src/backends/cuda/pinned_host_buffer.cpp
+    cpp/src/core/grouped_state_layout.cpp
 )
 
 target_include_directories(run_sim PRIVATE
