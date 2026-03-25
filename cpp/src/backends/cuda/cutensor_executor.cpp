@@ -2,11 +2,12 @@
 
 #include <cuda_runtime.h>
 
+#include <string>
 #include <vector>
 
 #include "culindblad/cutensor_plan.hpp"
-#include "culindblad/types.hpp"
 #include "culindblad/pinned_host_buffer.hpp"
+#include "culindblad/types.hpp"
 
 namespace culindblad {
 
@@ -51,6 +52,7 @@ bool create_cutensor_executor(
     executor.input_bytes = input_bytes;
     executor.output_bytes = output_bytes;
     executor.operator_resident = false;
+    executor.resident_operator_tag.clear();
 
     if (!create_cutensor_plan(desc, executor.plan_bundle)) {
         return false;
@@ -127,6 +129,9 @@ bool destroy_cutensor_executor(
         ok = false;
     }
 
+    executor.operator_resident = false;
+    executor.resident_operator_tag.clear();
+
     return ok;
 }
 
@@ -143,6 +148,26 @@ bool upload_cutensor_executor_operator(
     }
 
     executor.operator_resident = true;
+    executor.resident_operator_tag.clear();
+    return true;
+}
+
+bool ensure_cutensor_executor_operator(
+    CuTensorExecutor& executor,
+    const std::string& operator_tag,
+    const std::vector<Complex>& local_op)
+{
+    if (executor.operator_resident &&
+        executor.resident_operator_tag == operator_tag) {
+        return true;
+    }
+
+    if (!upload_cutensor_executor_operator(executor, local_op)) {
+        return false;
+    }
+
+    executor.operator_resident = true;
+    executor.resident_operator_tag = operator_tag;
     return true;
 }
 

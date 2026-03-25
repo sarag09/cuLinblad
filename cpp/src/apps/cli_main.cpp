@@ -33,6 +33,8 @@
 #include "culindblad/pinned_host_buffer.hpp"
 #include "culindblad/grouped_state_layout.hpp"
 #include "culindblad/petsc_apply.hpp"
+#include "culindblad/petsc_cuda_apply.hpp"
+#include "culindblad/petsc_cuda_ts_smoke.hpp"
 
 int main(int argc, char** argv)
 {
@@ -657,6 +659,94 @@ int main(int argc, char** argv)
     std::cout << "cutensor executor cache destruction: "
               << (cache_destroy_ok ? "true" : "false") << std::endl;    
 
+    CuTensorExecutorCache persistent_cache{};
+    CuTensorExecutor* persistent_left_executor = nullptr;
+
+    const bool persistent_lookup_ok =
+        get_or_create_cutensor_executor(
+            persistent_cache,
+            "persistent_left_zzz_q123",
+            cutensor_left,
+            zzz_three_site.size() * sizeof(Complex),
+            grouped_input.size() * sizeof(Complex),
+            grouped_output_left.size() * sizeof(Complex),
+            persistent_left_executor);
+
+    std::cout << "persistent cached executor lookup: "
+              << (persistent_lookup_ok ? "true" : "false") << std::endl;
+
+    if (persistent_lookup_ok && persistent_left_executor != nullptr) {
+        const bool ensure_first_ok =
+            ensure_cutensor_executor_operator(
+                *persistent_left_executor,
+                "zzz_three_site_v1",
+                zzz_three_site);
+
+        std::cout << "persistent cached operator ensure first: "
+                  << (ensure_first_ok ? "true" : "false") << std::endl;
+
+        std::vector<Complex> persistent_output_1(
+            grouped_output_left.size(), Complex{0.0, 0.0});
+
+        bool persistent_exec_1_ok = false;
+        if (ensure_first_ok) {
+            persistent_exec_1_ok =
+                execute_cutensor_executor_with_resident_operator(
+                    *persistent_left_executor,
+                    grouped_input,
+                    persistent_output_1);
+
+            std::cout << "persistent cached execution first: "
+                      << (persistent_exec_1_ok ? "true" : "false") << std::endl;
+        }
+
+        if (persistent_exec_1_ok) {
+            const Index grouped_out_idx =
+                ((0 * 3 + 0) * 27 + 9) * 3 + 0;
+
+            std::cout << "persistent cached grouped left entry first ((0,0),(9,0)): "
+                      << persistent_output_1.at(grouped_out_idx) << std::endl;
+        }
+
+        const bool ensure_second_ok =
+            ensure_cutensor_executor_operator(
+                *persistent_left_executor,
+                "zzz_three_site_v1",
+                zzz_three_site);
+
+        std::cout << "persistent cached operator ensure second same tag: "
+                  << (ensure_second_ok ? "true" : "false") << std::endl;
+
+        std::vector<Complex> persistent_output_2(
+            grouped_output_left.size(), Complex{0.0, 0.0});
+
+        bool persistent_exec_2_ok = false;
+        if (ensure_second_ok) {
+            persistent_exec_2_ok =
+                execute_cutensor_executor_with_resident_operator(
+                    *persistent_left_executor,
+                    grouped_input,
+                    persistent_output_2);
+
+            std::cout << "persistent cached execution second: "
+                      << (persistent_exec_2_ok ? "true" : "false") << std::endl;
+        }
+
+        if (persistent_exec_2_ok) {
+            const Index grouped_out_idx =
+                ((0 * 3 + 0) * 27 + 9) * 3 + 0;
+
+            std::cout << "persistent cached grouped left entry second ((0,0),(9,0)): "
+                      << persistent_output_2.at(grouped_out_idx) << std::endl;
+        }
+    }
+
+    const bool persistent_cache_destroy_ok =
+        destroy_cutensor_executor_cache(persistent_cache);
+
+    std::cout << "persistent cached executor destruction: "
+              << (persistent_cache_destroy_ok ? "true" : "false") << std::endl;              
+
     std::vector<Complex> grouped_output_diss_gpu_staged(
         grouped_layout.grouped_size, Complex{0.0, 0.0});
 
@@ -833,7 +923,111 @@ int main(int argc, char** argv)
     }
 
     std::cout << "PETSc VECCUDA smoke entry (0,27): "
-              << petsc_cuda_value << std::endl;              
+              << petsc_cuda_value << std::endl;       
+              
+    Vec x_cuda = nullptr;
+    Vec y_cuda = nullptr;
+
+    PetscCall(VecCreate(PETSC_COMM_SELF, &x_cuda));
+    PetscCall(VecSetSizes(x_cuda, PETSC_DECIDE, solver.layout.density_dim));
+    PetscCall(VecSetType(x_cuda, VECCUDA));
+    PetscCall(VecDuplicate(x_cuda, &y_cuda));
+    PetscCall(VecSet(x_cuda, 0.0));
+    PetscCall(VecSet(y_cuda, 0.0));
+
+    PetscScalar* x_cuda_ptr = nullptr;
+    PetscCall(VecGetArray(x_cuda, &x_cuda_ptr));
+    x_cuda_ptr[0 * solver.layout.hilbert_dim + 27] = PetscScalar(1.0);
+    PetscCall(VecRestoreArray(x_cuda, &x_cuda_ptr));
+
+    CuTensorExecutorCache petsc_cuda_cache{};
+
+    PetscCall(apply_grouped_left_cuda_vec(
+        solver,
+        zzz_three_site,
+        {0, 1, 2},
+        grouped_layout,
+        petsc_cuda_cache,
+        x_cuda,
+        y_cuda));
+
+    PetscScalar* y_cuda_ptr = nullptr;
+    PetscCall(VecGetArray(y_cuda, &y_cuda_ptr));
+
+    std::cout << "PETSc VECCUDA grouped-left entry (0,27): "
+              << reinterpret_cast<Complex*>(y_cuda_ptr)[0 * solver.layout.hilbert_dim + 27]
+              << std::endl;
+
+    PetscCall(VecRestoreArray(y_cuda, &y_cuda_ptr));
+
+    const bool petsc_cuda_cache_destroy_ok =
+        destroy_cutensor_executor_cache(petsc_cuda_cache);
+
+    std::cout << "PETSc VECCUDA grouped-left cache destruction: "
+              << (petsc_cuda_cache_destroy_ok ? "true" : "false") << std::endl;
+
+    PetscCall(VecDestroy(&y_cuda));
+    PetscCall(VecDestroy(&x_cuda));       
+    
+    std::cout << "Running PETSc VECCUDA grouped-left TS smoke test" << std::endl;
+
+    Complex ts_cuda_value{0.0, 0.0};
+    PetscCall(run_ts_cuda_grouped_left_smoke_test(
+        solver,
+        zzz_three_site,
+        {0, 1, 2},
+        0,
+        27,
+        ts_cuda_value));
+
+    std::cout << "PETSc VECCUDA grouped-left TS entry (0,27): "
+              << ts_cuda_value << std::endl;   
+              
+    Vec x_cuda_diss = nullptr;
+    Vec y_cuda_diss = nullptr;
+
+    PetscCall(VecCreate(PETSC_COMM_SELF, &x_cuda_diss));
+    PetscCall(VecSetSizes(x_cuda_diss, PETSC_DECIDE, solver.layout.density_dim));
+    PetscCall(VecSetType(x_cuda_diss, VECCUDA));
+    PetscCall(VecDuplicate(x_cuda_diss, &y_cuda_diss));
+    PetscCall(VecSet(x_cuda_diss, 0.0));
+    PetscCall(VecSet(y_cuda_diss, 0.0));
+
+    PetscScalar* x_cuda_diss_ptr = nullptr;
+    PetscCall(VecGetArray(x_cuda_diss, &x_cuda_diss_ptr));
+    x_cuda_diss_ptr[0 * solver.layout.hilbert_dim + 27] = PetscScalar(1.0);
+    PetscCall(VecRestoreArray(x_cuda_diss, &x_cuda_diss_ptr));
+
+    CuTensorExecutorCache petsc_cuda_diss_cache{};
+
+    PetscCall(apply_grouped_dissipator_cuda_vec(
+        solver,
+        lowering_three_site,
+        lowering_three_site_dag,
+        lowering_three_site_dag_op,
+        {0, 1, 2},
+        grouped_layout,
+        petsc_cuda_diss_cache,
+        x_cuda_diss,
+        y_cuda_diss));
+
+    PetscScalar* y_cuda_diss_ptr = nullptr;
+    PetscCall(VecGetArray(y_cuda_diss, &y_cuda_diss_ptr));
+
+    std::cout << "PETSc VECCUDA grouped dissipator entry (0,27): "
+              << reinterpret_cast<Complex*>(y_cuda_diss_ptr)[0 * solver.layout.hilbert_dim + 27]
+              << std::endl;
+
+    PetscCall(VecRestoreArray(y_cuda_diss, &y_cuda_diss_ptr));
+
+    const bool petsc_cuda_diss_cache_destroy_ok =
+        destroy_cutensor_executor_cache(petsc_cuda_diss_cache);
+
+    std::cout << "PETSc VECCUDA grouped dissipator cache destruction: "
+              << (petsc_cuda_diss_cache_destroy_ok ? "true" : "false") << std::endl;
+
+    PetscCall(VecDestroy(&y_cuda_diss));
+    PetscCall(VecDestroy(&x_cuda_diss));              
               
     std::cout << "Running TS smoke test with time-dependent RHS" << std::endl;              
     Complex ts_value{0.0, 0.0};

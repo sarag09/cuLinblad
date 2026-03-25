@@ -55,6 +55,9 @@ add_executable(run_sim
     cpp/src/backends/cuda/cutensor_executor_cache.cpp
     cpp/src/backends/cuda/pinned_host_buffer.cpp
     cpp/src/core/grouped_state_layout.cpp
+    cpp/src/petsc/petsc_cuda_apply.cpp
+    cpp/src/petsc/petsc_cuda_ts_rhs.cpp
+    cpp/src/petsc/petsc_cuda_ts_smoke.cpp
 )
 
 target_include_directories(run_sim PRIVATE

@@ -1,0 +1,50 @@
+#pragma once
+
+#include <petscvec.h>
+
+#include "culindblad/cutensor_executor_cache.hpp"
+#include "culindblad/grouped_state_layout.hpp"
+#include "culindblad/solver.hpp"
+#include "culindblad/types.hpp"
+
+namespace culindblad {
+
+PetscErrorCode apply_grouped_left_cuda_vec(
+    const Solver& solver,
+    const std::vector<Complex>& local_op,
+    const std::vector<Index>& target_sites,
+    const GroupedStateLayout& grouped_layout,
+    CuTensorExecutorCache& executor_cache,
+    Vec x,
+    Vec y);
+
+PetscErrorCode apply_grouped_right_cuda_vec(
+    const Solver& solver,
+    const std::vector<Complex>& local_op,
+    const std::vector<Index>& target_sites,
+    const GroupedStateLayout& grouped_layout,
+    CuTensorExecutorCache& executor_cache,
+    Vec x,
+    Vec y);
+
+PetscErrorCode apply_grouped_commutator_cuda_vec(
+    const Solver& solver,
+    const std::vector<Complex>& local_op,
+    const std::vector<Index>& target_sites,
+    const GroupedStateLayout& grouped_layout,
+    CuTensorExecutorCache& executor_cache,
+    Vec x,
+    Vec y);
+
+PetscErrorCode apply_grouped_dissipator_cuda_vec(
+    const Solver& solver,
+    const std::vector<Complex>& local_op,
+    const std::vector<Complex>& local_op_dag,
+    const std::vector<Complex>& local_op_dag_op,
+    const std::vector<Index>& target_sites,
+    const GroupedStateLayout& grouped_layout,
+    CuTensorExecutorCache& executor_cache,
+    Vec x,
+    Vec y);
+
+} // namespace culindblad
