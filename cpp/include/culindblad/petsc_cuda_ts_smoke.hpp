@@ -26,4 +26,16 @@ PetscErrorCode run_ts_cuda_grouped_liouvillian_smoke_test(
     Index col,
     Complex& value_out);
 
+PetscErrorCode run_ts_cuda_static_model_liouvillian_smoke_test(
+    const Solver& solver,
+    Index row,
+    Index col,
+    Complex& value_out);    
+
+PetscErrorCode run_ts_cuda_full_model_liouvillian_smoke_test(
+    const Solver& solver,
+    Index row,
+    Index col,
+    Complex& value_out);
+
 } // namespace culindblad

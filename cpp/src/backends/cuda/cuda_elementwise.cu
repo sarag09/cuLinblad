@@ -136,4 +136,46 @@ bool launch_vector_add_kernel(
     return cudaGetLastError() == cudaSuccess;
 }
 
+__global__ void vector_scale_kernel(
+    const culindblad::Complex* in,
+    double scale,
+    culindblad::Complex* out,
+    culindblad::Index size)
+{
+    const culindblad::Index idx =
+        static_cast<culindblad::Index>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+    if (idx >= size) {
+        return;
+    }
+
+    const cuDoubleComplex in_val =
+        reinterpret_cast<const cuDoubleComplex*>(in)[idx];
+    const cuDoubleComplex s =
+        make_cuDoubleComplex(scale, 0.0);
+
+    reinterpret_cast<cuDoubleComplex*>(out)[idx] =
+        cuCmul(s, in_val);
+}
+
+bool launch_vector_scale_kernel(
+    const void* d_in,
+    double scale,
+    void* d_out,
+    Index size,
+    cudaStream_t stream)
+{
+    const int block_size = 256;
+    const int grid_size =
+        static_cast<int>((size + block_size - 1) / block_size);
+
+    vector_scale_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const Complex*>(d_in),
+        scale,
+        reinterpret_cast<Complex*>(d_out),
+        size);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
 } // namespace culindblad

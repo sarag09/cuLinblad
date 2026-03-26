@@ -36,4 +36,18 @@ PetscErrorCode ts_rhs_function_cuda_grouped_liouvillian(
     Vec f,
     void* ctx);
 
+PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
+    TS ts,
+    PetscReal t,
+    Vec x,
+    Vec f,
+    void* ctx);
+
+PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
+    TS ts,
+    PetscReal t,
+    Vec x,
+    Vec f,
+    void* ctx);
+
 } // namespace culindblad

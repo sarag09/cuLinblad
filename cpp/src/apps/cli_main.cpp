@@ -416,6 +416,18 @@ int main(int argc, char** argv)
     std::cout << "PETSc VECCUDA grouped Liouvillian TS entry (0,27): "
               << ts_cuda_liouvillian_value << std::endl;
 
+    std::cout << "Running PETSc VECCUDA static-model Liouvillian TS smoke test" << std::endl;
+
+    Complex ts_cuda_static_model_value{0.0, 0.0};
+    PetscCall(run_ts_cuda_static_model_liouvillian_smoke_test(
+        solver,
+        0,
+        27,
+        ts_cuda_static_model_value));
+
+    std::cout << "PETSc VECCUDA static-model Liouvillian TS entry (0,27): "
+              << ts_cuda_static_model_value << std::endl;              
+
     std::cout << "Running TS smoke test with time-dependent RHS" << std::endl;
     Complex ts_value{0.0, 0.0};
     ierr = run_ts_smoke_test(solver, 0, 27, ts_value);
@@ -426,6 +438,18 @@ int main(int argc, char** argv)
     }
 
     std::cout << "TS evolved entry (0,27): " << ts_value << std::endl;
+
+    std::cout << "Running PETSc VECCUDA full-model Liouvillian TS smoke test" << std::endl;
+
+    Complex ts_cuda_full_model_value{0.0, 0.0};
+    PetscCall(run_ts_cuda_full_model_liouvillian_smoke_test(
+        solver,
+        0,
+        27,
+        ts_cuda_full_model_value));
+
+    std::cout << "PETSc VECCUDA full-model Liouvillian TS entry (0,27): "
+              << ts_cuda_full_model_value << std::endl;    
 
     if (cuda_grouped_layout_ok) {
         std::cout << "CUDA grouped layout destruction: "

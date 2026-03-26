@@ -26,6 +26,13 @@ bool launch_vector_add_kernel(
     const void* d_b,
     void* d_out,
     Index size,
+    cudaStream_t stream);
+    
+bool launch_vector_scale_kernel(
+    const void* d_in,
+    double scale,
+    void* d_out,
+    Index size,
     cudaStream_t stream);    
 
 } // namespace culindblad
