@@ -5,7 +5,10 @@
 #include <string>
 #include <vector>
 
+#include <cuda_runtime.h>
+
 #include "culindblad/cuda_elementwise.hpp"
+#include "culindblad/cuda_grouped_layout.hpp"
 #include "culindblad/cutensor_contraction_desc.hpp"
 #include "culindblad/cutensor_executor.hpp"
 #include "culindblad/cutensor_executor_cache.hpp"
@@ -16,54 +19,69 @@ namespace culindblad {
 
 namespace {
 
-PetscErrorCode load_petsc_vec_to_grouped_host(
-    const Solver& solver,
-    const GroupedStateLayout& grouped_layout,
+PetscErrorCode get_petsc_vec_device_read_ptr(
     Vec x,
-    std::vector<Complex>& grouped_input)
+    const void*& d_ptr_out)
 {
     const PetscScalar* x_ptr = nullptr;
+
+#if defined(PETSC_HAVE_CUDA)
+    PetscCall(VecCUDAGetArrayRead(x, &x_ptr));
+#else
     PetscCall(VecGetArrayRead(x, &x_ptr));
+#endif
 
-    std::vector<Complex> flat_input(
-        solver.layout.density_dim, Complex{0.0, 0.0});
-
-    for (Index i = 0; i < solver.layout.density_dim; ++i) {
-        flat_input[i] = reinterpret_cast<const Complex*>(x_ptr)[i];
-    }
-
-    PetscCall(VecRestoreArrayRead(x, &x_ptr));
-
-    regroup_flat_density_to_grouped(
-        grouped_layout,
-        flat_input,
-        grouped_input);
-
+    d_ptr_out = reinterpret_cast<const void*>(x_ptr);
     return 0;
 }
 
-PetscErrorCode store_grouped_host_to_petsc_vec(
-    const Solver& solver,
-    const GroupedStateLayout& grouped_layout,
-    const std::vector<Complex>& grouped_output,
-    Vec y)
+PetscErrorCode restore_petsc_vec_device_read_ptr(
+    Vec x,
+    const void*& d_ptr_in)
+{
+    const PetscScalar* x_ptr =
+        reinterpret_cast<const PetscScalar*>(d_ptr_in);
+
+#if defined(PETSC_HAVE_CUDA)
+    PetscCall(VecCUDARestoreArrayRead(x, &x_ptr));
+#else
+    PetscCall(VecRestoreArrayRead(x, &x_ptr));
+#endif
+
+    d_ptr_in = nullptr;
+    return 0;
+}
+
+PetscErrorCode get_petsc_vec_device_write_ptr(
+    Vec y,
+    void*& d_ptr_out)
 {
     PetscScalar* y_ptr = nullptr;
+
+#if defined(PETSC_HAVE_CUDA)
+    PetscCall(VecCUDAGetArray(y, &y_ptr));
+#else
     PetscCall(VecGetArray(y, &y_ptr));
+#endif
 
-    std::vector<Complex> flat_output(
-        solver.layout.density_dim, Complex{0.0, 0.0});
+    d_ptr_out = reinterpret_cast<void*>(y_ptr);
+    return 0;
+}
 
-    regroup_grouped_to_flat_density(
-        grouped_layout,
-        grouped_output,
-        flat_output);
+PetscErrorCode restore_petsc_vec_device_write_ptr(
+    Vec y,
+    void*& d_ptr_in)
+{
+    PetscScalar* y_ptr =
+        reinterpret_cast<PetscScalar*>(d_ptr_in);
 
-    for (Index i = 0; i < solver.layout.density_dim; ++i) {
-        reinterpret_cast<Complex*>(y_ptr)[i] = flat_output[i];
-    }
-
+#if defined(PETSC_HAVE_CUDA)
+    PetscCall(VecCUDARestoreArray(y, &y_ptr));
+#else
     PetscCall(VecRestoreArray(y, &y_ptr));
+#endif
+
+    d_ptr_in = nullptr;
     return 0;
 }
 
@@ -108,6 +126,7 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
     const std::vector<Complex>& local_op,
     const std::vector<Index>& target_sites,
     const GroupedStateLayout& grouped_layout,
+    const CudaGroupedStateLayout& cuda_grouped_layout,
     CuTensorExecutorCache& executor_cache,
     const CuTensorContractionDesc& contraction_desc,
     const std::string& cache_key,
@@ -115,43 +134,86 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
     Vec x,
     Vec y)
 {
-    std::vector<Complex> grouped_input(
-        grouped_layout.grouped_size, Complex{0.0, 0.0});
-    std::vector<Complex> grouped_output(
-        grouped_layout.grouped_size, Complex{0.0, 0.0});
+    (void)solver;
+    (void)target_sites;
 
-    PetscCall(load_petsc_vec_to_grouped_host(
-        solver,
-        grouped_layout,
-        x,
-        grouped_input));
+    const std::size_t grouped_bytes =
+        grouped_layout.grouped_size * sizeof(Complex);
+
+    const void* d_flat_input = nullptr;
+    void* d_flat_output = nullptr;
+
+    PetscCall(get_petsc_vec_device_read_ptr(x, d_flat_input));
+    PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
 
     CuTensorExecutor* executor = nullptr;
-    PetscCall(get_or_prepare_executor(
+    PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
         cache_key,
         contraction_desc,
         operator_tag,
         local_op,
-        grouped_input.size() * sizeof(Complex),
-        executor));
+        grouped_bytes,
+        executor);
+    if (ierr != 0) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return ierr;
+    }
 
-    const bool exec_ok =
-        execute_cutensor_executor_with_resident_operator(
-            *executor,
-            grouped_input,
-            grouped_output);
+    const bool regroup_in_ok =
+        launch_flat_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            executor->d_input,
+            executor->stream);
 
-    if (!exec_ok) {
+    if (!regroup_in_ok) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
 
-    PetscCall(store_grouped_host_to_petsc_vec(
-        solver,
-        grouped_layout,
-        grouped_output,
-        y));
+    if (cudaMemsetAsync(
+            executor->d_output,
+            0,
+            grouped_bytes,
+            executor->stream) != cudaSuccess) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return PETSC_ERR_LIB;
+    }
 
+    const bool exec_ok =
+        execute_cutensor_executor_device(*executor);
+
+    if (!exec_ok) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return PETSC_ERR_LIB;
+    }
+
+    const bool regroup_out_ok =
+        launch_grouped_to_flat_kernel(
+            cuda_grouped_layout,
+            executor->d_output,
+            d_flat_output,
+            executor->stream);
+
+    if (!regroup_out_ok) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return PETSC_ERR_LIB;
+    }
+
+    if (cudaStreamSynchronize(executor->stream) != cudaSuccess) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return PETSC_ERR_LIB;
+    }
+
+    PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+    PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
     return 0;
 }
 
@@ -162,6 +224,7 @@ PetscErrorCode apply_grouped_left_cuda_vec(
     const std::vector<Complex>& local_op,
     const std::vector<Index>& target_sites,
     const GroupedStateLayout& grouped_layout,
+    const CudaGroupedStateLayout& cuda_grouped_layout,
     CuTensorExecutorCache& executor_cache,
     Vec x,
     Vec y)
@@ -174,6 +237,7 @@ PetscErrorCode apply_grouped_left_cuda_vec(
         local_op,
         target_sites,
         grouped_layout,
+        cuda_grouped_layout,
         executor_cache,
         left_desc,
         "petsc_grouped_left_apply",
@@ -187,6 +251,7 @@ PetscErrorCode apply_grouped_right_cuda_vec(
     const std::vector<Complex>& local_op,
     const std::vector<Index>& target_sites,
     const GroupedStateLayout& grouped_layout,
+    const CudaGroupedStateLayout& cuda_grouped_layout,
     CuTensorExecutorCache& executor_cache,
     Vec x,
     Vec y)
@@ -199,6 +264,7 @@ PetscErrorCode apply_grouped_right_cuda_vec(
         local_op,
         target_sites,
         grouped_layout,
+        cuda_grouped_layout,
         executor_cache,
         right_desc,
         "petsc_grouped_right_apply",
@@ -212,20 +278,19 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
     const std::vector<Complex>& local_op,
     const std::vector<Index>& target_sites,
     const GroupedStateLayout& grouped_layout,
+    const CudaGroupedStateLayout& cuda_grouped_layout,
     CuTensorExecutorCache& executor_cache,
     Vec x,
     Vec y)
 {
-    std::vector<Complex> grouped_input(
-        grouped_layout.grouped_size, Complex{0.0, 0.0});
-    std::vector<Complex> grouped_output(
-        grouped_layout.grouped_size, Complex{0.0, 0.0});
+    const std::size_t grouped_bytes =
+        grouped_layout.grouped_size * sizeof(Complex);
 
-    PetscCall(load_petsc_vec_to_grouped_host(
-        solver,
-        grouped_layout,
-        x,
-        grouped_input));
+    const void* d_flat_input = nullptr;
+    void* d_flat_output = nullptr;
+
+    PetscCall(get_petsc_vec_device_read_ptr(x, d_flat_input));
+    PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
 
     const CuTensorContractionDesc left_desc =
         make_cutensor_left_contraction_desc(target_sites, solver.model.local_dims);
@@ -236,49 +301,91 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
     CuTensorExecutor* right_executor = nullptr;
     CuTensorExecutor* combine_executor = nullptr;
 
-    const std::size_t grouped_bytes =
-        grouped_input.size() * sizeof(Complex);
-
-    PetscCall(get_or_prepare_executor(
+    PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
         "petsc_grouped_comm_left_apply",
         left_desc,
         "petsc_grouped_comm_left_operator",
         local_op,
         grouped_bytes,
-        left_executor));
+        left_executor);
+    if (ierr != 0) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return ierr;
+    }
 
-    PetscCall(get_or_prepare_executor(
+    ierr = get_or_prepare_executor(
         executor_cache,
         "petsc_grouped_comm_right_apply",
         right_desc,
         "petsc_grouped_comm_right_operator",
         local_op,
         grouped_bytes,
-        right_executor));
+        right_executor);
+    if (ierr != 0) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return ierr;
+    }
 
-    PetscCall(get_or_prepare_executor(
+    ierr = get_or_prepare_executor(
         executor_cache,
         "petsc_grouped_comm_combine_buffer",
         left_desc,
         "petsc_grouped_comm_left_operator",
         local_op,
         grouped_bytes,
-        combine_executor));
+        combine_executor);
+    if (ierr != 0) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return ierr;
+    }
 
-    const bool left_ok =
-        upload_cutensor_executor_input(*left_executor, grouped_input) &&
-        execute_cutensor_executor_device(*left_executor);
+    const bool regroup_left_ok =
+        launch_flat_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            left_executor->d_input,
+            left_executor->stream);
 
-    if (!left_ok) {
+    const bool regroup_right_ok =
+        launch_flat_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            right_executor->d_input,
+            right_executor->stream);
+
+    if (!regroup_left_ok || !regroup_right_ok) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
 
+    if (cudaMemsetAsync(left_executor->d_output, 0, grouped_bytes, left_executor->stream) != cudaSuccess ||
+        cudaMemsetAsync(right_executor->d_output, 0, grouped_bytes, right_executor->stream) != cudaSuccess ||
+        cudaMemsetAsync(combine_executor->d_output, 0, grouped_bytes, combine_executor->stream) != cudaSuccess) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return PETSC_ERR_LIB;
+    }
+
+    const bool left_ok =
+        execute_cutensor_executor_device(*left_executor);
     const bool right_ok =
-        upload_cutensor_executor_input(*right_executor, grouped_input) &&
         execute_cutensor_executor_device(*right_executor);
 
-    if (!right_ok) {
+    if (!left_ok || !right_ok) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return PETSC_ERR_LIB;
+    }
+
+    if (cudaStreamSynchronize(left_executor->stream) != cudaSuccess ||
+        cudaStreamSynchronize(right_executor->stream) != cudaSuccess) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
 
@@ -287,28 +394,36 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
             left_executor->d_output,
             right_executor->d_output,
             combine_executor->d_output,
-            grouped_input.size(),
+            grouped_layout.grouped_size,
             combine_executor->stream);
 
     if (!combine_ok) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
 
-    const bool download_ok =
-        download_cutensor_executor_output(
-            *combine_executor,
-            grouped_output);
+    const bool regroup_out_ok =
+        launch_grouped_to_flat_kernel(
+            cuda_grouped_layout,
+            combine_executor->d_output,
+            d_flat_output,
+            combine_executor->stream);
 
-    if (!download_ok) {
+    if (!regroup_out_ok) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
 
-    PetscCall(store_grouped_host_to_petsc_vec(
-        solver,
-        grouped_layout,
-        grouped_output,
-        y));
+    if (cudaStreamSynchronize(combine_executor->stream) != cudaSuccess) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return PETSC_ERR_LIB;
+    }
 
+    PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+    PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
     return 0;
 }
 
@@ -319,20 +434,19 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
     const std::vector<Complex>& local_op_dag_op,
     const std::vector<Index>& target_sites,
     const GroupedStateLayout& grouped_layout,
+    const CudaGroupedStateLayout& cuda_grouped_layout,
     CuTensorExecutorCache& executor_cache,
     Vec x,
     Vec y)
 {
-    std::vector<Complex> grouped_input(
-        grouped_layout.grouped_size, Complex{0.0, 0.0});
-    std::vector<Complex> grouped_output(
-        grouped_layout.grouped_size, Complex{0.0, 0.0});
+    const std::size_t grouped_bytes =
+        grouped_layout.grouped_size * sizeof(Complex);
 
-    PetscCall(load_petsc_vec_to_grouped_host(
-        solver,
-        grouped_layout,
-        x,
-        grouped_input));
+    const void* d_flat_input = nullptr;
+    void* d_flat_output = nullptr;
+
+    PetscCall(get_petsc_vec_device_read_ptr(x, d_flat_input));
+    PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
 
     const CuTensorContractionDesc left_desc =
         make_cutensor_left_contraction_desc(target_sites, solver.model.local_dims);
@@ -344,50 +458,104 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
     CuTensorExecutor* norm_left_executor = nullptr;
     CuTensorExecutor* norm_right_executor = nullptr;
 
-    const std::size_t grouped_bytes =
-        grouped_input.size() * sizeof(Complex);
-
-    PetscCall(get_or_prepare_executor(
+    PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
         "petsc_grouped_diss_jump_left",
         left_desc,
         "petsc_grouped_diss_L",
         local_op,
         grouped_bytes,
-        jump_left_executor));
+        jump_left_executor);
+    if (ierr != 0) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return ierr;
+    }
 
-    PetscCall(get_or_prepare_executor(
+    ierr = get_or_prepare_executor(
         executor_cache,
         "petsc_grouped_diss_jump_right",
         right_desc,
         "petsc_grouped_diss_Ldag",
         local_op_dag,
         grouped_bytes,
-        jump_right_executor));
+        jump_right_executor);
+    if (ierr != 0) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return ierr;
+    }
 
-    PetscCall(get_or_prepare_executor(
+    ierr = get_or_prepare_executor(
         executor_cache,
         "petsc_grouped_diss_norm_left",
         left_desc,
         "petsc_grouped_diss_LdagL",
         local_op_dag_op,
         grouped_bytes,
-        norm_left_executor));
+        norm_left_executor);
+    if (ierr != 0) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return ierr;
+    }
 
-    PetscCall(get_or_prepare_executor(
+    ierr = get_or_prepare_executor(
         executor_cache,
         "petsc_grouped_diss_norm_right",
         right_desc,
         "petsc_grouped_diss_LdagL",
         local_op_dag_op,
         grouped_bytes,
-        norm_right_executor));
+        norm_right_executor);
+    if (ierr != 0) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return ierr;
+    }
+
+    const bool regroup_jump_left_ok =
+        launch_flat_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            jump_left_executor->d_input,
+            jump_left_executor->stream);
+
+    const bool regroup_norm_left_ok =
+        launch_flat_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            norm_left_executor->d_input,
+            norm_left_executor->stream);
+
+    const bool regroup_norm_right_ok =
+        launch_flat_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            norm_right_executor->d_input,
+            norm_right_executor->stream);
+
+    if (!regroup_jump_left_ok || !regroup_norm_left_ok || !regroup_norm_right_ok) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return PETSC_ERR_LIB;
+    }
+
+    if (cudaMemsetAsync(jump_left_executor->d_output, 0, grouped_bytes, jump_left_executor->stream) != cudaSuccess ||
+        cudaMemsetAsync(jump_right_executor->d_output, 0, grouped_bytes, jump_right_executor->stream) != cudaSuccess ||
+        cudaMemsetAsync(norm_left_executor->d_output, 0, grouped_bytes, norm_left_executor->stream) != cudaSuccess ||
+        cudaMemsetAsync(norm_right_executor->d_output, 0, grouped_bytes, norm_right_executor->stream) != cudaSuccess) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return PETSC_ERR_LIB;
+    }
 
     const bool jump_left_ok =
-        upload_cutensor_executor_input(*jump_left_executor, grouped_input) &&
         execute_cutensor_executor_device(*jump_left_executor);
 
     if (!jump_left_ok) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
 
@@ -396,22 +564,27 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
         execute_cutensor_executor_device(*jump_right_executor);
 
     if (!jump_right_ok) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
 
     const bool norm_left_ok =
-        upload_cutensor_executor_input(*norm_left_executor, grouped_input) &&
         execute_cutensor_executor_device(*norm_left_executor);
+    const bool norm_right_ok =
+        execute_cutensor_executor_device(*norm_right_executor);
 
-    if (!norm_left_ok) {
+    if (!norm_left_ok || !norm_right_ok) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
 
-    const bool norm_right_ok =
-        upload_cutensor_executor_input(*norm_right_executor, grouped_input) &&
-        execute_cutensor_executor_device(*norm_right_executor);
-
-    if (!norm_right_ok) {
+    if (cudaStreamSynchronize(jump_right_executor->stream) != cudaSuccess ||
+        cudaStreamSynchronize(norm_left_executor->stream) != cudaSuccess ||
+        cudaStreamSynchronize(norm_right_executor->stream) != cudaSuccess) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
 
@@ -421,28 +594,36 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
             norm_left_executor->d_output,
             norm_right_executor->d_output,
             norm_right_executor->d_output,
-            grouped_input.size(),
+            grouped_layout.grouped_size,
             norm_right_executor->stream);
 
     if (!combine_ok) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
 
-    const bool download_ok =
-        download_cutensor_executor_output(
-            *norm_right_executor,
-            grouped_output);
+    const bool regroup_out_ok =
+        launch_grouped_to_flat_kernel(
+            cuda_grouped_layout,
+            norm_right_executor->d_output,
+            d_flat_output,
+            norm_right_executor->stream);
 
-    if (!download_ok) {
+    if (!regroup_out_ok) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
 
-    PetscCall(store_grouped_host_to_petsc_vec(
-        solver,
-        grouped_layout,
-        grouped_output,
-        y));
+    if (cudaStreamSynchronize(norm_right_executor->stream) != cudaSuccess) {
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return PETSC_ERR_LIB;
+    }
 
+    PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+    PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
     return 0;
 }
 

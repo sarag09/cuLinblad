@@ -2,6 +2,7 @@
 
 #include <petscvec.h>
 
+#include "culindblad/cuda_grouped_layout.hpp"
 #include "culindblad/cutensor_executor_cache.hpp"
 #include "culindblad/grouped_state_layout.hpp"
 #include "culindblad/solver.hpp"
@@ -14,6 +15,7 @@ PetscErrorCode apply_grouped_left_cuda_vec(
     const std::vector<Complex>& local_op,
     const std::vector<Index>& target_sites,
     const GroupedStateLayout& grouped_layout,
+    const CudaGroupedStateLayout& cuda_grouped_layout,
     CuTensorExecutorCache& executor_cache,
     Vec x,
     Vec y);
@@ -23,6 +25,7 @@ PetscErrorCode apply_grouped_right_cuda_vec(
     const std::vector<Complex>& local_op,
     const std::vector<Index>& target_sites,
     const GroupedStateLayout& grouped_layout,
+    const CudaGroupedStateLayout& cuda_grouped_layout,
     CuTensorExecutorCache& executor_cache,
     Vec x,
     Vec y);
@@ -32,6 +35,7 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
     const std::vector<Complex>& local_op,
     const std::vector<Index>& target_sites,
     const GroupedStateLayout& grouped_layout,
+    const CudaGroupedStateLayout& cuda_grouped_layout,
     CuTensorExecutorCache& executor_cache,
     Vec x,
     Vec y);
@@ -43,6 +47,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
     const std::vector<Complex>& local_op_dag_op,
     const std::vector<Index>& target_sites,
     const GroupedStateLayout& grouped_layout,
+    const CudaGroupedStateLayout& cuda_grouped_layout,
     CuTensorExecutorCache& executor_cache,
     Vec x,
     Vec y);

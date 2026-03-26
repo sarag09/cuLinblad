@@ -94,4 +94,46 @@ bool launch_dissipator_combine_kernel(
     return cudaGetLastError() == cudaSuccess;
 }
 
+__global__ void vector_add_kernel(
+    const culindblad::Complex* a,
+    const culindblad::Complex* b,
+    culindblad::Complex* out,
+    culindblad::Index size)
+{
+    const culindblad::Index idx =
+        static_cast<culindblad::Index>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+    if (idx >= size) {
+        return;
+    }
+
+    const cuDoubleComplex a_val =
+        reinterpret_cast<const cuDoubleComplex*>(a)[idx];
+    const cuDoubleComplex b_val =
+        reinterpret_cast<const cuDoubleComplex*>(b)[idx];
+
+    reinterpret_cast<cuDoubleComplex*>(out)[idx] =
+        cuCadd(a_val, b_val);
+}
+
+bool launch_vector_add_kernel(
+    const void* d_a,
+    const void* d_b,
+    void* d_out,
+    Index size,
+    cudaStream_t stream)
+{
+    const int block_size = 256;
+    const int grid_size =
+        static_cast<int>((size + block_size - 1) / block_size);
+
+    vector_add_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const Complex*>(d_a),
+        reinterpret_cast<const Complex*>(d_b),
+        reinterpret_cast<Complex*>(d_out),
+        size);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
 } // namespace culindblad

@@ -214,6 +214,10 @@ bool copy_cutensor_executor_output_to_input(
         return false;
     }
 
+    if (cudaStreamSynchronize(src_executor.stream) != cudaSuccess) {
+        return false;
+    }
+
     if (!cuda_copy_d2d_async(
             dst_executor.d_input,
             src_executor.d_output,

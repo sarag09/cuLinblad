@@ -58,6 +58,8 @@ add_executable(run_sim
     cpp/src/petsc/petsc_cuda_apply.cpp
     cpp/src/petsc/petsc_cuda_ts_rhs.cpp
     cpp/src/petsc/petsc_cuda_ts_smoke.cpp
+    cpp/src/backends/cuda/cuda_grouped_layout.cu
+    cpp/src/petsc/petsc_cuda_vec_utils.cpp
 )
 
 target_include_directories(run_sim PRIVATE
