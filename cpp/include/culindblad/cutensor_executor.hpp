@@ -1,9 +1,10 @@
 #pragma once
 
-#include <cuda_runtime.h>
-
+#include <cstddef>
 #include <string>
 #include <vector>
+
+#include <cuda_runtime.h>
 
 #include "culindblad/cutensor_contraction_desc.hpp"
 #include "culindblad/cutensor_plan.hpp"
@@ -15,16 +16,18 @@ namespace culindblad {
 struct CuTensorExecutor {
     CuTensorContractionDesc desc;
     CuTensorPlanBundle plan_bundle;
+
     cudaStream_t stream;
+    cudaEvent_t completion_event;
 
     void* d_op;
     void* d_input;
     void* d_output;
     void* d_workspace;
 
-    size_t op_bytes;
-    size_t input_bytes;
-    size_t output_bytes;
+    std::size_t op_bytes;
+    std::size_t input_bytes;
+    std::size_t output_bytes;
 
     bool operator_resident;
     std::string resident_operator_tag;
@@ -84,5 +87,12 @@ bool execute_cutensor_executor_with_resident_operator_pinned(
     CuTensorExecutor& executor,
     const PinnedComplexBuffer& input_buffer,
     PinnedComplexBuffer& output_buffer);
+
+bool record_cutensor_executor_completion(
+    CuTensorExecutor& executor);
+
+bool wait_for_cutensor_executor_completion(
+    CuTensorExecutor& producer,
+    cudaStream_t consumer_stream);
 
 } // namespace culindblad

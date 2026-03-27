@@ -44,6 +44,7 @@ bool create_cutensor_executor(
 {
     executor.desc = desc;
     executor.stream = nullptr;
+    executor.completion_event = nullptr;
     executor.d_op = nullptr;
     executor.d_input = nullptr;
     executor.d_output = nullptr;
@@ -62,6 +63,12 @@ bool create_cutensor_executor(
         destroy_cutensor_plan(executor.plan_bundle);
         return false;
     }
+
+    if (cudaEventCreateWithFlags(&executor.completion_event, cudaEventDisableTiming) != cudaSuccess) {
+        cudaStreamDestroy(executor.stream);
+        destroy_cutensor_plan(executor.plan_bundle);
+        return false;
+    }    
 
     if (!cuda_malloc_bytes(&executor.d_op, op_bytes)) {
         cudaStreamDestroy(executor.stream);
@@ -120,6 +127,11 @@ bool destroy_cutensor_executor(
     if (executor.d_op != nullptr && cudaFree(executor.d_op) != cudaSuccess) {
         ok = false;
     }
+
+    if (executor.completion_event != nullptr &&
+        cudaEventDestroy(executor.completion_event) != cudaSuccess) {
+        ok = false;
+    }    
 
     if (executor.stream != nullptr && cudaStreamDestroy(executor.stream) != cudaSuccess) {
         ok = false;
@@ -214,19 +226,24 @@ bool copy_cutensor_executor_output_to_input(
         return false;
     }
 
-    if (cudaStreamSynchronize(src_executor.stream) != cudaSuccess) {
+    if (!wait_for_cutensor_executor_completion(src_executor, dst_executor.stream)) {
         return false;
     }
 
-    if (!cuda_copy_d2d_async(
+    if (cudaMemcpyAsync(
             dst_executor.d_input,
             src_executor.d_output,
             src_executor.output_bytes,
-            dst_executor.stream)) {
+            cudaMemcpyDeviceToDevice,
+            dst_executor.stream) != cudaSuccess) {
         return false;
     }
 
-    if (cudaMemsetAsync(dst_executor.d_output, 0, dst_executor.output_bytes, dst_executor.stream) != cudaSuccess) {
+    if (cudaMemsetAsync(
+            dst_executor.d_output,
+            0,
+            dst_executor.output_bytes,
+            dst_executor.stream) != cudaSuccess) {
         return false;
     }
 
@@ -256,6 +273,10 @@ bool execute_cutensor_executor_device(
     if (exec_status != CUTENSOR_STATUS_SUCCESS) {
         return false;
     }
+
+    if (!record_cutensor_executor_completion(executor)) {
+        return false;
+    }    
 
     return true;
 }
@@ -374,6 +395,30 @@ bool execute_cutensor_executor_with_resident_operator_pinned(
     }
 
     return true;
+}
+
+bool record_cutensor_executor_completion(
+    CuTensorExecutor& executor)
+{
+    if (executor.completion_event == nullptr || executor.stream == nullptr) {
+        return false;
+    }
+
+    return cudaEventRecord(executor.completion_event, executor.stream) == cudaSuccess;
+}
+
+bool wait_for_cutensor_executor_completion(
+    CuTensorExecutor& producer,
+    cudaStream_t consumer_stream)
+{
+    if (producer.completion_event == nullptr) {
+        return false;
+    }
+
+    return cudaStreamWaitEvent(
+        consumer_stream,
+        producer.completion_event,
+        0) == cudaSuccess;
 }
 
 } // namespace culindblad

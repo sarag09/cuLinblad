@@ -2,6 +2,7 @@
 
 #include <petscts.h>
 
+#include <cuda_runtime.h>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,10 @@ struct PetscCudaTsRhsContext {
     CuTensorExecutorCache executor_cache;
     std::vector<CachedDissipatorAuxiliaries> cached_static_dissipators;
     std::vector<CachedGroupedLayoutEntry> cached_grouped_layouts;
+    cudaStream_t elementwise_stream;
+    Vec work_vec_a;
+    Vec work_vec_b;
+    Vec work_vec_c;
 };
 
 PetscErrorCode ts_rhs_function_cuda_grouped_commutator(

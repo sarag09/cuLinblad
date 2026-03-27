@@ -35,8 +35,7 @@ const CachedGroupedLayoutEntry* find_cached_grouped_layout(
     const PetscCudaTsRhsContext& rhs_ctx,
     const std::vector<Index>& sites)
 {
-    for (const CachedGroupedLayoutEntry& entry :
-         rhs_ctx.cached_grouped_layouts) {
+    for (const CachedGroupedLayoutEntry& entry : rhs_ctx.cached_grouped_layouts) {
         if (same_sites(entry.sites, sites)) {
             return &entry;
         }
@@ -45,7 +44,10 @@ const CachedGroupedLayoutEntry* find_cached_grouped_layout(
     return nullptr;
 }
 
-PetscErrorCode zero_petsc_cuda_vec(Vec v, Index size)
+PetscErrorCode zero_petsc_cuda_vec(
+    Vec v,
+    Index size,
+    cudaStream_t stream)
 {
     PetscScalar* d_v_ptr = nullptr;
 
@@ -60,9 +62,9 @@ PetscErrorCode zero_petsc_cuda_vec(Vec v, Index size)
             reinterpret_cast<void*>(d_v_ptr),
             0,
             size * sizeof(Complex),
-            0);
+            stream);
 
-    if (memset_status != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    if (memset_status != cudaSuccess || cudaStreamSynchronize(stream) != cudaSuccess) {
 #if defined(PETSC_HAVE_CUDA)
         PetscCall(VecCUDARestoreArray(v, &d_v_ptr));
 #else
@@ -84,7 +86,8 @@ PetscErrorCode add_petsc_cuda_vecs(
     Vec a,
     Vec b,
     Vec out,
-    Index size)
+    Index size,
+    cudaStream_t stream)
 {
     const PetscScalar* d_a_ptr = nullptr;
     const PetscScalar* d_b_ptr = nullptr;
@@ -106,9 +109,9 @@ PetscErrorCode add_petsc_cuda_vecs(
             reinterpret_cast<const void*>(d_b_ptr),
             reinterpret_cast<void*>(d_out_ptr),
             size,
-            0);
+            stream);
 
-    if (!add_ok || cudaDeviceSynchronize() != cudaSuccess) {
+    if (!add_ok || cudaStreamSynchronize(stream) != cudaSuccess) {
 #if defined(PETSC_HAVE_CUDA)
         PetscCall(VecCUDARestoreArray(out, &d_out_ptr));
         PetscCall(VecCUDARestoreArrayRead(b, &d_b_ptr));
@@ -138,7 +141,8 @@ PetscErrorCode scale_petsc_cuda_vec(
     Vec in,
     double scale,
     Vec out,
-    Index size)
+    Index size,
+    cudaStream_t stream)
 {
     const PetscScalar* d_in_ptr = nullptr;
     PetscScalar* d_out_ptr = nullptr;
@@ -157,9 +161,9 @@ PetscErrorCode scale_petsc_cuda_vec(
             scale,
             reinterpret_cast<void*>(d_out_ptr),
             size,
-            0);
+            stream);
 
-    if (!scale_ok || cudaDeviceSynchronize() != cudaSuccess) {
+    if (!scale_ok || cudaStreamSynchronize(stream) != cudaSuccess) {
 #if defined(PETSC_HAVE_CUDA)
         PetscCall(VecCUDARestoreArray(out, &d_out_ptr));
         PetscCall(VecCUDARestoreArrayRead(in, &d_in_ptr));
@@ -222,11 +226,10 @@ PetscErrorCode ts_rhs_function_cuda_grouped_liouvillian(
         return PETSC_ERR_ARG_NULL;
     }
 
-    Vec temp_comm = nullptr;
-    Vec temp_diss = nullptr;
+    cudaStream_t s = rhs_ctx->elementwise_stream;
 
-    PetscCall(VecDuplicate(x, &temp_comm));
-    PetscCall(VecDuplicate(x, &temp_diss));
+    Vec temp_comm = rhs_ctx->work_vec_a;
+    Vec temp_diss = rhs_ctx->work_vec_b;
 
     PetscCall(apply_grouped_commutator_cuda_vec(
         *rhs_ctx->solver,
@@ -256,10 +259,9 @@ PetscErrorCode ts_rhs_function_cuda_grouped_liouvillian(
         temp_comm,
         temp_diss,
         f,
-        rhs_ctx->solver->layout.density_dim));
+        rhs_ctx->solver->layout.density_dim,
+        s));
 
-    PetscCall(VecDestroy(&temp_diss));
-    PetscCall(VecDestroy(&temp_comm));
     return 0;
 }
 
@@ -276,24 +278,20 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
     }
 
     const Solver& solver = *rhs_ctx->solver;
+    cudaStream_t s = rhs_ctx->elementwise_stream;
 
-    PetscCall(zero_petsc_cuda_vec(f, solver.layout.density_dim));
+    PetscCall(zero_petsc_cuda_vec(f, solver.layout.density_dim, s));
 
-    Vec term_out = nullptr;
-    Vec accum = nullptr;
+    Vec term_out = rhs_ctx->work_vec_a;
+    Vec accum = rhs_ctx->work_vec_c;
 
-    PetscCall(VecDuplicate(x, &term_out));
-    PetscCall(VecDuplicate(x, &accum));
-
-    PetscCall(zero_petsc_cuda_vec(accum, solver.layout.density_dim));
+    PetscCall(zero_petsc_cuda_vec(accum, solver.layout.density_dim, s));
 
     for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
         const CachedGroupedLayoutEntry* layout_entry =
             find_cached_grouped_layout(*rhs_ctx, h_term.sites);
 
         if (layout_entry == nullptr) {
-            PetscCall(VecDestroy(&accum));
-            PetscCall(VecDestroy(&term_out));
             return PETSC_ERR_LIB;
         }
 
@@ -312,7 +310,8 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
             accum,
             term_out,
             f,
-            solver.layout.density_dim));
+            solver.layout.density_dim,
+            s));
 
         PetscCall(VecCopy(f, accum));
     }
@@ -322,8 +321,6 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
             find_cached_grouped_layout(*rhs_ctx, d_aux.sites);
 
         if (layout_entry == nullptr) {
-            PetscCall(VecDestroy(&accum));
-            PetscCall(VecDestroy(&term_out));
             return PETSC_ERR_LIB;
         }
 
@@ -344,15 +341,14 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
             accum,
             term_out,
             f,
-            solver.layout.density_dim));
+            solver.layout.density_dim,
+            s));
 
         PetscCall(VecCopy(f, accum));
     }
 
     PetscCall(VecCopy(accum, f));
 
-    PetscCall(VecDestroy(&accum));
-    PetscCall(VecDestroy(&term_out));
     return 0;
 }
 
@@ -369,27 +365,21 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
     }
 
     const Solver& solver = *rhs_ctx->solver;
+    cudaStream_t s = rhs_ctx->elementwise_stream;
 
-    PetscCall(zero_petsc_cuda_vec(f, solver.layout.density_dim));
+    PetscCall(zero_petsc_cuda_vec(f, solver.layout.density_dim, s));
 
-    Vec term_out = nullptr;
-    Vec scaled_term_out = nullptr;
-    Vec accum = nullptr;
+    Vec term_out = rhs_ctx->work_vec_a;
+    Vec scaled_term_out = rhs_ctx->work_vec_b;
+    Vec accum = rhs_ctx->work_vec_c;
 
-    PetscCall(VecDuplicate(x, &term_out));
-    PetscCall(VecDuplicate(x, &scaled_term_out));
-    PetscCall(VecDuplicate(x, &accum));
-
-    PetscCall(zero_petsc_cuda_vec(accum, solver.layout.density_dim));
+    PetscCall(zero_petsc_cuda_vec(accum, solver.layout.density_dim, s));
 
     for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
         const CachedGroupedLayoutEntry* layout_entry =
             find_cached_grouped_layout(*rhs_ctx, h_term.sites);
 
         if (layout_entry == nullptr) {
-            PetscCall(VecDestroy(&accum));
-            PetscCall(VecDestroy(&scaled_term_out));
-            PetscCall(VecDestroy(&term_out));
             return PETSC_ERR_LIB;
         }
 
@@ -408,7 +398,8 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             accum,
             term_out,
             f,
-            solver.layout.density_dim));
+            solver.layout.density_dim,
+            s));
 
         PetscCall(VecCopy(f, accum));
     }
@@ -418,9 +409,6 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             find_cached_grouped_layout(*rhs_ctx, d_aux.sites);
 
         if (layout_entry == nullptr) {
-            PetscCall(VecDestroy(&accum));
-            PetscCall(VecDestroy(&scaled_term_out));
-            PetscCall(VecDestroy(&term_out));
             return PETSC_ERR_LIB;
         }
 
@@ -441,7 +429,8 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             accum,
             term_out,
             f,
-            solver.layout.density_dim));
+            solver.layout.density_dim,
+            s));
 
         PetscCall(VecCopy(f, accum));
     }
@@ -451,9 +440,6 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             find_cached_grouped_layout(*rhs_ctx, td_term.sites);
 
         if (layout_entry == nullptr) {
-            PetscCall(VecDestroy(&accum));
-            PetscCall(VecDestroy(&scaled_term_out));
-            PetscCall(VecDestroy(&term_out));
             return PETSC_ERR_LIB;
         }
 
@@ -475,22 +461,21 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             term_out,
             coeff,
             scaled_term_out,
-            solver.layout.density_dim));
+            solver.layout.density_dim,
+            s));
 
         PetscCall(add_petsc_cuda_vecs(
             accum,
             scaled_term_out,
             f,
-            solver.layout.density_dim));
+            solver.layout.density_dim,
+            s));
 
         PetscCall(VecCopy(f, accum));
     }
 
     PetscCall(VecCopy(accum, f));
 
-    PetscCall(VecDestroy(&accum));
-    PetscCall(VecDestroy(&scaled_term_out));
-    PetscCall(VecDestroy(&term_out));
     return 0;
 }
 

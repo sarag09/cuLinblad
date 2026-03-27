@@ -148,8 +148,27 @@ PetscErrorCode run_ts_cuda_grouped_left_smoke_test(
         cuda_grouped_layout,
         CuTensorExecutorCache{},
         {},
-        {}
+        {},
+        nullptr
     };
+
+    rhs_ctx.work_vec_a = nullptr;
+    rhs_ctx.work_vec_b = nullptr;
+    rhs_ctx.work_vec_c = nullptr;
+
+    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_a));
+    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_b));
+    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_c));
+
+    if (cudaStreamCreate(&rhs_ctx.elementwise_stream) != cudaSuccess) {
+        (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
+        if (rhs_ctx.work_vec_c != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
+        if (rhs_ctx.work_vec_b != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
+        if (rhs_ctx.work_vec_a != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
+        PetscCall(VecDestroy(&x));
+        PetscCall(TSDestroy(&ts));
+        return PETSC_ERR_LIB;
+    }
 
     PetscCall(TSSetRHSFunction(ts, nullptr, ts_rhs_function_cuda_grouped_commutator, &rhs_ctx));
     PetscCall(TSSetTime(ts, 0.0));
@@ -165,6 +184,20 @@ PetscErrorCode run_ts_cuda_grouped_left_smoke_test(
 
     (void)destroy_cutensor_executor_cache(rhs_ctx.executor_cache);
     (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
+
+    if (rhs_ctx.elementwise_stream != nullptr) {
+        cudaStreamDestroy(rhs_ctx.elementwise_stream);
+    }
+
+    if (rhs_ctx.work_vec_c != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
+    }
+    if (rhs_ctx.work_vec_b != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
+    }
+    if (rhs_ctx.work_vec_a != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
+    }
 
     PetscCall(VecDestroy(&x));
     PetscCall(TSDestroy(&ts));
@@ -219,8 +252,27 @@ PetscErrorCode run_ts_cuda_grouped_liouvillian_smoke_test(
         cuda_grouped_layout,
         CuTensorExecutorCache{},
         {},
-        {}
+        {},
+        nullptr
     };
+
+    rhs_ctx.work_vec_a = nullptr;
+    rhs_ctx.work_vec_b = nullptr;
+    rhs_ctx.work_vec_c = nullptr;
+
+    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_a));
+    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_b));
+    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_c));
+
+    if (cudaStreamCreate(&rhs_ctx.elementwise_stream) != cudaSuccess) {
+        (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
+        if (rhs_ctx.work_vec_c != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
+        if (rhs_ctx.work_vec_b != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
+        if (rhs_ctx.work_vec_a != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
+        PetscCall(VecDestroy(&x));
+        PetscCall(TSDestroy(&ts));
+        return PETSC_ERR_LIB;
+    }
 
     PetscCall(TSSetRHSFunction(ts, nullptr, ts_rhs_function_cuda_grouped_liouvillian, &rhs_ctx));
     PetscCall(TSSetTime(ts, 0.0));
@@ -236,6 +288,20 @@ PetscErrorCode run_ts_cuda_grouped_liouvillian_smoke_test(
 
     (void)destroy_cutensor_executor_cache(rhs_ctx.executor_cache);
     (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
+
+    if (rhs_ctx.elementwise_stream != nullptr) {
+        cudaStreamDestroy(rhs_ctx.elementwise_stream);
+    }
+
+    if (rhs_ctx.work_vec_c != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
+    }
+    if (rhs_ctx.work_vec_b != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
+    }
+    if (rhs_ctx.work_vec_a != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
+    }
 
     PetscCall(VecDestroy(&x));
     PetscCall(TSDestroy(&ts));
@@ -287,8 +353,28 @@ PetscErrorCode run_ts_cuda_static_model_liouvillian_smoke_test(
         cuda_grouped_layout,
         CuTensorExecutorCache{},
         build_cached_static_dissipators(solver),
-        build_cached_grouped_layouts(solver)
+        build_cached_grouped_layouts(solver),
+        nullptr
     };
+
+    rhs_ctx.work_vec_a = nullptr;
+    rhs_ctx.work_vec_b = nullptr;
+    rhs_ctx.work_vec_c = nullptr;
+
+    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_a));
+    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_b));
+    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_c));
+
+    if (cudaStreamCreate(&rhs_ctx.elementwise_stream) != cudaSuccess) {
+        destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
+        (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
+        if (rhs_ctx.work_vec_c != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
+        if (rhs_ctx.work_vec_b != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
+        if (rhs_ctx.work_vec_a != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
+        PetscCall(VecDestroy(&x));
+        PetscCall(TSDestroy(&ts));
+        return PETSC_ERR_LIB;
+    }
 
     PetscCall(TSSetRHSFunction(ts, nullptr, ts_rhs_function_cuda_static_model_liouvillian, &rhs_ctx));
     PetscCall(TSSetTime(ts, 0.0));
@@ -305,6 +391,20 @@ PetscErrorCode run_ts_cuda_static_model_liouvillian_smoke_test(
     (void)destroy_cutensor_executor_cache(rhs_ctx.executor_cache);
     destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
     (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
+
+    if (rhs_ctx.elementwise_stream != nullptr) {
+        cudaStreamDestroy(rhs_ctx.elementwise_stream);
+    }
+
+    if (rhs_ctx.work_vec_c != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
+    }
+    if (rhs_ctx.work_vec_b != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
+    }
+    if (rhs_ctx.work_vec_a != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
+    }
 
     PetscCall(VecDestroy(&x));
     PetscCall(TSDestroy(&ts));
@@ -357,8 +457,28 @@ PetscErrorCode run_ts_cuda_full_model_liouvillian_smoke_test(
         cuda_grouped_layout,
         CuTensorExecutorCache{},
         build_cached_static_dissipators(solver),
-        build_cached_grouped_layouts(solver)
+        build_cached_grouped_layouts(solver),
+        nullptr
     };
+
+    rhs_ctx.work_vec_a = nullptr;
+    rhs_ctx.work_vec_b = nullptr;
+    rhs_ctx.work_vec_c = nullptr;
+
+    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_a));
+    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_b));
+    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_c));
+
+    if (cudaStreamCreate(&rhs_ctx.elementwise_stream) != cudaSuccess) {
+        destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
+        (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
+        if (rhs_ctx.work_vec_c != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
+        if (rhs_ctx.work_vec_b != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
+        if (rhs_ctx.work_vec_a != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
+        PetscCall(VecDestroy(&x));
+        PetscCall(TSDestroy(&ts));
+        return PETSC_ERR_LIB;
+    }
 
     PetscCall(TSSetRHSFunction(ts, nullptr, ts_rhs_function_cuda_full_model_liouvillian, &rhs_ctx));
     PetscCall(TSSetTime(ts, start_time));
@@ -375,6 +495,20 @@ PetscErrorCode run_ts_cuda_full_model_liouvillian_smoke_test(
     (void)destroy_cutensor_executor_cache(rhs_ctx.executor_cache);
     destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
     (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
+
+    if (rhs_ctx.elementwise_stream != nullptr) {
+        cudaStreamDestroy(rhs_ctx.elementwise_stream);
+    }
+
+    if (rhs_ctx.work_vec_c != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
+    }
+    if (rhs_ctx.work_vec_b != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
+    }
+    if (rhs_ctx.work_vec_a != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
+    }
 
     PetscCall(VecDestroy(&x));
     PetscCall(TSDestroy(&ts));
