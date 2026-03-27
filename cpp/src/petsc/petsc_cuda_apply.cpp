@@ -221,6 +221,7 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
 
 PetscErrorCode apply_grouped_left_cuda_vec(
     const Solver& solver,
+    const std::string& term_label,
     const std::vector<Complex>& local_op,
     const std::vector<Index>& target_sites,
     const GroupedStateLayout& grouped_layout,
@@ -240,14 +241,15 @@ PetscErrorCode apply_grouped_left_cuda_vec(
         cuda_grouped_layout,
         executor_cache,
         left_desc,
-        "petsc_grouped_left_apply",
-        "petsc_grouped_left_operator",
+        "petsc_grouped_left_apply_" + term_label,
+        "petsc_grouped_left_operator_" + term_label,
         x,
         y);
 }
 
 PetscErrorCode apply_grouped_right_cuda_vec(
     const Solver& solver,
+    const std::string& term_label,
     const std::vector<Complex>& local_op,
     const std::vector<Index>& target_sites,
     const GroupedStateLayout& grouped_layout,
@@ -267,14 +269,15 @@ PetscErrorCode apply_grouped_right_cuda_vec(
         cuda_grouped_layout,
         executor_cache,
         right_desc,
-        "petsc_grouped_right_apply",
-        "petsc_grouped_right_operator",
+        "petsc_grouped_right_apply_" + term_label,
+        "petsc_grouped_right_operator_" + term_label,
         x,
         y);
 }
 
 PetscErrorCode apply_grouped_commutator_cuda_vec(
     const Solver& solver,
+    const std::string& term_label,
     const std::vector<Complex>& local_op,
     const std::vector<Index>& target_sites,
     const GroupedStateLayout& grouped_layout,
@@ -303,9 +306,9 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_comm_left_apply",
+        "petsc_grouped_comm_left_" + term_label,
         left_desc,
-        "petsc_grouped_comm_left_operator",
+        "petsc_grouped_comm_left_op_" + term_label,
         local_op,
         grouped_bytes,
         left_executor);
@@ -317,9 +320,9 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_comm_right_apply",
+        "petsc_grouped_comm_right_" + term_label,
         right_desc,
-        "petsc_grouped_comm_right_operator",
+        "petsc_grouped_comm_right_op_" + term_label,
         local_op,
         grouped_bytes,
         right_executor);
@@ -331,9 +334,9 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_comm_combine_buffer",
+        "petsc_grouped_comm_combine_buffer_" + term_label,
         left_desc,
-        "petsc_grouped_comm_left_operator",
+        "petsc_grouped_comm_left_op_" + term_label,
         local_op,
         grouped_bytes,
         combine_executor);
@@ -429,6 +432,7 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
 
 PetscErrorCode apply_grouped_dissipator_cuda_vec(
     const Solver& solver,
+    const std::string& term_label,
     const std::vector<Complex>& local_op,
     const std::vector<Complex>& local_op_dag,
     const std::vector<Complex>& local_op_dag_op,
@@ -460,9 +464,9 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_diss_jump_left",
+        "petsc_grouped_diss_jump_left_" + term_label,
         left_desc,
-        "petsc_grouped_diss_L",
+        "petsc_grouped_diss_L_" + term_label,
         local_op,
         grouped_bytes,
         jump_left_executor);
@@ -474,9 +478,9 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_diss_jump_right",
+        "petsc_grouped_diss_jump_right_" + term_label,
         right_desc,
-        "petsc_grouped_diss_Ldag",
+        "petsc_grouped_diss_Ldag_" + term_label,
         local_op_dag,
         grouped_bytes,
         jump_right_executor);
@@ -488,9 +492,9 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_diss_norm_left",
+        "petsc_grouped_diss_norm_left_" + term_label,
         left_desc,
-        "petsc_grouped_diss_LdagL",
+        "petsc_grouped_diss_LdagL_" + term_label,
         local_op_dag_op,
         grouped_bytes,
         norm_left_executor);
@@ -502,9 +506,9 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_diss_norm_right",
+        "petsc_grouped_diss_norm_right_" + term_label,
         right_desc,
-        "petsc_grouped_diss_LdagL",
+        "petsc_grouped_diss_LdagL_" + term_label,
         local_op_dag_op,
         grouped_bytes,
         norm_right_executor);

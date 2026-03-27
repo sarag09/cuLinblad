@@ -34,6 +34,7 @@ PetscErrorCode run_ts_cuda_static_model_liouvillian_smoke_test(
 
 PetscErrorCode run_ts_cuda_full_model_liouvillian_smoke_test(
     const Solver& solver,
+    double start_time,
     Index row,
     Index col,
     Complex& value_out);

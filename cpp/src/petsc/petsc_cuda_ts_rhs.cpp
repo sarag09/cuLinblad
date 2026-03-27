@@ -14,6 +14,37 @@ namespace culindblad {
 
 namespace {
 
+bool same_sites(
+    const std::vector<Index>& a,
+    const std::vector<Index>& b)
+{
+    if (a.size() != b.size()) {
+        return false;
+    }
+
+    for (Index i = 0; i < a.size(); ++i) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+const CachedGroupedLayoutEntry* find_cached_grouped_layout(
+    const PetscCudaTsRhsContext& rhs_ctx,
+    const std::vector<Index>& sites)
+{
+    for (const CachedGroupedLayoutEntry& entry :
+         rhs_ctx.cached_grouped_layouts) {
+        if (same_sites(entry.sites, sites)) {
+            return &entry;
+        }
+    }
+
+    return nullptr;
+}
+
 PetscErrorCode zero_petsc_cuda_vec(Vec v, Index size)
 {
     PetscScalar* d_v_ptr = nullptr;
@@ -166,6 +197,7 @@ PetscErrorCode ts_rhs_function_cuda_grouped_commutator(
 
     PetscCall(apply_grouped_commutator_cuda_vec(
         *rhs_ctx->solver,
+        "smoke_h",
         *rhs_ctx->h_local_op,
         rhs_ctx->target_sites,
         rhs_ctx->grouped_layout,
@@ -198,6 +230,7 @@ PetscErrorCode ts_rhs_function_cuda_grouped_liouvillian(
 
     PetscCall(apply_grouped_commutator_cuda_vec(
         *rhs_ctx->solver,
+        "smoke_h",
         *rhs_ctx->h_local_op,
         rhs_ctx->target_sites,
         rhs_ctx->grouped_layout,
@@ -208,6 +241,7 @@ PetscErrorCode ts_rhs_function_cuda_grouped_liouvillian(
 
     PetscCall(apply_grouped_dissipator_cuda_vec(
         *rhs_ctx->solver,
+        "smoke_d",
         *rhs_ctx->d_local_op,
         *rhs_ctx->d_local_op_dag,
         *rhs_ctx->d_local_op_dag_op,
@@ -254,12 +288,22 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
     PetscCall(zero_petsc_cuda_vec(accum, solver.layout.density_dim));
 
     for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
+        const CachedGroupedLayoutEntry* layout_entry =
+            find_cached_grouped_layout(*rhs_ctx, h_term.sites);
+
+        if (layout_entry == nullptr) {
+            PetscCall(VecDestroy(&accum));
+            PetscCall(VecDestroy(&term_out));
+            return PETSC_ERR_LIB;
+        }
+
         PetscCall(apply_grouped_commutator_cuda_vec(
             solver,
+            h_term.name,
             h_term.matrix,
             h_term.sites,
-            rhs_ctx->grouped_layout,
-            rhs_ctx->cuda_grouped_layout,
+            layout_entry->grouped_layout,
+            layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
             term_out));
@@ -273,21 +317,25 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
         PetscCall(VecCopy(f, accum));
     }
 
-    for (const OperatorTerm& d_term : solver.model.dissipator_terms) {
-        std::vector<Complex> d_dag =
-            local_conjugate_transpose(d_term.matrix, d_term.row_dim);
+    for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx->cached_static_dissipators) {
+        const CachedGroupedLayoutEntry* layout_entry =
+            find_cached_grouped_layout(*rhs_ctx, d_aux.sites);
 
-        std::vector<Complex> d_dag_d =
-            local_multiply_square(d_dag, d_term.matrix, d_term.row_dim);
+        if (layout_entry == nullptr) {
+            PetscCall(VecDestroy(&accum));
+            PetscCall(VecDestroy(&term_out));
+            return PETSC_ERR_LIB;
+        }
 
         PetscCall(apply_grouped_dissipator_cuda_vec(
             solver,
-            d_term.matrix,
-            d_dag,
-            d_dag_d,
-            d_term.sites,
-            rhs_ctx->grouped_layout,
-            rhs_ctx->cuda_grouped_layout,
+            d_aux.name,
+            d_aux.l_op,
+            d_aux.l_dag,
+            d_aux.l_dag_l,
+            d_aux.sites,
+            layout_entry->grouped_layout,
+            layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
             term_out));
@@ -335,12 +383,23 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
     PetscCall(zero_petsc_cuda_vec(accum, solver.layout.density_dim));
 
     for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
+        const CachedGroupedLayoutEntry* layout_entry =
+            find_cached_grouped_layout(*rhs_ctx, h_term.sites);
+
+        if (layout_entry == nullptr) {
+            PetscCall(VecDestroy(&accum));
+            PetscCall(VecDestroy(&scaled_term_out));
+            PetscCall(VecDestroy(&term_out));
+            return PETSC_ERR_LIB;
+        }
+
         PetscCall(apply_grouped_commutator_cuda_vec(
             solver,
+            h_term.name,
             h_term.matrix,
             h_term.sites,
-            rhs_ctx->grouped_layout,
-            rhs_ctx->cuda_grouped_layout,
+            layout_entry->grouped_layout,
+            layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
             term_out));
@@ -354,21 +413,26 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
         PetscCall(VecCopy(f, accum));
     }
 
-    for (const OperatorTerm& d_term : solver.model.dissipator_terms) {
-        std::vector<Complex> d_dag =
-            local_conjugate_transpose(d_term.matrix, d_term.row_dim);
+    for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx->cached_static_dissipators) {
+        const CachedGroupedLayoutEntry* layout_entry =
+            find_cached_grouped_layout(*rhs_ctx, d_aux.sites);
 
-        std::vector<Complex> d_dag_d =
-            local_multiply_square(d_dag, d_term.matrix, d_term.row_dim);
+        if (layout_entry == nullptr) {
+            PetscCall(VecDestroy(&accum));
+            PetscCall(VecDestroy(&scaled_term_out));
+            PetscCall(VecDestroy(&term_out));
+            return PETSC_ERR_LIB;
+        }
 
         PetscCall(apply_grouped_dissipator_cuda_vec(
             solver,
-            d_term.matrix,
-            d_dag,
-            d_dag_d,
-            d_term.sites,
-            rhs_ctx->grouped_layout,
-            rhs_ctx->cuda_grouped_layout,
+            d_aux.name,
+            d_aux.l_op,
+            d_aux.l_dag,
+            d_aux.l_dag_l,
+            d_aux.sites,
+            layout_entry->grouped_layout,
+            layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
             term_out));
@@ -383,15 +447,26 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
     }
 
     for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
+        const CachedGroupedLayoutEntry* layout_entry =
+            find_cached_grouped_layout(*rhs_ctx, td_term.sites);
+
+        if (layout_entry == nullptr) {
+            PetscCall(VecDestroy(&accum));
+            PetscCall(VecDestroy(&scaled_term_out));
+            PetscCall(VecDestroy(&term_out));
+            return PETSC_ERR_LIB;
+        }
+
         const double coeff =
             evaluate_time_dependent_coefficient(td_term, static_cast<double>(t));
 
         PetscCall(apply_grouped_commutator_cuda_vec(
             solver,
+            td_term.name,
             td_term.matrix,
             td_term.sites,
-            rhs_ctx->grouped_layout,
-            rhs_ctx->cuda_grouped_layout,
+            layout_entry->grouped_layout,
+            layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
             term_out));

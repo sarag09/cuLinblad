@@ -2,6 +2,9 @@
 
 #include <petscts.h>
 
+#include <string>
+#include <vector>
+
 #include "culindblad/cuda_grouped_layout.hpp"
 #include "culindblad/cutensor_executor_cache.hpp"
 #include "culindblad/grouped_state_layout.hpp"
@@ -9,6 +12,20 @@
 #include "culindblad/types.hpp"
 
 namespace culindblad {
+
+struct CachedDissipatorAuxiliaries {
+    std::string name;
+    std::vector<Index> sites;
+    std::vector<Complex> l_op;
+    std::vector<Complex> l_dag;
+    std::vector<Complex> l_dag_l;
+};
+
+struct CachedGroupedLayoutEntry {
+    std::vector<Index> sites;
+    GroupedStateLayout grouped_layout;
+    CudaGroupedStateLayout cuda_grouped_layout;
+};
 
 struct PetscCudaTsRhsContext {
     const Solver* solver;
@@ -20,6 +37,8 @@ struct PetscCudaTsRhsContext {
     GroupedStateLayout grouped_layout;
     CudaGroupedStateLayout cuda_grouped_layout;
     CuTensorExecutorCache executor_cache;
+    std::vector<CachedDissipatorAuxiliaries> cached_static_dissipators;
+    std::vector<CachedGroupedLayoutEntry> cached_grouped_layouts;
 };
 
 PetscErrorCode ts_rhs_function_cuda_grouped_commutator(
