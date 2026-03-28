@@ -26,6 +26,7 @@
 #include "culindblad/time_dependent_term.hpp"
 #include "culindblad/types.hpp"
 #include "culindblad/petsc_cuda_vec_utils.hpp"
+#include "culindblad/batch_evolution.hpp"
 
 int main(int argc, char** argv)
 {
@@ -554,7 +555,140 @@ int main(int argc, char** argv)
         mixed_ts_value));
 
         std::cout << "Mixed GPU TS entry (0,27): "
-                << mixed_ts_value << std::endl;            
+                << mixed_ts_value << std::endl;       
+                
+    std::cout << "\n===== Batch evolution smoke test =====\n" << std::endl;
+
+    std::vector<std::vector<Complex>> batch_initial_states(
+        4,
+        std::vector<Complex>(solver.layout.density_dim, Complex{0.0, 0.0}));
+
+    batch_initial_states[0][0 * solver.layout.hilbert_dim + 0] = Complex{1.0, 0.0};
+    batch_initial_states[1][0 * solver.layout.hilbert_dim + 27] = Complex{1.0, 0.0};
+    batch_initial_states[2][27 * solver.layout.hilbert_dim + 0] = Complex{1.0, 0.0};
+    batch_initial_states[3][27 * solver.layout.hilbert_dim + 27] = Complex{1.0, 0.0};
+
+    BatchEvolutionConfig batch_config{
+        0.0,
+        1.0e-3,
+        1,
+        2
+    };
+
+    BatchEvolutionResult batch_result =
+        evolve_density_batch_cpu_reference(
+            solver,
+            batch_initial_states,
+            batch_config);
+
+    std::cout << "Batch result state 0 entry (0,0): "
+              << batch_result.final_states[0].at(0 * solver.layout.hilbert_dim + 0)
+              << std::endl;
+
+    std::cout << "Batch result state 1 entry (0,27): "
+              << batch_result.final_states[1].at(0 * solver.layout.hilbert_dim + 27)
+              << std::endl;
+              
+    BatchEvolutionResult batch_result_cuda =
+        evolve_density_batch_cuda_ts(
+            solver,
+            batch_initial_states,
+            batch_config);
+
+    std::cout << "CUDA batch result state 0 entry (0,0): "
+              << batch_result_cuda.final_states[0].at(0 * solver.layout.hilbert_dim + 0)
+              << std::endl;
+
+    std::cout << "CUDA batch result state 1 entry (0,27): "
+              << batch_result_cuda.final_states[1].at(0 * solver.layout.hilbert_dim + 27)
+              << std::endl;
+              
+    std::cout << "\n===== Batch timing smoke test =====\n" << std::endl;
+
+    auto make_batch_initial_states =
+        [&](Index count) {
+            std::vector<std::vector<Complex>> states(
+                count,
+                std::vector<Complex>(solver.layout.density_dim, Complex{0.0, 0.0}));
+
+            for (Index i = 0; i < count; ++i) {
+                const Index ket = (i % 2 == 0) ? 0 : 27;
+                const Index bra = (i % 4 < 2) ? 0 : 27;
+                states[i][ket * solver.layout.hilbert_dim + bra] = Complex{1.0, 0.0};
+            }
+
+            return states;
+        };
+
+    for (Index test_batch_size : std::vector<Index>{1, 4, 8, 16, 32, 64, 128, 256, 512}) {
+        std::vector<std::vector<Complex>> timing_states =
+            make_batch_initial_states(test_batch_size);
+
+        BatchEvolutionConfig timing_config{
+            0.0,
+            1.0e-3,
+            1,
+            test_batch_size
+        };
+
+        BatchEvolutionTiming cpu_timing =
+            time_density_batch_cpu_reference(
+                solver,
+                timing_states,
+                timing_config);
+
+        BatchEvolutionTiming cuda_timing =
+            time_density_batch_cuda_ts(
+                solver,
+                timing_states,
+                timing_config);
+
+        std::cout << "Batch size " << test_batch_size
+                  << " CPU time (s): " << cpu_timing.elapsed_seconds << std::endl;
+
+        std::cout << "Batch size " << test_batch_size
+                  << " CUDA wall time (s): " << cuda_timing.elapsed_seconds << std::endl;
+
+        const double cpu_states_per_second =
+            static_cast<double>(test_batch_size) / cpu_timing.elapsed_seconds;
+
+        const double cuda_states_per_second =
+            static_cast<double>(test_batch_size) / cuda_timing.elapsed_seconds;
+
+        std::cout << "Batch size " << test_batch_size
+                  << " CPU states/s: " << cpu_states_per_second << std::endl;
+
+        std::cout << "Batch size " << test_batch_size
+                  << " CUDA states/s: " << cuda_states_per_second << std::endl;                  
+
+        std::cout << "Batch size " << test_batch_size
+                  << " CUDA event time (s): " << cuda_timing.gpu_elapsed_seconds << std::endl;
+
+        const double cuda_gpu_states_per_second =
+            static_cast<double>(test_batch_size) / cuda_timing.gpu_elapsed_seconds;
+
+        std::cout << "Batch size " << test_batch_size
+                  << " CUDA event states/s: " << cuda_gpu_states_per_second << std::endl;                  
+
+        std::cout << "Batch size " << test_batch_size
+                  << " CUDA sample entry (0,27): "
+                  << cuda_timing.result.final_states[std::min<Index>(1, test_batch_size - 1)]
+                         .at(0 * solver.layout.hilbert_dim + 27)
+                  << std::endl;
+    } 
+    
+    {
+        const double best_gpu_states_per_second = 378.0; // from observed peak
+
+        const Index total_states = 256;
+
+        const double estimated_time =
+            static_cast<double>(total_states) / best_gpu_states_per_second;
+
+        std::cout << "\n===== 4Q4C projected estimate =====" << std::endl;
+        std::cout << "Total states: " << total_states << std::endl;
+        std::cout << "Estimated GPU time (s): " << estimated_time << std::endl;
+    }    
 
     PetscFinalize();
     return 0;

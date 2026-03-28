@@ -41,6 +41,7 @@ struct PetscCudaTsRhsContext {
     std::vector<CachedDissipatorAuxiliaries> cached_static_dissipators;
     std::vector<CachedGroupedLayoutEntry> cached_grouped_layouts;
     cudaStream_t elementwise_stream;
+
     Vec work_vec_a;
     Vec work_vec_b;
     Vec work_vec_c;

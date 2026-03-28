@@ -2,15 +2,16 @@
 
 #include <petscts.h>
 #include <petscvec.h>
+
 #include <stdexcept>
 
 #include "culindblad/cuda_grouped_layout.hpp"
 #include "culindblad/grouped_state_layout.hpp"
+#include "culindblad/local_operator_utils.hpp"
 #include "culindblad/petsc_cuda_ts_rhs.hpp"
 #include "culindblad/solver.hpp"
-#include "culindblad/types.hpp"
-#include "culindblad/local_operator_utils.hpp"
 #include "culindblad/time_dependent_term.hpp"
+#include "culindblad/types.hpp"
 
 namespace culindblad {
 
@@ -101,6 +102,35 @@ void destroy_cached_grouped_layouts(
     cached.clear();
 }
 
+PetscErrorCode create_rhs_work_vectors(
+    Vec prototype,
+    PetscCudaTsRhsContext& rhs_ctx)
+{
+    rhs_ctx.work_vec_a = nullptr;
+    rhs_ctx.work_vec_b = nullptr;
+    rhs_ctx.work_vec_c = nullptr;
+
+    PetscCall(VecDuplicate(prototype, &rhs_ctx.work_vec_a));
+    PetscCall(VecDuplicate(prototype, &rhs_ctx.work_vec_b));
+    PetscCall(VecDuplicate(prototype, &rhs_ctx.work_vec_c));
+    return 0;
+}
+
+PetscErrorCode destroy_rhs_work_vectors(
+    PetscCudaTsRhsContext& rhs_ctx)
+{
+    if (rhs_ctx.work_vec_c != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
+    }
+    if (rhs_ctx.work_vec_b != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
+    }
+    if (rhs_ctx.work_vec_a != nullptr) {
+        PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
+    }
+    return 0;
+}
+
 } // namespace
 
 PetscErrorCode run_ts_cuda_grouped_left_smoke_test(
@@ -149,26 +179,20 @@ PetscErrorCode run_ts_cuda_grouped_left_smoke_test(
         CuTensorExecutorCache{},
         {},
         {},
+        nullptr,
+        nullptr,
+        nullptr,
         nullptr
     };
 
-    rhs_ctx.work_vec_a = nullptr;
-    rhs_ctx.work_vec_b = nullptr;
-    rhs_ctx.work_vec_c = nullptr;
-
-    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_a));
-    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_b));
-    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_c));
-
     if (cudaStreamCreate(&rhs_ctx.elementwise_stream) != cudaSuccess) {
         (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
-        if (rhs_ctx.work_vec_c != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
-        if (rhs_ctx.work_vec_b != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
-        if (rhs_ctx.work_vec_a != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
         PetscCall(VecDestroy(&x));
         PetscCall(TSDestroy(&ts));
         return PETSC_ERR_LIB;
     }
+
+    PetscCall(create_rhs_work_vectors(x, rhs_ctx));
 
     PetscCall(TSSetRHSFunction(ts, nullptr, ts_rhs_function_cuda_grouped_commutator, &rhs_ctx));
     PetscCall(TSSetTime(ts, 0.0));
@@ -182,21 +206,12 @@ PetscErrorCode run_ts_cuda_grouped_left_smoke_test(
     value_out = reinterpret_cast<Complex*>(x_ptr)[row * solver.layout.hilbert_dim + col];
     PetscCall(VecRestoreArray(x, &x_ptr));
 
+    PetscCall(destroy_rhs_work_vectors(rhs_ctx));
     (void)destroy_cutensor_executor_cache(rhs_ctx.executor_cache);
     (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
 
     if (rhs_ctx.elementwise_stream != nullptr) {
         cudaStreamDestroy(rhs_ctx.elementwise_stream);
-    }
-
-    if (rhs_ctx.work_vec_c != nullptr) {
-        PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
-    }
-    if (rhs_ctx.work_vec_b != nullptr) {
-        PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
-    }
-    if (rhs_ctx.work_vec_a != nullptr) {
-        PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
     }
 
     PetscCall(VecDestroy(&x));
@@ -253,26 +268,20 @@ PetscErrorCode run_ts_cuda_grouped_liouvillian_smoke_test(
         CuTensorExecutorCache{},
         {},
         {},
+        nullptr,
+        nullptr,
+        nullptr,
         nullptr
     };
 
-    rhs_ctx.work_vec_a = nullptr;
-    rhs_ctx.work_vec_b = nullptr;
-    rhs_ctx.work_vec_c = nullptr;
-
-    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_a));
-    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_b));
-    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_c));
-
     if (cudaStreamCreate(&rhs_ctx.elementwise_stream) != cudaSuccess) {
         (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
-        if (rhs_ctx.work_vec_c != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
-        if (rhs_ctx.work_vec_b != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
-        if (rhs_ctx.work_vec_a != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
         PetscCall(VecDestroy(&x));
         PetscCall(TSDestroy(&ts));
         return PETSC_ERR_LIB;
     }
+
+    PetscCall(create_rhs_work_vectors(x, rhs_ctx));
 
     PetscCall(TSSetRHSFunction(ts, nullptr, ts_rhs_function_cuda_grouped_liouvillian, &rhs_ctx));
     PetscCall(TSSetTime(ts, 0.0));
@@ -286,21 +295,12 @@ PetscErrorCode run_ts_cuda_grouped_liouvillian_smoke_test(
     value_out = reinterpret_cast<Complex*>(x_ptr)[row * solver.layout.hilbert_dim + col];
     PetscCall(VecRestoreArray(x, &x_ptr));
 
+    PetscCall(destroy_rhs_work_vectors(rhs_ctx));
     (void)destroy_cutensor_executor_cache(rhs_ctx.executor_cache);
     (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
 
     if (rhs_ctx.elementwise_stream != nullptr) {
         cudaStreamDestroy(rhs_ctx.elementwise_stream);
-    }
-
-    if (rhs_ctx.work_vec_c != nullptr) {
-        PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
-    }
-    if (rhs_ctx.work_vec_b != nullptr) {
-        PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
-    }
-    if (rhs_ctx.work_vec_a != nullptr) {
-        PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
     }
 
     PetscCall(VecDestroy(&x));
@@ -354,27 +354,21 @@ PetscErrorCode run_ts_cuda_static_model_liouvillian_smoke_test(
         CuTensorExecutorCache{},
         build_cached_static_dissipators(solver),
         build_cached_grouped_layouts(solver),
+        nullptr,
+        nullptr,
+        nullptr,
         nullptr
     };
-
-    rhs_ctx.work_vec_a = nullptr;
-    rhs_ctx.work_vec_b = nullptr;
-    rhs_ctx.work_vec_c = nullptr;
-
-    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_a));
-    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_b));
-    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_c));
 
     if (cudaStreamCreate(&rhs_ctx.elementwise_stream) != cudaSuccess) {
         destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
         (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
-        if (rhs_ctx.work_vec_c != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
-        if (rhs_ctx.work_vec_b != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
-        if (rhs_ctx.work_vec_a != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
         PetscCall(VecDestroy(&x));
         PetscCall(TSDestroy(&ts));
         return PETSC_ERR_LIB;
     }
+
+    PetscCall(create_rhs_work_vectors(x, rhs_ctx));
 
     PetscCall(TSSetRHSFunction(ts, nullptr, ts_rhs_function_cuda_static_model_liouvillian, &rhs_ctx));
     PetscCall(TSSetTime(ts, 0.0));
@@ -388,22 +382,13 @@ PetscErrorCode run_ts_cuda_static_model_liouvillian_smoke_test(
     value_out = reinterpret_cast<Complex*>(x_ptr)[row * solver.layout.hilbert_dim + col];
     PetscCall(VecRestoreArray(x, &x_ptr));
 
+    PetscCall(destroy_rhs_work_vectors(rhs_ctx));
     (void)destroy_cutensor_executor_cache(rhs_ctx.executor_cache);
     destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
     (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
 
     if (rhs_ctx.elementwise_stream != nullptr) {
         cudaStreamDestroy(rhs_ctx.elementwise_stream);
-    }
-
-    if (rhs_ctx.work_vec_c != nullptr) {
-        PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
-    }
-    if (rhs_ctx.work_vec_b != nullptr) {
-        PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
-    }
-    if (rhs_ctx.work_vec_a != nullptr) {
-        PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
     }
 
     PetscCall(VecDestroy(&x));
@@ -458,27 +443,21 @@ PetscErrorCode run_ts_cuda_full_model_liouvillian_smoke_test(
         CuTensorExecutorCache{},
         build_cached_static_dissipators(solver),
         build_cached_grouped_layouts(solver),
+        nullptr,
+        nullptr,
+        nullptr,
         nullptr
     };
-
-    rhs_ctx.work_vec_a = nullptr;
-    rhs_ctx.work_vec_b = nullptr;
-    rhs_ctx.work_vec_c = nullptr;
-
-    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_a));
-    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_b));
-    PetscCall(VecDuplicate(x, &rhs_ctx.work_vec_c));
 
     if (cudaStreamCreate(&rhs_ctx.elementwise_stream) != cudaSuccess) {
         destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
         (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
-        if (rhs_ctx.work_vec_c != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
-        if (rhs_ctx.work_vec_b != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
-        if (rhs_ctx.work_vec_a != nullptr) PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
         PetscCall(VecDestroy(&x));
         PetscCall(TSDestroy(&ts));
         return PETSC_ERR_LIB;
     }
+
+    PetscCall(create_rhs_work_vectors(x, rhs_ctx));
 
     PetscCall(TSSetRHSFunction(ts, nullptr, ts_rhs_function_cuda_full_model_liouvillian, &rhs_ctx));
     PetscCall(TSSetTime(ts, start_time));
@@ -492,22 +471,13 @@ PetscErrorCode run_ts_cuda_full_model_liouvillian_smoke_test(
     value_out = reinterpret_cast<Complex*>(x_ptr)[row * solver.layout.hilbert_dim + col];
     PetscCall(VecRestoreArray(x, &x_ptr));
 
+    PetscCall(destroy_rhs_work_vectors(rhs_ctx));
     (void)destroy_cutensor_executor_cache(rhs_ctx.executor_cache);
     destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
     (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
 
     if (rhs_ctx.elementwise_stream != nullptr) {
         cudaStreamDestroy(rhs_ctx.elementwise_stream);
-    }
-
-    if (rhs_ctx.work_vec_c != nullptr) {
-        PetscCall(VecDestroy(&rhs_ctx.work_vec_c));
-    }
-    if (rhs_ctx.work_vec_b != nullptr) {
-        PetscCall(VecDestroy(&rhs_ctx.work_vec_b));
-    }
-    if (rhs_ctx.work_vec_a != nullptr) {
-        PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
     }
 
     PetscCall(VecDestroy(&x));

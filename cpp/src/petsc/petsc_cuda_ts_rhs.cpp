@@ -6,7 +6,6 @@
 #include <cuda_runtime.h>
 
 #include "culindblad/cuda_elementwise.hpp"
-#include "culindblad/local_operator_utils.hpp"
 #include "culindblad/petsc_cuda_apply.hpp"
 #include "culindblad/time_dependent_term.hpp"
 
@@ -280,11 +279,10 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
     const Solver& solver = *rhs_ctx->solver;
     cudaStream_t s = rhs_ctx->elementwise_stream;
 
-    PetscCall(zero_petsc_cuda_vec(f, solver.layout.density_dim, s));
-
     Vec term_out = rhs_ctx->work_vec_a;
-    Vec accum = rhs_ctx->work_vec_c;
+    Vec accum = rhs_ctx->work_vec_b;
 
+    PetscCall(zero_petsc_cuda_vec(f, solver.layout.density_dim, s));
     PetscCall(zero_petsc_cuda_vec(accum, solver.layout.density_dim, s));
 
     for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
@@ -348,7 +346,6 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
     }
 
     PetscCall(VecCopy(accum, f));
-
     return 0;
 }
 
@@ -367,12 +364,11 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
     const Solver& solver = *rhs_ctx->solver;
     cudaStream_t s = rhs_ctx->elementwise_stream;
 
-    PetscCall(zero_petsc_cuda_vec(f, solver.layout.density_dim, s));
-
     Vec term_out = rhs_ctx->work_vec_a;
     Vec scaled_term_out = rhs_ctx->work_vec_b;
     Vec accum = rhs_ctx->work_vec_c;
 
+    PetscCall(zero_petsc_cuda_vec(f, solver.layout.density_dim, s));
     PetscCall(zero_petsc_cuda_vec(accum, solver.layout.density_dim, s));
 
     for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
@@ -475,7 +471,6 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
     }
 
     PetscCall(VecCopy(accum, f));
-
     return 0;
 }
 

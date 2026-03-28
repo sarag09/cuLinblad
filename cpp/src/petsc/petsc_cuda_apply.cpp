@@ -306,9 +306,9 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_comm_left_" + term_label,
+        "petsc_grouped_comm_left_apply_" + term_label,
         left_desc,
-        "petsc_grouped_comm_left_op_" + term_label,
+        "petsc_grouped_comm_left_operator_" + term_label,
         local_op,
         grouped_bytes,
         left_executor);
@@ -320,9 +320,9 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_comm_right_" + term_label,
+        "petsc_grouped_comm_right_apply_" + term_label,
         right_desc,
-        "petsc_grouped_comm_right_op_" + term_label,
+        "petsc_grouped_comm_right_operator_" + term_label,
         local_op,
         grouped_bytes,
         right_executor);
@@ -336,7 +336,7 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
         executor_cache,
         "petsc_grouped_comm_combine_buffer_" + term_label,
         left_desc,
-        "petsc_grouped_comm_left_op_" + term_label,
+        "petsc_grouped_comm_combine_operator_" + term_label,
         local_op,
         grouped_bytes,
         combine_executor);
