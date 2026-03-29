@@ -178,4 +178,36 @@ bool launch_vector_scale_kernel(
     return cudaGetLastError() == cudaSuccess;
 }
 
+__global__ void zero_batched_buffer_kernel(
+    cuDoubleComplex* buffer,
+    std::size_t total_elements)
+{
+    const std::size_t idx =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        buffer[idx] = make_cuDoubleComplex(0.0, 0.0);
+    }
+}
+
+bool launch_zero_batched_buffer_kernel(
+    void* buffer,
+    Index total_elements,
+    cudaStream_t stream)
+{
+    if (buffer == nullptr) {
+        return false;
+    }
+
+    constexpr int threads_per_block = 256;
+    const int blocks =
+        static_cast<int>((total_elements + threads_per_block - 1) / threads_per_block);
+
+    zero_batched_buffer_kernel<<<blocks, threads_per_block, 0, stream>>>(
+        static_cast<cuDoubleComplex*>(buffer),
+        static_cast<std::size_t>(total_elements));
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
 } // namespace culindblad

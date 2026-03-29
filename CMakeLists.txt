@@ -61,6 +61,8 @@ add_executable(run_sim
     cpp/src/backends/cuda/cuda_grouped_layout.cu
     cpp/src/petsc/petsc_cuda_vec_utils.cpp
     cpp/src/core/batch_evolution.cpp
+    cpp/src/core/batched_grouped_layout.cpp
+    cpp/src/backends/cuda/batched_grouped_apply.cpp
 )
 
 target_include_directories(run_sim PRIVATE

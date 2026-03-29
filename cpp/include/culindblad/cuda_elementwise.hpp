@@ -33,6 +33,11 @@ bool launch_vector_scale_kernel(
     double scale,
     void* d_out,
     Index size,
+    cudaStream_t stream);  
+    
+bool launch_zero_batched_buffer_kernel(
+    void* buffer,
+    Index total_elements,
     cudaStream_t stream);    
 
 } // namespace culindblad

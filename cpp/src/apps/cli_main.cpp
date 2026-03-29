@@ -27,6 +27,8 @@
 #include "culindblad/types.hpp"
 #include "culindblad/petsc_cuda_vec_utils.hpp"
 #include "culindblad/batch_evolution.hpp"
+#include "culindblad/batched_grouped_apply.hpp"
+#include "culindblad/batched_grouped_layout.hpp"
 
 int main(int argc, char** argv)
 {
@@ -620,7 +622,7 @@ int main(int argc, char** argv)
             return states;
         };
 
-    for (Index test_batch_size : std::vector<Index>{1, 4, 8, 16, 32, 64, 128, 256, 512}) {
+    for (Index test_batch_size : std::vector<Index>{1, 4, 8, 16, 32, 64, 128}) {
         std::vector<std::vector<Complex>> timing_states =
             make_batch_initial_states(test_batch_size);
 
@@ -671,24 +673,144 @@ int main(int argc, char** argv)
                   << " CUDA event states/s: " << cuda_gpu_states_per_second << std::endl;                  
 
         std::cout << "Batch size " << test_batch_size
-                  << " CUDA sample entry (0,27): "
+                  << " CUDA sample entry state 1 (27,0): "
                   << cuda_timing.result.final_states[std::min<Index>(1, test_batch_size - 1)]
-                         .at(0 * solver.layout.hilbert_dim + 27)
+                         .at(27 * solver.layout.hilbert_dim + 0)
                   << std::endl;
     } 
     
-    {
-        const double best_gpu_states_per_second = 378.0; // from observed peak
+    std::cout << "\n===== Batched grouped-layout smoke test =====\n" << std::endl;
 
-        const Index total_states = 256;
+    GroupedStateLayout single_grouped_layout =
+        make_grouped_state_layout(target_sites, local_dims);
 
-        const double estimated_time =
-            static_cast<double>(total_states) / best_gpu_states_per_second;
+    BatchedGroupedLayout batched_layout =
+        make_batched_grouped_layout(single_grouped_layout, 4);
 
-        std::cout << "\n===== 4Q4C projected estimate =====" << std::endl;
-        std::cout << "Total states: " << total_states << std::endl;
-        std::cout << "Estimated GPU time (s): " << estimated_time << std::endl;
-    }    
+    std::vector<std::vector<Complex>> flat_batch_states(
+        4,
+        std::vector<Complex>(solver.layout.density_dim, Complex{0.0, 0.0}));
+
+    flat_batch_states[0][0 * solver.layout.hilbert_dim + 0] = Complex{1.0, 0.0};
+    flat_batch_states[1][0 * solver.layout.hilbert_dim + 27] = Complex{1.0, 0.0};
+    flat_batch_states[2][27 * solver.layout.hilbert_dim + 0] = Complex{1.0, 0.0};
+    flat_batch_states[3][27 * solver.layout.hilbert_dim + 27] = Complex{1.0, 0.0};
+
+    std::vector<Complex> grouped_batch;
+    pack_flat_batch_to_grouped_batch(
+        batched_layout,
+        flat_batch_states,
+        grouped_batch);
+
+    std::vector<std::vector<Complex>> flat_batch_roundtrip;
+    unpack_grouped_batch_to_flat_batch(
+        batched_layout,
+        grouped_batch,
+        flat_batch_roundtrip);
+
+    std::cout << "Batched grouped roundtrip entry state 1 (0,27): "
+              << flat_batch_roundtrip[1].at(0 * solver.layout.hilbert_dim + 27)
+              << std::endl;    
+
+    std::cout << "\n===== Batched grouped-left CUDA prototype =====\n" << std::endl;
+
+    std::vector<std::vector<Complex>> batched_left_out =
+        apply_batched_grouped_left_cuda_prototype(
+            solver,
+            zzz_three_site,
+            target_sites,
+            flat_batch_states);
+
+    std::cout << "Batched grouped-left state 1 entry (0,27): "
+              << batched_left_out[1].at(0 * solver.layout.hilbert_dim + 27)
+              << std::endl;
+
+    std::cout << "\n===== Batched grouped-left CUDA device-staged prototype =====\n" << std::endl;
+
+    std::vector<std::vector<Complex>> batched_left_out_device_staged =
+        apply_batched_grouped_left_cuda_device_staged(
+            solver,
+            zzz_three_site,
+            target_sites,
+            flat_batch_states);
+
+    std::cout << "Batched device-staged grouped-left state 1 entry (0,27): "
+              << batched_left_out_device_staged[1].at(0 * solver.layout.hilbert_dim + 27)
+              << std::endl;    
+              
+    std::cout << "\n===== Batched grouped-left timing comparison =====\n" << std::endl;
+
+    for (Index grouped_left_batch_size : std::vector<Index>{4, 16, 64, 128, 256, 512}) {
+        std::vector<std::vector<Complex>> grouped_left_states(
+            grouped_left_batch_size,
+            std::vector<Complex>(solver.layout.density_dim, Complex{0.0, 0.0}));
+
+        for (Index i = 0; i < grouped_left_batch_size; ++i) {
+            const Index ket = (i % 2 == 0) ? 0 : 27;
+            const Index bra = (i % 4 < 2) ? 0 : 27;
+            grouped_left_states[i][ket * solver.layout.hilbert_dim + bra] = Complex{1.0, 0.0};
+        }
+
+        BatchedGroupedApplyTiming prototype_timing =
+            time_batched_grouped_left_cuda_prototype(
+                solver,
+                zzz_three_site,
+                target_sites,
+                grouped_left_states);
+
+        BatchedGroupedApplyTiming device_staged_timing =
+            time_batched_grouped_left_cuda_device_staged(
+                solver,
+                zzz_three_site,
+                target_sites,
+                grouped_left_states);
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " prototype wall time (s): "
+                  << prototype_timing.wall_seconds << std::endl;
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " prototype event time (s): "
+                  << prototype_timing.gpu_seconds << std::endl;
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " device-staged wall time (s): "
+                  << device_staged_timing.wall_seconds << std::endl;
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " device-staged event time (s): "
+                  << device_staged_timing.gpu_seconds << std::endl;
+
+        const double prototype_states_per_second =
+            static_cast<double>(grouped_left_batch_size) / prototype_timing.wall_seconds;
+
+        const double device_staged_states_per_second =
+            static_cast<double>(grouped_left_batch_size) / device_staged_timing.wall_seconds;
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " prototype states/s: "
+                  << prototype_states_per_second << std::endl;
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " device-staged states/s: "
+                  << device_staged_states_per_second << std::endl;                  
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " device-staged sample entry state 1 (27,0): "
+                  << device_staged_timing.output_states[std::min<Index>(1, grouped_left_batch_size - 1)]
+                         .at(27 * solver.layout.hilbert_dim + 0)
+                  << std::endl;
+
+        const double device_staged_speedup =
+            prototype_timing.wall_seconds / device_staged_timing.wall_seconds;
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " device-staged speedup vs prototype: "
+                  << device_staged_speedup << std::endl;                  
+    }     
+    
+    std::cout << "\n===== Grouped-left batch timing summary =====\n" << std::endl;
+    std::cout << "Inspect the device-staged speedup trend to decide whether a fused batched grouped-left path is worth implementing next." << std::endl;    
 
     PetscFinalize();
     return 0;
