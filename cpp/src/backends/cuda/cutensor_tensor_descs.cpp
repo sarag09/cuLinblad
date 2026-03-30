@@ -45,7 +45,7 @@ bool create_cutensor_tensor_descs(
     }
 
     constexpr uint32_t alignment = 256;
-    constexpr cudaDataType_t data_type = CUDA_C_64F;
+    constexpr cutensorDataType_t data_type = CUTENSOR_C_64F;
 
     const std::vector<int64_t> op_strides =
         make_row_major_strides(desc.operator_extents);
