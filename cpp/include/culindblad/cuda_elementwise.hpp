@@ -40,4 +40,13 @@ bool launch_zero_batched_buffer_kernel(
     Index total_elements,
     cudaStream_t stream);    
 
+bool launch_batched_grouped_left_diagonal_kernel(
+    const void* diagonal_op,
+    const void* grouped_input,
+    void* grouped_output,
+    Index target_hilbert_dim,
+    Index complement_dim,
+    Index batch_size,
+    cudaStream_t stream);
+
 } // namespace culindblad

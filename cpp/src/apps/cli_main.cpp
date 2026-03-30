@@ -5,30 +5,25 @@
 #include <petscts.h>
 
 #include "culindblad/backend.hpp"
+#include "culindblad/batch_evolution.hpp"
+#include "culindblad/batched_grouped_apply.hpp"
+#include "culindblad/batched_grouped_layout.hpp"
 #include "culindblad/cuda_grouped_layout.hpp"
-#include "culindblad/cutensor_contraction_desc.hpp"
-#include "culindblad/cutensor_execute.hpp"
-#include "culindblad/cutensor_ops.hpp"
-#include "culindblad/cutensor_plan.hpp"
-#include "culindblad/cutensor_tensor_descs.hpp"
 #include "culindblad/grouped_contraction_backend.hpp"
 #include "culindblad/grouped_state_layout.hpp"
 #include "culindblad/k_site_operator_embed.hpp"
 #include "culindblad/liouvillian_terms.hpp"
 #include "culindblad/model.hpp"
 #include "culindblad/operator_term.hpp"
-#include "culindblad/petsc_apply.hpp"
 #include "culindblad/petsc_cuda_apply.hpp"
 #include "culindblad/petsc_cuda_ts_smoke.hpp"
+#include "culindblad/petsc_cuda_vec_utils.hpp"
 #include "culindblad/petsc_ts_smoke.hpp"
 #include "culindblad/solver.hpp"
 #include "culindblad/time_dependence.hpp"
 #include "culindblad/time_dependent_term.hpp"
 #include "culindblad/types.hpp"
-#include "culindblad/petsc_cuda_vec_utils.hpp"
-#include "culindblad/batch_evolution.hpp"
-#include "culindblad/batched_grouped_apply.hpp"
-#include "culindblad/batched_grouped_layout.hpp"
+#include "culindblad/petsc_apply.hpp"
 
 int main(int argc, char** argv)
 {
@@ -43,41 +38,58 @@ int main(int argc, char** argv)
     const std::vector<Index> local_dims = {3, 3, 3, 3};
     const std::vector<Index> target_sites = {0, 1, 2};
 
-    std::vector<Complex> zzz_three_site(27 * 27, Complex{0.0, 0.0});
-    for (Index a = 0; a < 3; ++a) {
-        for (Index b = 0; b < 3; ++b) {
-            for (Index c = 0; c < 3; ++c) {
-                const double za = (a == 0 ? 1.0 : (a == 1 ? -1.0 : 0.0));
-                const double zb = (b == 0 ? 1.0 : (b == 1 ? -1.0 : 0.0));
-                const double zc = (c == 0 ? 1.0 : (c == 1 ? -1.0 : 0.0));
-                const Index idx = a * 9 + b * 3 + c;
-                zzz_three_site[idx * 27 + idx] = Complex{za * zb * zc, 0.0};
+    auto make_zzz_three_site = []() {
+        std::vector<Complex> op(27 * 27, Complex{0.0, 0.0});
+        for (Index a = 0; a < 3; ++a) {
+            for (Index b = 0; b < 3; ++b) {
+                for (Index c = 0; c < 3; ++c) {
+                    const double za = (a == 0 ? 1.0 : (a == 1 ? -1.0 : 0.0));
+                    const double zb = (b == 0 ? 1.0 : (b == 1 ? -1.0 : 0.0));
+                    const double zc = (c == 0 ? 1.0 : (c == 1 ? -1.0 : 0.0));
+                    const Index idx = a * 9 + b * 3 + c;
+                    op[idx * 27 + idx] = Complex{za * zb * zc, 0.0};
+                }
             }
         }
-    }
+        return op;
+    };
 
-    std::vector<Complex> lowering_three_site(27 * 27, Complex{0.0, 0.0});
-    lowering_three_site[0 * 27 + 9] = Complex{1.0, 0.0};
+    auto make_jump_three_site = []() {
+        std::vector<Complex> op(27 * 27, Complex{0.0, 0.0});
+        op[0 * 27 + 9] = Complex{1.0, 0.0};
+        return op;
+    };
 
-    std::vector<Complex> lowering_three_site_dag(27 * 27, Complex{0.0, 0.0});
-    for (Index row = 0; row < 27; ++row) {
-        for (Index col = 0; col < 27; ++col) {
-            lowering_three_site_dag[row * 27 + col] =
-                std::conj(lowering_three_site[col * 27 + row]);
-        }
-    }
-
-    std::vector<Complex> lowering_three_site_dag_op(27 * 27, Complex{0.0, 0.0});
-    for (Index i = 0; i < 27; ++i) {
-        for (Index j = 0; j < 27; ++j) {
-            Complex accum{0.0, 0.0};
-            for (Index k = 0; k < 27; ++k) {
-                accum += lowering_three_site_dag[i * 27 + k]
-                      * lowering_three_site[k * 27 + j];
+    auto dagger_square = [](const std::vector<Complex>& op) {
+        std::vector<Complex> op_dag(27 * 27, Complex{0.0, 0.0});
+        for (Index row = 0; row < 27; ++row) {
+            for (Index col = 0; col < 27; ++col) {
+                op_dag[row * 27 + col] = std::conj(op[col * 27 + row]);
             }
-            lowering_three_site_dag_op[i * 27 + j] = accum;
         }
-    }
+        return op_dag;
+    };
+
+    auto gram_square = [](const std::vector<Complex>& op_dag,
+                          const std::vector<Complex>& op) {
+        std::vector<Complex> gram(27 * 27, Complex{0.0, 0.0});
+        for (Index i = 0; i < 27; ++i) {
+            for (Index j = 0; j < 27; ++j) {
+                Complex accum{0.0, 0.0};
+                for (Index k = 0; k < 27; ++k) {
+                    accum += op_dag[i * 27 + k] * op[k * 27 + j];
+                }
+                gram[i * 27 + j] = accum;
+            }
+        }
+        return gram;
+    };
+
+    const std::vector<Complex> zzz_three_site = make_zzz_three_site();
+    const std::vector<Complex> lowering_three_site = make_jump_three_site();
+    const std::vector<Complex> lowering_three_site_dag = dagger_square(lowering_three_site);
+    const std::vector<Complex> lowering_three_site_dag_op =
+        gram_square(lowering_three_site_dag, lowering_three_site);
 
     OperatorTerm h_term{
         TermKind::Hamiltonian,
@@ -163,6 +175,18 @@ int main(int argc, char** argv)
     std::cout << "Backend Liouvillian entry (0,27): "
               << rho_out.at(0 * solver.layout.hilbert_dim + 27) << std::endl;
 
+    std::vector<Complex> rho_out_timed(solver.layout.density_dim, Complex{0.0, 0.0});
+    StateBuffer out_buf_timed{rho_out_timed.data(), rho_out_timed.size()};
+    const double timed_test_t = 0.5;
+    apply_liouvillian_at_time(solver, timed_test_t, in_buf, out_buf_timed);
+
+    std::cout << "time-dependent coefficient 1 at t=0.5: "
+              << evaluate_time_scalar(td_h_term_1.coefficient, timed_test_t) << std::endl;
+    std::cout << "time-dependent coefficient 2 at t=0.5: "
+              << evaluate_time_scalar(td_h_term_2.coefficient, timed_test_t) << std::endl;
+    std::cout << "Timed backend Liouvillian entry (0,27): "
+              << rho_out_timed.at(0 * solver.layout.hilbert_dim + 27) << std::endl;
+
     GroupedStateLayout grouped_layout =
         make_grouped_state_layout(target_sites, local_dims);
 
@@ -240,58 +264,6 @@ int main(int argc, char** argv)
         }
     }
 
-    CuTensorContractionDesc cutensor_left =
-        make_cutensor_left_contraction_desc(target_sites, local_dims);
-    CuTensorContractionDesc cutensor_right =
-        make_cutensor_right_contraction_desc(target_sites, local_dims);
-
-    std::vector<Complex> grouped_output_left(grouped_layout.grouped_size, Complex{0.0, 0.0});
-    std::vector<Complex> grouped_output_right(grouped_layout.grouped_size, Complex{0.0, 0.0});
-
-    const bool cutensor_left_exec_ok =
-        execute_cutensor_left_contraction(
-            cutensor_left,
-            zzz_three_site,
-            grouped_input,
-            grouped_output_left);
-
-    const bool cutensor_right_exec_ok =
-        execute_cutensor_right_contraction(
-            cutensor_right,
-            zzz_three_site,
-            grouped_input,
-            grouped_output_right);
-
-    std::cout << "cuTENSOR left execution: "
-              << (cutensor_left_exec_ok ? "true" : "false") << std::endl;
-    std::cout << "cuTENSOR right execution: "
-              << (cutensor_right_exec_ok ? "true" : "false") << std::endl;
-
-    if (cutensor_left_exec_ok) {
-        const Index grouped_out_idx = ((0 * 3 + 0) * 27 + 9) * 3 + 0;
-        std::cout << "cuTENSOR grouped left entry ((0,0),(9,0)): "
-                  << grouped_output_left.at(grouped_out_idx) << std::endl;
-    }
-
-    if (cutensor_right_exec_ok) {
-        const Index grouped_out_idx = ((0 * 3 + 0) * 27 + 9) * 3 + 0;
-        std::cout << "cuTENSOR grouped right entry ((0,0),(9,0)): "
-                  << grouped_output_right.at(grouped_out_idx) << std::endl;
-    }
-
-    std::vector<Complex> rho_out_timed(solver.layout.density_dim, Complex{0.0, 0.0});
-    StateBuffer out_buf_timed{rho_out_timed.data(), rho_out_timed.size()};
-
-    const double timed_test_t = 0.5;
-    apply_liouvillian_at_time(solver, timed_test_t, in_buf, out_buf_timed);
-
-    std::cout << "time-dependent coefficient 1 at t=0.5: "
-              << evaluate_time_scalar(td_h_term_1.coefficient, timed_test_t) << std::endl;
-    std::cout << "time-dependent coefficient 2 at t=0.5: "
-              << evaluate_time_scalar(td_h_term_2.coefficient, timed_test_t) << std::endl;
-    std::cout << "Timed backend Liouvillian entry (0,27): "
-              << rho_out_timed.at(0 * solver.layout.hilbert_dim + 27) << std::endl;
-
     Complex petsc_cuda_value{0.0, 0.0};
     PetscCall(petsc_cuda_vec_smoke_test(solver, 0, 27, petsc_cuda_value));
     std::cout << "PETSc VECCUDA smoke entry (0,27): "
@@ -302,11 +274,9 @@ int main(int argc, char** argv)
     PetscCall(VecSetSizes(x_cuda_probe, PETSC_DECIDE, solver.layout.density_dim));
     PetscCall(VecSetType(x_cuda_probe, VECCUDA));
     PetscCall(VecSet(x_cuda_probe, 0.0));
-
     PetscCall(petsc_cuda_vec_device_access_smoke(x_cuda_probe));
     std::cout << "PETSc VECCUDA device access smoke: true" << std::endl;
-
-    PetscCall(VecDestroy(&x_cuda_probe));              
+    PetscCall(VecDestroy(&x_cuda_probe));
 
     Vec x_cuda = nullptr;
     Vec y_cuda = nullptr;
@@ -324,12 +294,11 @@ int main(int argc, char** argv)
     PetscCall(VecRestoreArray(x_cuda, &x_cuda_ptr));
 
     CuTensorExecutorCache petsc_cuda_cache{};
-
     PetscCall(apply_grouped_left_cuda_vec(
         solver,
         "cli_smoke_h",
         zzz_three_site,
-        {0, 1, 2},
+        target_sites,
         grouped_layout,
         cuda_grouped_layout,
         petsc_cuda_cache,
@@ -366,14 +335,13 @@ int main(int argc, char** argv)
     PetscCall(VecRestoreArray(x_cuda_diss, &x_cuda_diss_ptr));
 
     CuTensorExecutorCache petsc_cuda_diss_cache{};
-
     PetscCall(apply_grouped_dissipator_cuda_vec(
         solver,
         "cli_smoke_d",
         lowering_three_site,
         lowering_three_site_dag,
         lowering_three_site_dag_op,
-        {0, 1, 2},
+        target_sites,
         grouped_layout,
         cuda_grouped_layout,
         petsc_cuda_diss_cache,
@@ -422,40 +390,30 @@ int main(int argc, char** argv)
               << ts_cuda_liouvillian_value << std::endl;
 
     std::cout << "Running PETSc VECCUDA static-model Liouvillian TS smoke test" << std::endl;
-
     Complex ts_cuda_static_model_value{0.0, 0.0};
     PetscCall(run_ts_cuda_static_model_liouvillian_smoke_test(
         solver,
         0,
         27,
         ts_cuda_static_model_value));
-
     std::cout << "PETSc VECCUDA static-model Liouvillian TS entry (0,27): "
-              << ts_cuda_static_model_value << std::endl;              
+              << ts_cuda_static_model_value << std::endl;
 
     std::cout << "Running TS smoke test with time-dependent RHS" << std::endl;
     Complex ts_value{0.0, 0.0};
-    ierr = run_ts_smoke_test(solver, 0, 27, ts_value);
-    if (ierr != 0) {
-        std::cerr << "run_ts_smoke_test failed." << std::endl;
-        PetscFinalize();
-        return 1;
-    }
-
+    PetscCall(run_ts_smoke_test(solver, 0, 27, ts_value));
     std::cout << "TS evolved entry (0,27): " << ts_value << std::endl;
 
     std::cout << "Running PETSc VECCUDA full-model Liouvillian TS smoke test" << std::endl;
-
     Complex ts_cuda_full_model_value{0.0, 0.0};
     PetscCall(run_ts_cuda_full_model_liouvillian_smoke_test(
-            solver,
-            0.0,  // <--- The new time argument (t = 0.0)
-            0,    // <--- row
-            27,   // <--- col
-            ts_cuda_full_model_value));
-
+        solver,
+        0.0,
+        0,
+        27,
+        ts_cuda_full_model_value));
     std::cout << "PETSc VECCUDA full-model Liouvillian TS entry (0,27): "
-              << ts_cuda_full_model_value << std::endl;    
+              << ts_cuda_full_model_value << std::endl;
 
     if (cuda_grouped_layout_ok) {
         std::cout << "CUDA grouped layout destruction: "
@@ -463,102 +421,6 @@ int main(int argc, char** argv)
                   << std::endl;
     }
 
-   std::cout << "\n===== Mixed-site pattern test =====\n" << std::endl; 
-    // Two-site Z ⊗ Z on {0,1}
-    std::vector<Complex> zz_2site(9 * 9, Complex{0.0, 0.0});
-    for (Index a = 0; a < 3; ++a) {
-        for (Index b = 0; b < 3; ++b) {
-            const double za = (a == 0 ? 1.0 : (a == 1 ? -1.0 : 0.0));
-            const double zb = (b == 0 ? 1.0 : (b == 1 ? -1.0 : 0.0));
-            const Index idx = a * 3 + b;
-            zz_2site[idx * 9 + idx] = Complex{za * zb, 0.0};
-        }
-    }
-
-    // Two-site operator on {2,3}
-    std::vector<Complex> zz_2site_23 = zz_2site;
-
-    // Dissipator on {1,3}
-    std::vector<Complex> jump_2site(9 * 9, Complex{0.0, 0.0});
-    jump_2site[0 * 9 + 3] = Complex{1.0, 0.0};
-
-    OperatorTerm h_term_01{
-        TermKind::Hamiltonian,
-        "zz_q0_q1",
-        {0, 1},
-        zz_2site,
-        9,
-        9
-    };
-
-    OperatorTerm h_term_23{
-        TermKind::Hamiltonian,
-        "zz_q2_q3",
-        {2, 3},
-        zz_2site_23,
-        9,
-        9
-    };
-
-    OperatorTerm d_term_13{
-        TermKind::Dissipator,
-        "jump_q1_q3",
-        {1, 3},
-        jump_2site,
-        9,
-        9
-    };
-
-    TimeDependentTerm td_term_02{
-        "drive_q0_q2",
-        {0, 2},
-        zz_2site,
-        9,
-        9,
-        make_cosine_time_scalar(1.0, 2.0, 0.0)
-    };
-
-    Model mixed_model{
-        local_dims,
-        {h_term_01, h_term_23},
-        {d_term_13},
-        {td_term_02}
-    };
-
-    Solver mixed_solver = make_solver(mixed_model);
-
-    std::vector<Complex> rho_mixed_out_cpu(
-        mixed_solver.layout.density_dim, Complex{0.0, 0.0});
-
-    StateBuffer mixed_out_buf_cpu{
-        rho_mixed_out_cpu.data(),
-        rho_mixed_out_cpu.size()
-    };
-
-    apply_liouvillian_at_time(
-        mixed_solver,
-        0.5,
-        in_buf,
-        mixed_out_buf_cpu);
-
-    std::cout << "Mixed CPU Liouvillian entry (0,27): "
-            << rho_mixed_out_cpu.at(0 * mixed_solver.layout.hilbert_dim + 27)
-            << std::endl;    
-
-    std::cout << "Running mixed-site GPU TS test" << std::endl;
-
-    Complex mixed_ts_value{0.0, 0.0};
-
-    PetscCall(run_ts_cuda_full_model_liouvillian_smoke_test(
-        mixed_solver,
-        0.5,
-        0,
-        27,
-        mixed_ts_value));
-
-        std::cout << "Mixed GPU TS entry (0,27): "
-                << mixed_ts_value << std::endl;       
-                
     std::cout << "\n===== Batch evolution smoke test =====\n" << std::endl;
 
     std::vector<std::vector<Complex>> batch_initial_states(
@@ -590,7 +452,7 @@ int main(int argc, char** argv)
     std::cout << "Batch result state 1 entry (0,27): "
               << batch_result.final_states[1].at(0 * solver.layout.hilbert_dim + 27)
               << std::endl;
-              
+
     BatchEvolutionResult batch_result_cuda =
         evolve_density_batch_cuda_ts(
             solver,
@@ -604,27 +466,27 @@ int main(int argc, char** argv)
     std::cout << "CUDA batch result state 1 entry (0,27): "
               << batch_result_cuda.final_states[1].at(0 * solver.layout.hilbert_dim + 27)
               << std::endl;
-              
+
     std::cout << "\n===== Batch timing smoke test =====\n" << std::endl;
 
     auto make_batch_initial_states =
-        [&](Index count) {
+        [&](const Solver& active_solver, Index count) {
             std::vector<std::vector<Complex>> states(
                 count,
-                std::vector<Complex>(solver.layout.density_dim, Complex{0.0, 0.0}));
+                std::vector<Complex>(active_solver.layout.density_dim, Complex{0.0, 0.0}));
 
             for (Index i = 0; i < count; ++i) {
                 const Index ket = (i % 2 == 0) ? 0 : 27;
                 const Index bra = (i % 4 < 2) ? 0 : 27;
-                states[i][ket * solver.layout.hilbert_dim + bra] = Complex{1.0, 0.0};
+                states[i][ket * active_solver.layout.hilbert_dim + bra] = Complex{1.0, 0.0};
             }
 
             return states;
         };
 
-    for (Index test_batch_size : std::vector<Index>{1, 4, 8, 16, 32, 64, 128}) {
+    for (Index test_batch_size : std::vector<Index>{1, 4, 8, 16, 32, 64}) {
         std::vector<std::vector<Complex>> timing_states =
-            make_batch_initial_states(test_batch_size);
+            make_batch_initial_states(solver, test_batch_size);
 
         BatchEvolutionConfig timing_config{
             0.0,
@@ -661,7 +523,7 @@ int main(int argc, char** argv)
                   << " CPU states/s: " << cpu_states_per_second << std::endl;
 
         std::cout << "Batch size " << test_batch_size
-                  << " CUDA states/s: " << cuda_states_per_second << std::endl;                  
+                  << " CUDA states/s: " << cuda_states_per_second << std::endl;
 
         std::cout << "Batch size " << test_batch_size
                   << " CUDA event time (s): " << cuda_timing.gpu_elapsed_seconds << std::endl;
@@ -670,15 +532,15 @@ int main(int argc, char** argv)
             static_cast<double>(test_batch_size) / cuda_timing.gpu_elapsed_seconds;
 
         std::cout << "Batch size " << test_batch_size
-                  << " CUDA event states/s: " << cuda_gpu_states_per_second << std::endl;                  
+                  << " CUDA event states/s: " << cuda_gpu_states_per_second << std::endl;
 
         std::cout << "Batch size " << test_batch_size
                   << " CUDA sample entry state 1 (27,0): "
                   << cuda_timing.result.final_states[std::min<Index>(1, test_batch_size - 1)]
                          .at(27 * solver.layout.hilbert_dim + 0)
                   << std::endl;
-    } 
-    
+    }
+
     std::cout << "\n===== Batched grouped-layout smoke test =====\n" << std::endl;
 
     GroupedStateLayout single_grouped_layout =
@@ -710,12 +572,26 @@ int main(int argc, char** argv)
 
     std::cout << "Batched grouped roundtrip entry state 1 (0,27): "
               << flat_batch_roundtrip[1].at(0 * solver.layout.hilbert_dim + 27)
-              << std::endl;    
+              << std::endl;
 
-    std::cout << "\n===== Batched grouped-left CUDA prototype =====\n" << std::endl;
+    std::cout << "\n===== Batched grouped-left smoke test =====\n" << std::endl;
 
     std::vector<std::vector<Complex>> batched_left_out =
         apply_batched_grouped_left_cuda_prototype(
+            solver,
+            zzz_three_site,
+            target_sites,
+            flat_batch_states);
+
+    std::vector<std::vector<Complex>> batched_left_out_device_staged =
+        apply_batched_grouped_left_cuda_device_staged(
+            solver,
+            zzz_three_site,
+            target_sites,
+            flat_batch_states);
+
+    std::vector<std::vector<Complex>> batched_left_out_fused =
+        apply_batched_grouped_left_cuda_fused_candidate(
             solver,
             zzz_three_site,
             target_sites,
@@ -725,22 +601,17 @@ int main(int argc, char** argv)
               << batched_left_out[1].at(0 * solver.layout.hilbert_dim + 27)
               << std::endl;
 
-    std::cout << "\n===== Batched grouped-left CUDA device-staged prototype =====\n" << std::endl;
-
-    std::vector<std::vector<Complex>> batched_left_out_device_staged =
-        apply_batched_grouped_left_cuda_device_staged(
-            solver,
-            zzz_three_site,
-            target_sites,
-            flat_batch_states);
-
     std::cout << "Batched device-staged grouped-left state 1 entry (0,27): "
               << batched_left_out_device_staged[1].at(0 * solver.layout.hilbert_dim + 27)
-              << std::endl;    
-              
+              << std::endl;
+
+    std::cout << "Batched fused grouped-left state 1 entry (0,27): "
+              << batched_left_out_fused[1].at(0 * solver.layout.hilbert_dim + 27)
+              << std::endl;
+
     std::cout << "\n===== Batched grouped-left timing comparison =====\n" << std::endl;
 
-    for (Index grouped_left_batch_size : std::vector<Index>{4, 16, 64, 128, 256, 512}) {
+    for (Index grouped_left_batch_size : std::vector<Index>{4, 16, 32, 64, 128, 256}) {
         std::vector<std::vector<Complex>> grouped_left_states(
             grouped_left_batch_size,
             std::vector<Complex>(solver.layout.density_dim, Complex{0.0, 0.0}));
@@ -765,6 +636,29 @@ int main(int argc, char** argv)
                 target_sites,
                 grouped_left_states);
 
+        BatchedGroupedApplyTiming batch_object_timing =
+            time_batched_grouped_left_cuda_batch_object(
+                solver,
+                zzz_three_site,
+                target_sites,
+                grouped_left_states);
+
+        BatchedGroupedApplyTiming fused_candidate_timing =
+            time_batched_grouped_left_cuda_fused_candidate(
+                solver,
+                zzz_three_site,
+                target_sites,
+                grouped_left_states);
+
+        const double prototype_states_per_second =
+            static_cast<double>(grouped_left_batch_size) / prototype_timing.wall_seconds;
+        const double device_staged_states_per_second =
+            static_cast<double>(grouped_left_batch_size) / device_staged_timing.wall_seconds;
+        const double batch_object_states_per_second =
+            static_cast<double>(grouped_left_batch_size) / batch_object_timing.wall_seconds;
+        const double fused_candidate_states_per_second =
+            static_cast<double>(grouped_left_batch_size) / fused_candidate_timing.wall_seconds;
+
         std::cout << "Grouped-left batch size " << grouped_left_batch_size
                   << " prototype wall time (s): "
                   << prototype_timing.wall_seconds << std::endl;
@@ -781,19 +675,13 @@ int main(int argc, char** argv)
                   << " device-staged event time (s): "
                   << device_staged_timing.gpu_seconds << std::endl;
 
-        const double prototype_states_per_second =
-            static_cast<double>(grouped_left_batch_size) / prototype_timing.wall_seconds;
-
-        const double device_staged_states_per_second =
-            static_cast<double>(grouped_left_batch_size) / device_staged_timing.wall_seconds;
-
         std::cout << "Grouped-left batch size " << grouped_left_batch_size
                   << " prototype states/s: "
                   << prototype_states_per_second << std::endl;
 
         std::cout << "Grouped-left batch size " << grouped_left_batch_size
                   << " device-staged states/s: "
-                  << device_staged_states_per_second << std::endl;                  
+                  << device_staged_states_per_second << std::endl;
 
         std::cout << "Grouped-left batch size " << grouped_left_batch_size
                   << " device-staged sample entry state 1 (27,0): "
@@ -806,11 +694,162 @@ int main(int argc, char** argv)
 
         std::cout << "Grouped-left batch size " << grouped_left_batch_size
                   << " device-staged speedup vs prototype: "
-                  << device_staged_speedup << std::endl;                  
-    }     
-    
+                  << device_staged_speedup << std::endl;
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " batch-object wall time (s): "
+                  << batch_object_timing.wall_seconds << std::endl;
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " batch-object event time (s): "
+                  << batch_object_timing.gpu_seconds << std::endl;
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " batch-object states/s: "
+                  << batch_object_states_per_second << std::endl;
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " batch-object sample entry state 1 (27,0): "
+                  << batch_object_timing.output_states[std::min<Index>(1, grouped_left_batch_size - 1)]
+                         .at(27 * solver.layout.hilbert_dim + 0)
+                  << std::endl;
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " fused-candidate wall time (s): "
+                  << fused_candidate_timing.wall_seconds << std::endl;
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " fused-candidate event time (s): "
+                  << fused_candidate_timing.gpu_seconds << std::endl;
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " fused-candidate states/s: "
+                  << fused_candidate_states_per_second << std::endl;
+
+        std::cout << "Grouped-left batch size " << grouped_left_batch_size
+                  << " fused-candidate sample entry state 1 (27,0): "
+                  << fused_candidate_timing.output_states[std::min<Index>(1, grouped_left_batch_size - 1)]
+                         .at(27 * solver.layout.hilbert_dim + 0)
+                  << std::endl;
+    }
+
     std::cout << "\n===== Grouped-left batch timing summary =====\n" << std::endl;
-    std::cout << "Inspect the device-staged speedup trend to decide whether a fused batched grouped-left path is worth implementing next." << std::endl;    
+    std::cout << "Inspect prototype vs device-staged vs fused-candidate trends." << std::endl;
+
+    auto run_large_grouped_left_benchmark =
+        [&](const std::vector<Index>& large_local_dims,
+            const std::vector<Index>& batch_sizes,
+            const char* label) {
+            std::cout << "\n===== Larger-system grouped-left benchmark: "
+                      << label << " =====\n" << std::endl;
+
+            std::vector<Complex> large_diag_op = make_zzz_three_site();
+
+            OperatorTerm large_h_term{
+                TermKind::Hamiltonian,
+                "large_q123_zzz",
+                {0, 1, 2},
+                large_diag_op,
+                27,
+                27
+            };
+
+            Model large_model{
+                large_local_dims,
+                {large_h_term},
+                {},
+                {}
+            };
+
+            Solver large_solver = make_solver(large_model);
+            const std::vector<Index> large_target_sites = {0, 1, 2};
+
+            std::cout << "Large benchmark Hilbert dimension: "
+                      << large_solver.layout.hilbert_dim << std::endl;
+
+            std::cout << "Large benchmark density dimension: "
+                      << large_solver.layout.density_dim << std::endl;
+
+            for (Index large_batch_size : batch_sizes) {
+                std::vector<std::vector<Complex>> large_states(
+                    large_batch_size,
+                    std::vector<Complex>(large_solver.layout.density_dim, Complex{0.0, 0.0}));
+
+                for (Index i = 0; i < large_batch_size; ++i) {
+                    const Index ket = (i % 2 == 0) ? 0 : 27;
+                    const Index bra = (i % 4 < 2) ? 0 : 27;
+                    large_states[i][ket * large_solver.layout.hilbert_dim + bra] = Complex{1.0, 0.0};
+                }
+
+                BatchedGroupedApplyTiming large_prototype_timing =
+                    time_batched_grouped_left_cuda_prototype(
+                        large_solver,
+                        large_diag_op,
+                        large_target_sites,
+                        large_states);
+
+                BatchedGroupedApplyTiming large_device_staged_timing =
+                    time_batched_grouped_left_cuda_device_staged(
+                        large_solver,
+                        large_diag_op,
+                        large_target_sites,
+                        large_states);
+
+                BatchedGroupedApplyTiming large_fused_timing =
+                    time_batched_grouped_left_cuda_fused_candidate(
+                        large_solver,
+                        large_diag_op,
+                        large_target_sites,
+                        large_states);
+
+                const double large_prototype_states_per_second =
+                    static_cast<double>(large_batch_size) / large_prototype_timing.wall_seconds;
+                const double large_device_staged_states_per_second =
+                    static_cast<double>(large_batch_size) / large_device_staged_timing.wall_seconds;
+                const double large_fused_states_per_second =
+                    static_cast<double>(large_batch_size) / large_fused_timing.wall_seconds;
+
+                std::cout << "Large grouped-left batch size " << large_batch_size
+                          << " prototype wall time (s): "
+                          << large_prototype_timing.wall_seconds << std::endl;
+
+                std::cout << "Large grouped-left batch size " << large_batch_size
+                          << " device-staged wall time (s): "
+                          << large_device_staged_timing.wall_seconds << std::endl;
+
+                std::cout << "Large grouped-left batch size " << large_batch_size
+                          << " fused-candidate wall time (s): "
+                          << large_fused_timing.wall_seconds << std::endl;
+
+                std::cout << "Large grouped-left batch size " << large_batch_size
+                          << " prototype states/s: "
+                          << large_prototype_states_per_second << std::endl;
+
+                std::cout << "Large grouped-left batch size " << large_batch_size
+                          << " device-staged states/s: "
+                          << large_device_staged_states_per_second << std::endl;
+
+                std::cout << "Large grouped-left batch size " << large_batch_size
+                          << " fused-candidate states/s: "
+                          << large_fused_states_per_second << std::endl;
+
+                std::cout << "Large grouped-left batch size " << large_batch_size
+                          << " fused-candidate sample entry state 1 (27,0): "
+                          << large_fused_timing.output_states[std::min<Index>(1, large_batch_size - 1)]
+                                 .at(27 * large_solver.layout.hilbert_dim + 0)
+                          << std::endl;
+            }
+        };
+
+    run_large_grouped_left_benchmark(
+        {3, 3, 3, 3, 3},
+        {16, 64, 128},
+        "n=5");
+
+    run_large_grouped_left_benchmark(
+        {3, 3, 3, 3, 3, 3},
+        {16, 64},
+        "n=6");
 
     PetscFinalize();
     return 0;

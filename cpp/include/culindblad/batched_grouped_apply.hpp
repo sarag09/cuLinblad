@@ -25,6 +25,18 @@ std::vector<std::vector<Complex>> apply_batched_grouped_left_cuda_device_staged(
     const std::vector<Index>& target_sites,
     const std::vector<std::vector<Complex>>& flat_states);
 
+std::vector<std::vector<Complex>> apply_batched_grouped_left_cuda_batch_object(
+    const Solver& solver,
+    const std::vector<Complex>& local_op,
+    const std::vector<Index>& target_sites,
+    const std::vector<std::vector<Complex>>& flat_states);
+
+std::vector<std::vector<Complex>> apply_batched_grouped_left_cuda_fused_candidate(
+    const Solver& solver,
+    const std::vector<Complex>& local_op,
+    const std::vector<Index>& target_sites,
+    const std::vector<std::vector<Complex>>& flat_states);
+
 BatchedGroupedApplyTiming time_batched_grouped_left_cuda_prototype(
     const Solver& solver,
     const std::vector<Complex>& local_op,
@@ -32,6 +44,18 @@ BatchedGroupedApplyTiming time_batched_grouped_left_cuda_prototype(
     const std::vector<std::vector<Complex>>& flat_states);
 
 BatchedGroupedApplyTiming time_batched_grouped_left_cuda_device_staged(
+    const Solver& solver,
+    const std::vector<Complex>& local_op,
+    const std::vector<Index>& target_sites,
+    const std::vector<std::vector<Complex>>& flat_states);
+
+BatchedGroupedApplyTiming time_batched_grouped_left_cuda_batch_object(
+    const Solver& solver,
+    const std::vector<Complex>& local_op,
+    const std::vector<Index>& target_sites,
+    const std::vector<std::vector<Complex>>& flat_states);
+
+BatchedGroupedApplyTiming time_batched_grouped_left_cuda_fused_candidate(
     const Solver& solver,
     const std::vector<Complex>& local_op,
     const std::vector<Index>& target_sites,
