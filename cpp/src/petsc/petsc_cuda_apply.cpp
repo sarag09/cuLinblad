@@ -13,6 +13,7 @@
 #include "culindblad/cutensor_executor.hpp"
 #include "culindblad/cutensor_executor_cache.hpp"
 #include "culindblad/grouped_state_layout.hpp"
+#include "culindblad/k_site_operator_embed.hpp"
 #include "culindblad/types.hpp"
 
 namespace culindblad {
@@ -116,6 +117,39 @@ PetscErrorCode get_or_prepare_executor(
 
     if (!op_ok) {
         return PETSC_ERR_LIB;
+    }
+
+    return 0;
+}
+
+bool should_use_tiny_dense_path(
+    const Solver& solver,
+    const std::vector<Index>& target_sites)
+{
+    return target_sites.size() <= 2 &&
+           solver.layout.hilbert_dim <= kMaxTinyDenseHilbertDim;
+}
+
+PetscErrorCode build_tiny_dense_operator_arg(
+    const std::vector<Complex>& full_op,
+    Index dim,
+    TinyDenseOperatorKernelArg& arg)
+{
+    if (dim > kMaxTinyDenseHilbertDim) {
+        return PETSC_ERR_ARG_OUTOFRANGE;
+    }
+
+    if (full_op.size() != dim * dim) {
+        return PETSC_ERR_ARG_SIZ;
+    }
+
+    arg.dim = dim;
+    for (Index i = 0; i < kMaxTinyDenseOperatorElements; ++i) {
+        arg.data[i] = Complex{0.0, 0.0};
+    }
+
+    for (Index i = 0; i < full_op.size(); ++i) {
+        arg.data[i] = full_op[i];
     }
 
     return 0;
@@ -304,6 +338,47 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
     Vec y,
     cudaStream_t consumer_stream)
 {
+    if (should_use_tiny_dense_path(solver, target_sites)) {
+        const std::vector<Complex> full_op =
+            embed_k_site_operator(local_op, target_sites, solver.model.local_dims);
+        TinyDenseOperatorKernelArg op_arg{};
+        PetscCall(build_tiny_dense_operator_arg(
+            full_op,
+            solver.layout.hilbert_dim,
+            op_arg));
+
+        const void* d_flat_input = nullptr;
+        void* d_flat_output = nullptr;
+        PetscCall(get_petsc_vec_device_read_ptr(x, d_flat_input));
+        PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
+
+        const cudaStream_t stream =
+            consumer_stream != nullptr ? consumer_stream : static_cast<cudaStream_t>(nullptr);
+        const bool kernel_ok =
+            launch_tiny_dense_commutator_kernel(
+                op_arg,
+                d_flat_input,
+                d_flat_output,
+                stream);
+
+        if (!kernel_ok) {
+            PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+            PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+            return PETSC_ERR_LIB;
+        }
+
+        if (consumer_stream == nullptr &&
+            cudaStreamSynchronize(static_cast<cudaStream_t>(nullptr)) != cudaSuccess) {
+            PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+            PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+            return PETSC_ERR_LIB;
+        }
+
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return 0;
+    }
+
     const std::size_t grouped_bytes =
         grouped_layout.grouped_size * sizeof(Complex);
 
@@ -474,6 +549,56 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
     Vec y,
     cudaStream_t consumer_stream)
 {
+    if (should_use_tiny_dense_path(solver, target_sites)) {
+        const std::vector<Complex> full_jump_op =
+            embed_k_site_operator(local_op, target_sites, solver.model.local_dims);
+        const std::vector<Complex> full_norm_op =
+            embed_k_site_operator(local_op_dag_op, target_sites, solver.model.local_dims);
+
+        TinyDenseOperatorKernelArg jump_arg{};
+        TinyDenseOperatorKernelArg norm_arg{};
+        PetscCall(build_tiny_dense_operator_arg(
+            full_jump_op,
+            solver.layout.hilbert_dim,
+            jump_arg));
+        PetscCall(build_tiny_dense_operator_arg(
+            full_norm_op,
+            solver.layout.hilbert_dim,
+            norm_arg));
+
+        const void* d_flat_input = nullptr;
+        void* d_flat_output = nullptr;
+        PetscCall(get_petsc_vec_device_read_ptr(x, d_flat_input));
+        PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
+
+        const cudaStream_t stream =
+            consumer_stream != nullptr ? consumer_stream : static_cast<cudaStream_t>(nullptr);
+        const bool kernel_ok =
+            launch_tiny_dense_dissipator_kernel(
+                jump_arg,
+                norm_arg,
+                d_flat_input,
+                d_flat_output,
+                stream);
+
+        if (!kernel_ok) {
+            PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+            PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+            return PETSC_ERR_LIB;
+        }
+
+        if (consumer_stream == nullptr &&
+            cudaStreamSynchronize(static_cast<cudaStream_t>(nullptr)) != cudaSuccess) {
+            PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+            PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+            return PETSC_ERR_LIB;
+        }
+
+        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+        return 0;
+    }
+
     const std::size_t grouped_bytes =
         grouped_layout.grouped_size * sizeof(Complex);
 

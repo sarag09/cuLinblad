@@ -388,6 +388,8 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
             solver.layout.density_dim,
             s));
 
+        // Keep distinct PETSc CUDA vectors here: three in-place accumulation variants
+        // broke the N=2, d=2 physics baseline during Milestone 3 experiments.
         PetscCall(VecCopy(f, accum));
     }
 
@@ -420,6 +422,8 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
             solver.layout.density_dim,
             s));
 
+        // Keep distinct PETSc CUDA vectors here: three in-place accumulation variants
+        // broke the N=2, d=2 physics baseline during Milestone 3 experiments.
         PetscCall(VecCopy(f, accum));
     }
 
@@ -481,6 +485,8 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             solver.layout.density_dim,
             s));
 
+        // Keep distinct PETSc CUDA vectors here: three in-place accumulation variants
+        // broke the N=2, d=2 physics baseline during Milestone 3 experiments.
         PetscCall(VecCopy(f, accum));
     }
 
@@ -513,6 +519,8 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             solver.layout.density_dim,
             s));
 
+        // Keep distinct PETSc CUDA vectors here: three in-place accumulation variants
+        // broke the N=2, d=2 physics baseline during Milestone 3 experiments.
         PetscCall(VecCopy(f, accum));
     }
 
@@ -553,6 +561,8 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             solver.layout.density_dim,
             s));
 
+        // Keep distinct PETSc CUDA vectors here: three in-place accumulation variants
+        // broke the N=2, d=2 physics baseline during Milestone 3 experiments.
         PetscCall(VecCopy(f, accum));
     }
 

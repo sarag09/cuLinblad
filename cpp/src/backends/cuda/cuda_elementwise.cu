@@ -178,6 +178,124 @@ bool launch_vector_scale_kernel(
     return cudaGetLastError() == cudaSuccess;
 }
 
+__device__ __forceinline__ cuDoubleComplex tiny_dense_load(
+    const TinyDenseOperatorKernelArg& op,
+    culindblad::Index row,
+    culindblad::Index col)
+{
+    return reinterpret_cast<const cuDoubleComplex*>(op.data)[row * op.dim + col];
+}
+
+__global__ void tiny_dense_commutator_kernel(
+    TinyDenseOperatorKernelArg op,
+    const cuDoubleComplex* rho,
+    cuDoubleComplex* out)
+{
+    const culindblad::Index idx =
+        static_cast<culindblad::Index>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const culindblad::Index total = op.dim * op.dim;
+
+    if (idx >= total) {
+        return;
+    }
+
+    const culindblad::Index row = idx / op.dim;
+    const culindblad::Index col = idx % op.dim;
+
+    cuDoubleComplex left = make_cuDoubleComplex(0.0, 0.0);
+    cuDoubleComplex right = make_cuDoubleComplex(0.0, 0.0);
+    for (culindblad::Index k = 0; k < op.dim; ++k) {
+        left = cuCadd(left, cuCmul(tiny_dense_load(op, row, k), rho[k * op.dim + col]));
+        right = cuCadd(right, cuCmul(rho[row * op.dim + k], tiny_dense_load(op, k, col)));
+    }
+
+    const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
+    out[idx] = cuCmul(minus_i, cuCsub(left, right));
+}
+
+bool launch_tiny_dense_commutator_kernel(
+    const TinyDenseOperatorKernelArg& op,
+    const void* d_rho,
+    void* d_out,
+    cudaStream_t stream)
+{
+    const Index total = op.dim * op.dim;
+    const int block_size = 128;
+    const int grid_size =
+        static_cast<int>((total + block_size - 1) / block_size);
+
+    tiny_dense_commutator_kernel<<<grid_size, block_size, 0, stream>>>(
+        op,
+        reinterpret_cast<const cuDoubleComplex*>(d_rho),
+        reinterpret_cast<cuDoubleComplex*>(d_out));
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+__global__ void tiny_dense_dissipator_kernel(
+    TinyDenseOperatorKernelArg jump_op,
+    TinyDenseOperatorKernelArg norm_op,
+    const cuDoubleComplex* rho,
+    cuDoubleComplex* out)
+{
+    const culindblad::Index idx =
+        static_cast<culindblad::Index>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const culindblad::Index total = jump_op.dim * jump_op.dim;
+
+    if (idx >= total) {
+        return;
+    }
+
+    const culindblad::Index row = idx / jump_op.dim;
+    const culindblad::Index col = idx % jump_op.dim;
+
+    cuDoubleComplex jump = make_cuDoubleComplex(0.0, 0.0);
+    for (culindblad::Index m = 0; m < jump_op.dim; ++m) {
+        cuDoubleComplex left_sum = make_cuDoubleComplex(0.0, 0.0);
+        for (culindblad::Index n = 0; n < jump_op.dim; ++n) {
+            left_sum = cuCadd(
+                left_sum,
+                cuCmul(
+                    tiny_dense_load(jump_op, row, n),
+                    rho[n * jump_op.dim + m]));
+        }
+
+        cuDoubleComplex l_dag_entry = cuConj(tiny_dense_load(jump_op, col, m));
+        jump = cuCadd(jump, cuCmul(left_sum, l_dag_entry));
+    }
+
+    cuDoubleComplex left = make_cuDoubleComplex(0.0, 0.0);
+    cuDoubleComplex right = make_cuDoubleComplex(0.0, 0.0);
+    for (culindblad::Index k = 0; k < norm_op.dim; ++k) {
+        left = cuCadd(left, cuCmul(tiny_dense_load(norm_op, row, k), rho[k * norm_op.dim + col]));
+        right = cuCadd(right, cuCmul(rho[row * norm_op.dim + k], tiny_dense_load(norm_op, k, col)));
+    }
+
+    const cuDoubleComplex half = make_cuDoubleComplex(0.5, 0.0);
+    out[idx] = cuCsub(jump, cuCmul(half, cuCadd(left, right)));
+}
+
+bool launch_tiny_dense_dissipator_kernel(
+    const TinyDenseOperatorKernelArg& jump_op,
+    const TinyDenseOperatorKernelArg& norm_op,
+    const void* d_rho,
+    void* d_out,
+    cudaStream_t stream)
+{
+    const Index total = jump_op.dim * jump_op.dim;
+    const int block_size = 128;
+    const int grid_size =
+        static_cast<int>((total + block_size - 1) / block_size);
+
+    tiny_dense_dissipator_kernel<<<grid_size, block_size, 0, stream>>>(
+        jump_op,
+        norm_op,
+        reinterpret_cast<const cuDoubleComplex*>(d_rho),
+        reinterpret_cast<cuDoubleComplex*>(d_out));
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
 __global__ void zero_batched_buffer_kernel(
     cuDoubleComplex* buffer,
     std::size_t total_elements)

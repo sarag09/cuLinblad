@@ -1,10 +1,20 @@
 #pragma once
 
 #include <cstddef>
+#include <vector>
 #include <cuda_runtime.h>
 #include "culindblad/types.hpp"
 
 namespace culindblad {
+
+constexpr Index kMaxTinyDenseHilbertDim = 9;
+constexpr Index kMaxTinyDenseOperatorElements =
+    kMaxTinyDenseHilbertDim * kMaxTinyDenseHilbertDim;
+
+struct TinyDenseOperatorKernelArg {
+    Index dim;
+    Complex data[kMaxTinyDenseOperatorElements];
+};
 
 bool launch_commutator_combine_kernel(
     const void* d_left,
@@ -34,7 +44,20 @@ bool launch_vector_scale_kernel(
     void* d_out,
     Index size,
     cudaStream_t stream);  
-    
+
+bool launch_tiny_dense_commutator_kernel(
+    const TinyDenseOperatorKernelArg& op,
+    const void* d_rho,
+    void* d_out,
+    cudaStream_t stream);
+
+bool launch_tiny_dense_dissipator_kernel(
+    const TinyDenseOperatorKernelArg& jump_op,
+    const TinyDenseOperatorKernelArg& norm_op,
+    const void* d_rho,
+    void* d_out,
+    cudaStream_t stream);
+  
 bool launch_zero_batched_buffer_kernel(
     void* buffer,
     Index total_elements,
