@@ -60,7 +60,7 @@ PetscErrorCode get_petsc_vec_device_write_ptr(
     PetscScalar* y_ptr = nullptr;
 
 #if defined(PETSC_HAVE_CUDA)
-    PetscCall(VecCUDAGetArray(y, &y_ptr));
+    PetscCall(VecCUDAGetArrayWrite(y, &y_ptr));
 #else
     PetscCall(VecGetArray(y, &y_ptr));
 #endif
@@ -77,7 +77,7 @@ PetscErrorCode restore_petsc_vec_device_write_ptr(
         reinterpret_cast<PetscScalar*>(d_ptr_in);
 
 #if defined(PETSC_HAVE_CUDA)
-    PetscCall(VecCUDARestoreArray(y, &y_ptr));
+    PetscCall(VecCUDARestoreArrayWrite(y, &y_ptr));
 #else
     PetscCall(VecRestoreArray(y, &y_ptr));
 #endif
@@ -247,13 +247,8 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
         return PETSC_ERR_LIB;
     }
 
-    if (consumer_stream != nullptr) {
-        if (!wait_for_cutensor_executor_completion(*executor, consumer_stream)) {
-            PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
-            PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
-            return PETSC_ERR_LIB;
-        }
-    } else if (cudaStreamSynchronize(executor->stream) != cudaSuccess) {
+    if (consumer_stream != nullptr &&
+        !wait_for_cutensor_executor_completion(*executor, consumer_stream)) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
@@ -362,13 +357,6 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
                 stream);
 
         if (!kernel_ok) {
-            PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
-            PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
-            return PETSC_ERR_LIB;
-        }
-
-        if (consumer_stream == nullptr &&
-            cudaStreamSynchronize(static_cast<cudaStream_t>(nullptr)) != cudaSuccess) {
             PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
             PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
             return PETSC_ERR_LIB;
@@ -518,13 +506,8 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
         return PETSC_ERR_LIB;
     }
 
-    if (consumer_stream != nullptr) {
-        if (!wait_for_cutensor_executor_completion(*combine_executor, consumer_stream)) {
-            PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
-            PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
-            return PETSC_ERR_LIB;
-        }
-    } else if (cudaStreamSynchronize(combine_executor->stream) != cudaSuccess) {
+    if (consumer_stream != nullptr &&
+        !wait_for_cutensor_executor_completion(*combine_executor, consumer_stream)) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
@@ -582,13 +565,6 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
                 stream);
 
         if (!kernel_ok) {
-            PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
-            PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
-            return PETSC_ERR_LIB;
-        }
-
-        if (consumer_stream == nullptr &&
-            cudaStreamSynchronize(static_cast<cudaStream_t>(nullptr)) != cudaSuccess) {
             PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
             PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
             return PETSC_ERR_LIB;
@@ -782,13 +758,8 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
         return PETSC_ERR_LIB;
     }
 
-    if (consumer_stream != nullptr) {
-        if (!wait_for_cutensor_executor_completion(*norm_right_executor, consumer_stream)) {
-            PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
-            PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
-            return PETSC_ERR_LIB;
-        }
-    } else if (cudaStreamSynchronize(norm_right_executor->stream) != cudaSuccess) {
+    if (consumer_stream != nullptr &&
+        !wait_for_cutensor_executor_completion(*norm_right_executor, consumer_stream)) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
