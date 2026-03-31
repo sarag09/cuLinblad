@@ -19,7 +19,7 @@ PetscErrorCode run_ts_smoke_test(
     Vec x = nullptr;
 
     PetscCall(TSCreate(PETSC_COMM_SELF, &ts));
-    PetscCall(TSSetType(ts, TSEULER));
+    PetscCall(TSSetType(ts, TSRK));
     PetscCall(VecCreateSeq(PETSC_COMM_SELF, solver.layout.density_dim, &x));
     PetscCall(VecSet(x, 0.0));
 

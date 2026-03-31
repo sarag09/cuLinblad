@@ -13,6 +13,7 @@ namespace culindblad {
 struct CudaGroupedStateLayout {
     Index flat_size;
     Index grouped_size;
+    Index bra_complement_dim;
 
     Index* d_flat_to_grouped;
     Index* d_grouped_to_flat;

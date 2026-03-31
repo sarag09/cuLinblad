@@ -84,15 +84,8 @@ CuTensorContractionDesc make_batched_cutensor_left_contraction_desc(
         make_cutensor_left_contraction_desc(target_sites, local_dims);
 
     desc.debug_name = "cutensor_grouped_left_action_batched";
-    desc.input_modes = {5, 1, 2, 3, 4};
-    desc.output_modes = {5, 0, 2, 3, 4};
-
-    desc.input_extents.insert(
-        desc.input_extents.begin(),
-        static_cast<int64_t>(batch_size));
-    desc.output_extents.insert(
-        desc.output_extents.begin(),
-        static_cast<int64_t>(batch_size));
+    desc.input_extents.back() *= static_cast<int64_t>(batch_size);
+    desc.output_extents.back() *= static_cast<int64_t>(batch_size);
     set_default_row_major_strides(desc);
 
     return desc;
@@ -144,15 +137,8 @@ CuTensorContractionDesc make_batched_cutensor_right_contraction_desc(
         make_cutensor_right_contraction_desc(target_sites, local_dims);
 
     desc.debug_name = "cutensor_grouped_right_action_batched";
-    desc.input_modes = {5, 2, 3, 1, 4};
-    desc.output_modes = {5, 2, 3, 0, 4};
-
-    desc.input_extents.insert(
-        desc.input_extents.begin(),
-        static_cast<int64_t>(batch_size));
-    desc.output_extents.insert(
-        desc.output_extents.begin(),
-        static_cast<int64_t>(batch_size));
+    desc.input_extents.back() *= static_cast<int64_t>(batch_size);
+    desc.output_extents.back() *= static_cast<int64_t>(batch_size);
     set_default_row_major_strides(desc);
 
     return desc;

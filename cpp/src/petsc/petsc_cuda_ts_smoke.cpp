@@ -145,7 +145,7 @@ PetscErrorCode run_ts_cuda_grouped_left_smoke_test(
     Vec x = nullptr;
 
     PetscCall(TSCreate(PETSC_COMM_SELF, &ts));
-    PetscCall(TSSetType(ts, TSEULER));
+    PetscCall(TSSetType(ts, TSRK));
 
     PetscCall(VecCreate(PETSC_COMM_SELF, &x));
     PetscCall(VecSetSizes(x, PETSC_DECIDE, solver.layout.density_dim));
@@ -234,7 +234,7 @@ PetscErrorCode run_ts_cuda_grouped_liouvillian_smoke_test(
     Vec x = nullptr;
 
     PetscCall(TSCreate(PETSC_COMM_SELF, &ts));
-    PetscCall(TSSetType(ts, TSEULER));
+    PetscCall(TSSetType(ts, TSRK));
 
     PetscCall(VecCreate(PETSC_COMM_SELF, &x));
     PetscCall(VecSetSizes(x, PETSC_DECIDE, solver.layout.density_dim));
@@ -318,7 +318,7 @@ PetscErrorCode run_ts_cuda_static_model_liouvillian_smoke_test(
     Vec x = nullptr;
 
     PetscCall(TSCreate(PETSC_COMM_SELF, &ts));
-    PetscCall(TSSetType(ts, TSEULER));
+    PetscCall(TSSetType(ts, TSRK));
 
     PetscCall(VecCreate(PETSC_COMM_SELF, &x));
     PetscCall(VecSetSizes(x, PETSC_DECIDE, solver.layout.density_dim));
@@ -407,7 +407,7 @@ PetscErrorCode run_ts_cuda_full_model_liouvillian_smoke_test(
     Vec x = nullptr;
 
     PetscCall(TSCreate(PETSC_COMM_SELF, &ts));
-    PetscCall(TSSetType(ts, TSEULER));
+    PetscCall(TSSetType(ts, TSRK));
 
     PetscCall(VecCreate(PETSC_COMM_SELF, &x));
     PetscCall(VecSetSizes(x, PETSC_DECIDE, solver.layout.density_dim));

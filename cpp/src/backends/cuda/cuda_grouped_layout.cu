@@ -1,6 +1,7 @@
 #include "culindblad/cuda_grouped_layout.hpp"
 
 #include <cstddef>
+#include <vector>
 #include <cuda_runtime.h>
 
 #include "culindblad/types.hpp"
@@ -9,6 +10,24 @@ namespace culindblad {
 
 namespace {
 
+Index compute_bra_complement_dim(
+    const GroupedStateLayout& host_layout)
+{
+    std::vector<bool> is_target(host_layout.local_dims.size(), false);
+    for (Index site : host_layout.target_sites) {
+        is_target[site] = true;
+    }
+
+    Index complement_dim = 1;
+    for (Index site = 0; site < host_layout.local_dims.size(); ++site) {
+        if (!is_target[site]) {
+            complement_dim *= host_layout.local_dims[site];
+        }
+    }
+
+    return complement_dim;
+}
+
 __device__ __forceinline__ std::size_t batch_major_offset(
     Index batch,
     Index per_batch_size,
@@ -16,6 +35,22 @@ __device__ __forceinline__ std::size_t batch_major_offset(
 {
     return static_cast<std::size_t>(batch) * static_cast<std::size_t>(per_batch_size) +
            static_cast<std::size_t>(local_idx);
+}
+
+__device__ __forceinline__ std::size_t merged_tail_batch_offset(
+    Index logical_grouped_idx,
+    Index bra_complement_dim,
+    Index batch_size,
+    Index batch)
+{
+    const Index grouped_prefix = logical_grouped_idx / bra_complement_dim;
+    const Index bra_comp_idx = logical_grouped_idx % bra_complement_dim;
+    const std::size_t merged_tail_dim =
+        static_cast<std::size_t>(bra_complement_dim) * static_cast<std::size_t>(batch_size);
+
+    return static_cast<std::size_t>(grouped_prefix) * merged_tail_dim +
+           static_cast<std::size_t>(bra_comp_idx) * static_cast<std::size_t>(batch_size) +
+           static_cast<std::size_t>(batch);
 }
 
 __global__ void flat_to_grouped_kernel(
@@ -55,7 +90,7 @@ __global__ void flat_batch_to_grouped_kernel(
     Complex* grouped_output,
     const Index* flat_to_grouped,
     Index flat_size,
-    Index grouped_size,
+    Index bra_complement_dim,
     Index batch_size)
 {
     const std::size_t idx =
@@ -74,7 +109,11 @@ __global__ void flat_batch_to_grouped_kernel(
     const Index grouped_idx =
         flat_to_grouped[local_idx];
 
-    grouped_output[batch_major_offset(batch, grouped_size, grouped_idx)] =
+    grouped_output[merged_tail_batch_offset(
+        grouped_idx,
+        bra_complement_dim,
+        batch_size,
+        batch)] =
         flat_input[batch_major_offset(batch, flat_size, local_idx)];
 }
 
@@ -84,6 +123,7 @@ __global__ void grouped_batch_to_flat_kernel(
     const Index* grouped_to_flat,
     Index flat_size,
     Index grouped_size,
+    Index bra_complement_dim,
     Index batch_size)
 {
     const std::size_t idx =
@@ -95,15 +135,23 @@ __global__ void grouped_batch_to_flat_kernel(
         return;
     }
 
+    const std::size_t merged_tail_dim =
+        static_cast<std::size_t>(bra_complement_dim) * static_cast<std::size_t>(batch_size);
+    const Index grouped_prefix =
+        static_cast<Index>(idx / merged_tail_dim);
+    const std::size_t merged_tail_idx =
+        idx % merged_tail_dim;
+    const Index bra_comp_idx =
+        static_cast<Index>(merged_tail_idx / static_cast<std::size_t>(batch_size));
     const Index batch =
-        static_cast<Index>(idx / static_cast<std::size_t>(grouped_size));
-    const Index local_idx =
-        static_cast<Index>(idx % static_cast<std::size_t>(grouped_size));
+        static_cast<Index>(merged_tail_idx % static_cast<std::size_t>(batch_size));
+    const Index logical_grouped_idx =
+        grouped_prefix * bra_complement_dim + bra_comp_idx;
     const Index flat_idx =
-        grouped_to_flat[local_idx];
+        grouped_to_flat[logical_grouped_idx];
 
     flat_output[batch_major_offset(batch, flat_size, flat_idx)] =
-        grouped_input[batch_major_offset(batch, grouped_size, local_idx)];
+        grouped_input[idx];
 }
 
 bool cuda_malloc_indices(Index** ptr, std::size_t count)
@@ -124,6 +172,7 @@ bool create_cuda_grouped_state_layout(
 {
     cuda_layout.flat_size = host_layout.flat_density_to_grouped.size();
     cuda_layout.grouped_size = host_layout.grouped_to_flat_density.size();
+    cuda_layout.bra_complement_dim = compute_bra_complement_dim(host_layout);
     cuda_layout.d_flat_to_grouped = nullptr;
     cuda_layout.d_grouped_to_flat = nullptr;
 
@@ -181,6 +230,7 @@ bool destroy_cuda_grouped_state_layout(
     cuda_layout.d_flat_to_grouped = nullptr;
     cuda_layout.flat_size = 0;
     cuda_layout.grouped_size = 0;
+    cuda_layout.bra_complement_dim = 0;
 
     return ok;
 }
@@ -241,7 +291,7 @@ bool launch_flat_batch_to_grouped_kernel(
         reinterpret_cast<Complex*>(d_grouped_output),
         cuda_layout.d_flat_to_grouped,
         cuda_layout.flat_size,
-        cuda_layout.grouped_size,
+        cuda_layout.bra_complement_dim,
         batch_size);
 
     return cudaGetLastError() == cudaSuccess;
@@ -266,6 +316,7 @@ bool launch_grouped_batch_to_flat_kernel(
         cuda_layout.d_grouped_to_flat,
         cuda_layout.flat_size,
         cuda_layout.grouped_size,
+        cuda_layout.bra_complement_dim,
         batch_size);
 
     return cudaGetLastError() == cudaSuccess;
