@@ -1,7 +1,7 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
-#include <string>
 #include <unordered_map>
 
 #include "culindblad/cutensor_executor.hpp"
@@ -13,12 +13,11 @@ struct CuTensorExecutorCacheEntry {
 };
 
 struct CuTensorExecutorCache {
-    std::unordered_map<std::string, CuTensorExecutorCacheEntry> entries;
+    std::unordered_map<std::uint64_t, CuTensorExecutorCacheEntry> entries;
 };
 
 bool get_or_create_cutensor_executor(
     CuTensorExecutorCache& cache,
-    const std::string& key,
     const CuTensorContractionDesc& desc,
     size_t op_bytes,
     size_t input_bytes,

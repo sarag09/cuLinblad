@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -12,6 +13,9 @@
 namespace culindblad {
 
 namespace {
+
+constexpr std::uint64_t kFnvOffsetBasis = 1469598103934665603ull;
+constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
 bool cuda_malloc_bytes(void** ptr, size_t bytes)
 {
@@ -31,6 +35,30 @@ bool cuda_copy_d2h_async(void* dst, const void* src, size_t bytes, cudaStream_t 
 bool cuda_copy_d2d_async(void* dst, const void* src, size_t bytes, cudaStream_t stream)
 {
     return cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, stream) == cudaSuccess;
+}
+
+std::uint64_t fnv1a_append_bytes(
+    std::uint64_t hash,
+    const void* data,
+    std::size_t bytes)
+{
+    const auto* raw = static_cast<const unsigned char*>(data);
+    for (std::size_t i = 0; i < bytes; ++i) {
+        hash ^= static_cast<std::uint64_t>(raw[i]);
+        hash *= kFnvPrime;
+    }
+    return hash;
+}
+
+std::uint64_t hash_operator_contents(
+    const std::vector<Complex>& local_op)
+{
+    std::uint64_t hash = kFnvOffsetBasis;
+    hash = fnv1a_append_bytes(
+        hash,
+        local_op.data(),
+        local_op.size() * sizeof(Complex));
+    return hash;
 }
 
 } // namespace
@@ -53,7 +81,7 @@ bool create_cutensor_executor(
     executor.input_bytes = input_bytes;
     executor.output_bytes = output_bytes;
     executor.operator_resident = false;
-    executor.resident_operator_tag.clear();
+    executor.resident_operator_hash = 0;
 
     if (!create_cutensor_plan(desc, executor.plan_bundle)) {
         return false;
@@ -142,7 +170,7 @@ bool destroy_cutensor_executor(
     }
 
     executor.operator_resident = false;
-    executor.resident_operator_tag.clear();
+    executor.resident_operator_hash = 0;
 
     return ok;
 }
@@ -160,17 +188,19 @@ bool upload_cutensor_executor_operator(
     }
 
     executor.operator_resident = true;
-    executor.resident_operator_tag.clear();
+    executor.resident_operator_hash = 0;
     return true;
 }
 
 bool ensure_cutensor_executor_operator(
     CuTensorExecutor& executor,
-    const std::string& operator_tag,
     const std::vector<Complex>& local_op)
 {
+    const std::uint64_t operator_hash =
+        hash_operator_contents(local_op);
+
     if (executor.operator_resident &&
-        executor.resident_operator_tag == operator_tag) {
+        executor.resident_operator_hash == operator_hash) {
         return true;
     }
 
@@ -179,7 +209,7 @@ bool ensure_cutensor_executor_operator(
     }
 
     executor.operator_resident = true;
-    executor.resident_operator_tag = operator_tag;
+    executor.resident_operator_hash = operator_hash;
     return true;
 }
 

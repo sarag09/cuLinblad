@@ -896,7 +896,7 @@ Milestone0ValidationReport run_milestone0_n2_d2_gpu_validation()
         !report.single_matches_batch2;
     report.batched_path_batch_invariance_failure =
         !report.batch1_matches_batch2;
-    report.label_based_cache_identity_present = true;
+    report.label_based_cache_identity_present = false;
     report.multiple_sources_present =
         report.solver_semantics_mismatch_present &&
         report.batched_path_batch_invariance_failure;

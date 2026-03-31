@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -30,7 +31,7 @@ struct CuTensorExecutor {
     std::size_t output_bytes;
 
     bool operator_resident;
-    std::string resident_operator_tag;
+    std::uint64_t resident_operator_hash;
 };
 
 bool create_cutensor_executor(
@@ -49,7 +50,6 @@ bool upload_cutensor_executor_operator(
 
 bool ensure_cutensor_executor_operator(
     CuTensorExecutor& executor,
-    const std::string& operator_tag,
     const std::vector<Complex>& local_op);
 
 bool upload_cutensor_executor_input(

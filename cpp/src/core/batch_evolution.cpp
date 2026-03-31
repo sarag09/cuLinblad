@@ -727,9 +727,7 @@ void configure_fixed_step_ts(
 
 CuTensorExecutor* get_or_prepare_executor(
     CuTensorExecutorCache& executor_cache,
-    const std::string& cache_key,
     const CuTensorContractionDesc& contraction_desc,
-    const std::string& operator_tag,
     const std::vector<Complex>& local_op,
     std::size_t grouped_bytes)
 {
@@ -737,7 +735,6 @@ CuTensorExecutor* get_or_prepare_executor(
     const bool cache_ok =
         get_or_create_cutensor_executor(
             executor_cache,
-            cache_key,
             contraction_desc,
             local_op.size() * sizeof(Complex),
             grouped_bytes,
@@ -749,7 +746,7 @@ CuTensorExecutor* get_or_prepare_executor(
             "get_or_prepare_executor: executor creation failed");
     }
 
-    if (!ensure_cutensor_executor_operator(*executor, operator_tag, local_op)) {
+    if (!ensure_cutensor_executor_operator(*executor, local_op)) {
         throw std::runtime_error(
             "get_or_prepare_executor: operator upload failed");
     }
@@ -766,8 +763,6 @@ void apply_grouped_cuda_batch_impl(
     Index batch_size,
     CuTensorExecutorCache& executor_cache,
     const CuTensorContractionDesc& contraction_desc,
-    const std::string& cache_key,
-    const std::string& operator_tag,
     const void* d_flat_input,
     void* d_flat_output,
     cudaStream_t consumer_stream)
@@ -783,9 +778,7 @@ void apply_grouped_cuda_batch_impl(
     CuTensorExecutor* executor =
         get_or_prepare_executor(
             executor_cache,
-            cache_key,
             contraction_desc,
-            operator_tag,
             local_op,
             grouped_bytes);
 
@@ -855,25 +848,19 @@ void apply_grouped_commutator_cuda_batch(
     CuTensorExecutor* left_executor =
         get_or_prepare_executor(
             executor_cache,
-            "batched_comm_left_apply_" + term_label,
             left_desc,
-            "batched_comm_left_operator_" + term_label,
             local_op,
             grouped_bytes);
     CuTensorExecutor* right_executor =
         get_or_prepare_executor(
             executor_cache,
-            "batched_comm_right_apply_" + term_label,
             right_desc,
-            "batched_comm_right_operator_" + term_label,
             local_op,
             grouped_bytes);
     CuTensorExecutor* combine_executor =
         get_or_prepare_executor(
             executor_cache,
-            "batched_comm_combine_buffer_" + term_label,
             left_desc,
-            "batched_comm_combine_operator_" + term_label,
             local_op,
             grouped_bytes);
 
@@ -976,25 +963,19 @@ void apply_grouped_commutator_cuda_single(
     CuTensorExecutor* left_executor =
         get_or_prepare_executor(
             executor_cache,
-            "statewise_comm_left_apply_" + term_label,
             left_desc,
-            "statewise_comm_left_operator_" + term_label,
             local_op,
             grouped_bytes);
     CuTensorExecutor* right_executor =
         get_or_prepare_executor(
             executor_cache,
-            "statewise_comm_right_apply_" + term_label,
             right_desc,
-            "statewise_comm_right_operator_" + term_label,
             local_op,
             grouped_bytes);
     CuTensorExecutor* combine_executor =
         get_or_prepare_executor(
             executor_cache,
-            "statewise_comm_combine_buffer_" + term_label,
             left_desc,
-            "statewise_comm_combine_operator_" + term_label,
             local_op,
             grouped_bytes);
 
@@ -1088,33 +1069,25 @@ void apply_grouped_dissipator_cuda_batch(
     CuTensorExecutor* jump_left_executor =
         get_or_prepare_executor(
             executor_cache,
-            "batched_diss_jump_left_" + term_label,
             left_desc,
-            "batched_diss_L_" + term_label,
             local_op,
             grouped_bytes);
     CuTensorExecutor* jump_right_executor =
         get_or_prepare_executor(
             executor_cache,
-            "batched_diss_jump_right_" + term_label,
             right_desc,
-            "batched_diss_Ldag_" + term_label,
             local_op_dag,
             grouped_bytes);
     CuTensorExecutor* norm_left_executor =
         get_or_prepare_executor(
             executor_cache,
-            "batched_diss_norm_left_" + term_label,
             left_desc,
-            "batched_diss_LdagL_" + term_label,
             local_op_dag_op,
             grouped_bytes);
     CuTensorExecutor* norm_right_executor =
         get_or_prepare_executor(
             executor_cache,
-            "batched_diss_norm_right_" + term_label,
             right_desc,
-            "batched_diss_LdagL_" + term_label,
             local_op_dag_op,
             grouped_bytes);
 
@@ -1244,33 +1217,25 @@ void apply_grouped_dissipator_cuda_single(
     CuTensorExecutor* jump_left_executor =
         get_or_prepare_executor(
             executor_cache,
-            "statewise_diss_jump_left_" + term_label,
             left_desc,
-            "statewise_diss_L_" + term_label,
             local_op,
             grouped_bytes);
     CuTensorExecutor* jump_right_executor =
         get_or_prepare_executor(
             executor_cache,
-            "statewise_diss_jump_right_" + term_label,
             right_desc,
-            "statewise_diss_Ldag_" + term_label,
             local_op_dag,
             grouped_bytes);
     CuTensorExecutor* norm_left_executor =
         get_or_prepare_executor(
             executor_cache,
-            "statewise_diss_norm_left_" + term_label,
             left_desc,
-            "statewise_diss_LdagL_" + term_label,
             local_op_dag_op,
             grouped_bytes);
     CuTensorExecutor* norm_right_executor =
         get_or_prepare_executor(
             executor_cache,
-            "statewise_diss_norm_right_" + term_label,
             right_desc,
-            "statewise_diss_LdagL_" + term_label,
             local_op_dag_op,
             grouped_bytes);
 
