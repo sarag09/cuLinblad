@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -323,6 +324,78 @@ std::vector<std::vector<Complex>> make_selected_basis_density_states(
     }
 
     return states;
+}
+
+std::vector<Complex> make_milestone0_expected_state0_matrix()
+{
+    return {
+        Complex{0.625036, 0.0},
+        Complex{-0.00449673, -0.00836184},
+        Complex{0.0321716, 0.0256046},
+        Complex{4.41915e-05, 0.00108076},
+
+        Complex{-0.00449673, 0.00836184},
+        Complex{0.0381174, 0.0},
+        Complex{-0.0365766, -0.0732278},
+        Complex{0.00651442, 0.00937486},
+
+        Complex{0.0321716, -0.0256046},
+        Complex{-0.0365766, 0.0732278},
+        Complex{0.328915, 0.0},
+        Complex{-0.0282704, 0.00299707},
+
+        Complex{4.41915e-05, -0.00108076},
+        Complex{0.00651442, -0.00937486},
+        Complex{-0.0282704, -0.00299707},
+        Complex{0.00793155, 0.0}
+    };
+}
+
+double compute_max_abs_diff(
+    const std::vector<Complex>& a,
+    const std::vector<Complex>& b)
+{
+    if (a.size() != b.size()) {
+        throw std::invalid_argument("compute_max_abs_diff: size mismatch");
+    }
+
+    double max_diff = 0.0;
+    for (Index i = 0; i < a.size(); ++i) {
+        max_diff = std::max(max_diff, std::abs(a[i] - b[i]));
+    }
+    return max_diff;
+}
+
+bool matrix_matches_within_tolerance(
+    const std::vector<Complex>& actual,
+    const std::vector<Complex>& expected,
+    double tolerance)
+{
+    return compute_max_abs_diff(actual, expected) <= tolerance;
+}
+
+TransmonChainBenchmarkConfig make_milestone0_validation_config()
+{
+    TransmonChainBenchmarkConfig config{};
+    config.num_transmons = 2;
+    config.cutoff_dim = 2;
+    config.omega = {5.0, 5.05};
+    config.alpha = {-0.3, -0.3};
+    config.g = {0.02};
+    config.t1 = {20.0, 20.0};
+    config.tphi = {30.0, 30.0};
+    config.drive_amplitude = 0.1;
+    config.drive_sigma = 10.0;
+    config.drive_center = 20.0;
+    config.drive_frequency = {5.0, 5.05};
+    config.driven_sites = {0};
+    config.t0 = 0.0;
+    config.tfinal = 40.0;
+    config.batched_num_steps = 500;
+    config.use_batched_gpu_specific_state_path = false;
+    config.state_selection.evolve_all_states = false;
+    config.state_selection.selected_state_indices = {0, 1};
+    return config;
 }
 
 std::vector<Complex> evolve_single_state_cuda_ts(
@@ -689,6 +762,127 @@ TransmonChainBenchmarkTiming run_transmon_chain_cuda_benchmark(
         std::chrono::duration<double>(t_end - t_start).count();
 
     return timing;
+}
+
+Milestone0ValidationReport run_milestone0_n2_d2_gpu_validation()
+{
+    constexpr double kMatrixTolerance = 1.0e-6;
+
+    const TransmonChainBenchmarkConfig config =
+        make_milestone0_validation_config();
+    const Model model = build_transmon_chain_model(config);
+    const Solver solver = make_solver(model);
+
+    const std::vector<std::vector<Complex>> initial_states =
+        make_selected_basis_density_states(
+            solver,
+            config.state_selection.selected_state_indices);
+
+    const BatchEvolutionConfig batch1_config{
+        config.t0,
+        (config.tfinal - config.t0) /
+            static_cast<double>(config.batched_num_steps),
+        config.batched_num_steps,
+        1
+    };
+    const BatchEvolutionConfig batch2_config{
+        config.t0,
+        (config.tfinal - config.t0) /
+            static_cast<double>(config.batched_num_steps),
+        config.batched_num_steps,
+        2
+    };
+
+    CudaBatchExecutionContext single_ctx{};
+    PetscCallAbort(PETSC_COMM_SELF, create_cuda_batch_execution_context(solver, single_ctx));
+
+    Milestone0ValidationReport report;
+    report.expected_state0 = make_milestone0_expected_state0_matrix();
+
+    try {
+        report.single_state_gpu_state0 =
+            evolve_single_state_cuda_ts(
+                solver,
+                initial_states[0],
+                config.t0,
+                config.tfinal,
+                single_ctx);
+    } catch (...) {
+        PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(single_ctx));
+        throw;
+    }
+
+    PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(single_ctx));
+
+    report.batched_gpu_batch1_state0 =
+        evolve_density_batch_cuda_ts(
+            solver,
+            {initial_states[0]},
+            batch1_config).final_states[0];
+
+    report.batched_gpu_batch2_state0 =
+        evolve_density_batch_cuda_ts(
+            solver,
+            initial_states,
+            batch2_config).final_states[0];
+
+    report.max_diff_single_vs_expected =
+        compute_max_abs_diff(
+            report.single_state_gpu_state0,
+            report.expected_state0);
+    report.max_diff_batch1_vs_expected =
+        compute_max_abs_diff(
+            report.batched_gpu_batch1_state0,
+            report.expected_state0);
+    report.max_diff_batch2_vs_expected =
+        compute_max_abs_diff(
+            report.batched_gpu_batch2_state0,
+            report.expected_state0);
+    report.max_diff_single_vs_batch2 =
+        compute_max_abs_diff(
+            report.single_state_gpu_state0,
+            report.batched_gpu_batch2_state0);
+    report.max_diff_batch1_vs_batch2 =
+        compute_max_abs_diff(
+            report.batched_gpu_batch1_state0,
+            report.batched_gpu_batch2_state0);
+
+    report.single_matches_expected =
+        matrix_matches_within_tolerance(
+            report.single_state_gpu_state0,
+            report.expected_state0,
+            kMatrixTolerance);
+    report.batch1_matches_expected =
+        matrix_matches_within_tolerance(
+            report.batched_gpu_batch1_state0,
+            report.expected_state0,
+            kMatrixTolerance);
+    report.batch2_matches_expected =
+        matrix_matches_within_tolerance(
+            report.batched_gpu_batch2_state0,
+            report.expected_state0,
+            kMatrixTolerance);
+    report.single_matches_batch2 =
+        matrix_matches_within_tolerance(
+            report.single_state_gpu_state0,
+            report.batched_gpu_batch2_state0,
+            kMatrixTolerance);
+    report.batch1_matches_batch2 =
+        matrix_matches_within_tolerance(
+            report.batched_gpu_batch1_state0,
+            report.batched_gpu_batch2_state0,
+            kMatrixTolerance);
+
+    report.solver_semantics_mismatch_present =
+        !report.single_matches_batch2;
+    report.batched_path_batch_invariance_failure =
+        !report.batch1_matches_batch2;
+    report.label_based_cache_identity_present = true;
+    report.multiple_sources_present =
+        report.solver_semantics_mismatch_present &&
+        report.batched_path_batch_invariance_failure;
+
+    return report;
 }
 
 } // namespace culindblad

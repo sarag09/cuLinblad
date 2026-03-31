@@ -44,6 +44,27 @@ struct TransmonChainBenchmarkTiming {
     std::vector<std::vector<Complex>> final_states;
 };
 
+struct Milestone0ValidationReport {
+    std::vector<Complex> expected_state0;
+    std::vector<Complex> single_state_gpu_state0;
+    std::vector<Complex> batched_gpu_batch1_state0;
+    std::vector<Complex> batched_gpu_batch2_state0;
+    double max_diff_single_vs_expected = 0.0;
+    double max_diff_batch1_vs_expected = 0.0;
+    double max_diff_batch2_vs_expected = 0.0;
+    double max_diff_single_vs_batch2 = 0.0;
+    double max_diff_batch1_vs_batch2 = 0.0;
+    bool single_matches_expected = false;
+    bool batch1_matches_expected = false;
+    bool batch2_matches_expected = false;
+    bool single_matches_batch2 = false;
+    bool batch1_matches_batch2 = false;
+    bool solver_semantics_mismatch_present = false;
+    bool batched_path_batch_invariance_failure = false;
+    bool label_based_cache_identity_present = false;
+    bool multiple_sources_present = false;
+};
+
 std::vector<Index> make_first_n_state_indices(Index n);
 
 std::vector<Index> resolve_state_selection(
@@ -58,5 +79,7 @@ TransmonChainBenchmarkTiming run_transmon_chain_cpu_benchmark(
 
 TransmonChainBenchmarkTiming run_transmon_chain_cuda_benchmark(
     const TransmonChainBenchmarkConfig& config);
+
+Milestone0ValidationReport run_milestone0_n2_d2_gpu_validation();
 
 } // namespace culindblad

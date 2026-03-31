@@ -1,4 +1,5 @@
 #include <complex>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -26,6 +27,27 @@ void print_selected_state_matrix(
         }
         std::cout << std::endl;
     }
+}
+
+void print_matrix_with_fixed_precision(
+    const std::vector<std::complex<double>>& rho,
+    std::size_t hilbert_dim)
+{
+    const std::streamsize old_precision = std::cout.precision();
+    const std::ios::fmtflags old_flags = std::cout.flags();
+
+    std::cout << std::setprecision(8) << std::defaultfloat;
+    print_selected_state_matrix(rho, hilbert_dim, hilbert_dim);
+
+    std::cout.precision(old_precision);
+    std::cout.flags(old_flags);
+}
+
+bool milestone0_validation_passed(
+    const culindblad::Milestone0ValidationReport& report)
+{
+    return report.batch2_matches_expected &&
+           report.single_matches_batch2;
 }
 
 std::vector<std::vector<std::complex<double>>> make_selected_basis_density_states_for_cli(
@@ -67,6 +89,61 @@ int main(int argc, char** argv)
     }
 
     try {
+        PetscBool milestone0_validate = PETSC_FALSE;
+        PetscCall(PetscOptionsGetBool(
+            nullptr,
+            nullptr,
+            "-milestone0_validate",
+            &milestone0_validate,
+            nullptr));
+
+        if (milestone0_validate == PETSC_TRUE) {
+            const Milestone0ValidationReport report =
+                run_milestone0_n2_d2_gpu_validation();
+
+            std::cout << "===== Milestone 0 Validation (N=2, d=2) =====" << std::endl;
+            std::cout << "Expected State 0 matrix:" << std::endl;
+            print_matrix_with_fixed_precision(report.expected_state0, 4);
+            std::cout << std::endl;
+
+            std::cout << "CUDA single-state State 0:" << std::endl;
+            print_matrix_with_fixed_precision(report.single_state_gpu_state0, 4);
+            std::cout << "max|single - expected| = "
+                      << report.max_diff_single_vs_expected << std::endl;
+            std::cout << std::endl;
+
+            std::cout << "CUDA batched State 0 with batch size 1:" << std::endl;
+            print_matrix_with_fixed_precision(report.batched_gpu_batch1_state0, 4);
+            std::cout << "max|batch1 - expected| = "
+                      << report.max_diff_batch1_vs_expected << std::endl;
+            std::cout << std::endl;
+
+            std::cout << "CUDA batched State 0 with batch size 2:" << std::endl;
+            print_matrix_with_fixed_precision(report.batched_gpu_batch2_state0, 4);
+            std::cout << "max|batch2 - expected| = "
+                      << report.max_diff_batch2_vs_expected << std::endl;
+            std::cout << std::endl;
+
+            std::cout << "max|single - batch2| = "
+                      << report.max_diff_single_vs_batch2 << std::endl;
+            std::cout << "max|batch1 - batch2| = "
+                      << report.max_diff_batch1_vs_batch2 << std::endl;
+            std::cout << std::endl;
+
+            std::cout << "Diagnosis:" << std::endl;
+            std::cout << "solver semantics mismatch present: "
+                      << (report.solver_semantics_mismatch_present ? "yes" : "no") << std::endl;
+            std::cout << "batched path batch-invariance failure present: "
+                      << (report.batched_path_batch_invariance_failure ? "yes" : "no") << std::endl;
+            std::cout << "label-based cache identity present: "
+                      << (report.label_based_cache_identity_present ? "yes" : "no") << std::endl;
+            std::cout << "multiple sources present: "
+                      << (report.multiple_sources_present ? "yes" : "no") << std::endl;
+
+            PetscFinalize();
+            return milestone0_validation_passed(report) ? 0 : 2;
+        }
+
         std::cout << "===== cuLindblad transmon-chain benchmark =====" << std::endl;
 
         TransmonChainBenchmarkConfig base_config{};
