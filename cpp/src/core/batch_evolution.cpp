@@ -47,8 +47,11 @@ bool should_use_tiny_dense_path(
     const Solver& solver,
     const std::vector<Index>& target_sites)
 {
-    return target_sites.size() <= 2 &&
-           solver.layout.hilbert_dim <= kMaxTinyDenseHilbertDim;
+    (void)solver;
+    (void)target_sites;
+
+    // Milestone 0 validation must force N=2 through the generic grouped/cuTENSOR path.
+    return false;
 }
 
 void build_tiny_dense_operator_arg(
