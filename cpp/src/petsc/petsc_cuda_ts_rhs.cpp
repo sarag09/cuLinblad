@@ -51,7 +51,7 @@ PetscErrorCode zero_petsc_cuda_vec(
     PetscScalar* d_v_ptr = nullptr;
 
 #if defined(PETSC_HAVE_CUDA)
-    PetscCall(VecCUDAGetArray(v, &d_v_ptr));
+    PetscCall(VecCUDAGetArrayWrite(v, &d_v_ptr));
 #else
     PetscCall(VecGetArray(v, &d_v_ptr));
 #endif
@@ -65,7 +65,7 @@ PetscErrorCode zero_petsc_cuda_vec(
 
     if (memset_status != cudaSuccess) {
 #if defined(PETSC_HAVE_CUDA)
-        PetscCall(VecCUDARestoreArray(v, &d_v_ptr));
+        PetscCall(VecCUDARestoreArrayWrite(v, &d_v_ptr));
 #else
         PetscCall(VecRestoreArray(v, &d_v_ptr));
 #endif
@@ -73,7 +73,7 @@ PetscErrorCode zero_petsc_cuda_vec(
     }
 
 #if defined(PETSC_HAVE_CUDA)
-    PetscCall(VecCUDARestoreArray(v, &d_v_ptr));
+    PetscCall(VecCUDARestoreArrayWrite(v, &d_v_ptr));
 #else
     PetscCall(VecRestoreArray(v, &d_v_ptr));
 #endif
@@ -97,7 +97,7 @@ PetscErrorCode add_petsc_cuda_vecs(
 
 #if defined(PETSC_HAVE_CUDA)
     if (a == out) {
-        PetscCall(VecCUDAGetArray(out, &d_out_ptr));
+        PetscCall(VecCUDAGetArrayWrite(out, &d_out_ptr));
         d_a_ptr = d_out_ptr;
         restore_out_write = true;
     } else {
@@ -107,7 +107,7 @@ PetscErrorCode add_petsc_cuda_vecs(
 
     if (b == out) {
         if (!restore_out_write) {
-            PetscCall(VecCUDAGetArray(out, &d_out_ptr));
+            PetscCall(VecCUDAGetArrayWrite(out, &d_out_ptr));
             restore_out_write = true;
         }
         d_b_ptr = d_out_ptr;
@@ -117,7 +117,7 @@ PetscErrorCode add_petsc_cuda_vecs(
     }
 
     if (!restore_out_write) {
-        PetscCall(VecCUDAGetArray(out, &d_out_ptr));
+        PetscCall(VecCUDAGetArrayWrite(out, &d_out_ptr));
         restore_out_write = true;
     }
 #else
@@ -158,7 +158,7 @@ PetscErrorCode add_petsc_cuda_vecs(
     if (!add_ok) {
 #if defined(PETSC_HAVE_CUDA)
         if (restore_out_write) {
-            PetscCall(VecCUDARestoreArray(out, &d_out_ptr));
+            PetscCall(VecCUDARestoreArrayWrite(out, &d_out_ptr));
         }
         if (restore_b_read) {
             PetscCall(VecCUDARestoreArrayRead(b, &d_b_ptr));
@@ -182,7 +182,7 @@ PetscErrorCode add_petsc_cuda_vecs(
 
 #if defined(PETSC_HAVE_CUDA)
     if (restore_out_write) {
-        PetscCall(VecCUDARestoreArray(out, &d_out_ptr));
+        PetscCall(VecCUDARestoreArrayWrite(out, &d_out_ptr));
     }
     if (restore_b_read) {
         PetscCall(VecCUDARestoreArrayRead(b, &d_b_ptr));
@@ -217,7 +217,7 @@ PetscErrorCode scale_petsc_cuda_vec(
 
 #if defined(PETSC_HAVE_CUDA)
     PetscCall(VecCUDAGetArrayRead(in, &d_in_ptr));
-    PetscCall(VecCUDAGetArray(out, &d_out_ptr));
+    PetscCall(VecCUDAGetArrayWrite(out, &d_out_ptr));
 #else
     PetscCall(VecGetArrayRead(in, &d_in_ptr));
     PetscCall(VecGetArray(out, &d_out_ptr));
@@ -233,7 +233,7 @@ PetscErrorCode scale_petsc_cuda_vec(
 
     if (!scale_ok) {
 #if defined(PETSC_HAVE_CUDA)
-        PetscCall(VecCUDARestoreArray(out, &d_out_ptr));
+        PetscCall(VecCUDARestoreArrayWrite(out, &d_out_ptr));
         PetscCall(VecCUDARestoreArrayRead(in, &d_in_ptr));
 #else
         PetscCall(VecRestoreArray(out, &d_out_ptr));
@@ -243,7 +243,7 @@ PetscErrorCode scale_petsc_cuda_vec(
     }
 
 #if defined(PETSC_HAVE_CUDA)
-    PetscCall(VecCUDARestoreArray(out, &d_out_ptr));
+    PetscCall(VecCUDARestoreArrayWrite(out, &d_out_ptr));
     PetscCall(VecCUDARestoreArrayRead(in, &d_in_ptr));
 #else
     PetscCall(VecRestoreArray(out, &d_out_ptr));
@@ -356,9 +356,8 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
     cudaStream_t s = rhs_ctx->elementwise_stream;
 
     Vec term_out = rhs_ctx->work_vec_a;
-    Vec accum = rhs_ctx->work_vec_b;
+    Vec accum = f;
 
-    PetscCall(zero_petsc_cuda_vec(f, solver.layout.density_dim, s));
     PetscCall(zero_petsc_cuda_vec(accum, solver.layout.density_dim, s));
 
     for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
@@ -384,13 +383,9 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
         PetscCall(add_petsc_cuda_vecs(
             accum,
             term_out,
-            f,
+            accum,
             solver.layout.density_dim,
             s));
-
-        // Keep distinct PETSc CUDA vectors here: three in-place accumulation variants
-        // broke the N=2, d=2 physics baseline during Milestone 3 experiments.
-        PetscCall(VecCopy(f, accum));
     }
 
     for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx->cached_static_dissipators) {
@@ -418,16 +413,10 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
         PetscCall(add_petsc_cuda_vecs(
             accum,
             term_out,
-            f,
+            accum,
             solver.layout.density_dim,
             s));
-
-        // Keep distinct PETSc CUDA vectors here: three in-place accumulation variants
-        // broke the N=2, d=2 physics baseline during Milestone 3 experiments.
-        PetscCall(VecCopy(f, accum));
     }
-
-    PetscCall(VecCopy(accum, f));
 
     if (cudaStreamSynchronize(s) != cudaSuccess) {
         return PETSC_ERR_LIB;
@@ -453,9 +442,8 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
 
     Vec term_out = rhs_ctx->work_vec_a;
     Vec scaled_term_out = rhs_ctx->work_vec_b;
-    Vec accum = rhs_ctx->work_vec_c;
+    Vec accum = f;
 
-    PetscCall(zero_petsc_cuda_vec(f, solver.layout.density_dim, s));
     PetscCall(zero_petsc_cuda_vec(accum, solver.layout.density_dim, s));
 
     for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
@@ -481,13 +469,9 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
         PetscCall(add_petsc_cuda_vecs(
             accum,
             term_out,
-            f,
+            accum,
             solver.layout.density_dim,
             s));
-
-        // Keep distinct PETSc CUDA vectors here: three in-place accumulation variants
-        // broke the N=2, d=2 physics baseline during Milestone 3 experiments.
-        PetscCall(VecCopy(f, accum));
     }
 
     for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx->cached_static_dissipators) {
@@ -515,13 +499,9 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
         PetscCall(add_petsc_cuda_vecs(
             accum,
             term_out,
-            f,
+            accum,
             solver.layout.density_dim,
             s));
-
-        // Keep distinct PETSc CUDA vectors here: three in-place accumulation variants
-        // broke the N=2, d=2 physics baseline during Milestone 3 experiments.
-        PetscCall(VecCopy(f, accum));
     }
 
     for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
@@ -557,16 +537,10 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
         PetscCall(add_petsc_cuda_vecs(
             accum,
             scaled_term_out,
-            f,
+            accum,
             solver.layout.density_dim,
             s));
-
-        // Keep distinct PETSc CUDA vectors here: three in-place accumulation variants
-        // broke the N=2, d=2 physics baseline during Milestone 3 experiments.
-        PetscCall(VecCopy(f, accum));
     }
-
-    PetscCall(VecCopy(accum, f));
 
     if (cudaStreamSynchronize(s) != cudaSuccess) {
         return PETSC_ERR_LIB;
