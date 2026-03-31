@@ -41,6 +41,64 @@ __global__ void grouped_to_flat_kernel(
     flat_output[grouped_to_flat[idx]] = grouped_input[idx];
 }
 
+__global__ void flat_batch_to_grouped_kernel(
+    const Complex* flat_input,
+    Complex* grouped_output,
+    const Index* flat_to_grouped,
+    Index flat_size,
+    Index grouped_size,
+    Index batch_size)
+{
+    const std::size_t idx =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const std::size_t total_size =
+        static_cast<std::size_t>(flat_size) * static_cast<std::size_t>(batch_size);
+
+    if (idx >= total_size) {
+        return;
+    }
+
+    const Index batch =
+        static_cast<Index>(idx / static_cast<std::size_t>(flat_size));
+    const Index local_idx =
+        static_cast<Index>(idx % static_cast<std::size_t>(flat_size));
+    const Index grouped_idx =
+        flat_to_grouped[local_idx];
+
+    grouped_output[
+        static_cast<std::size_t>(batch) * static_cast<std::size_t>(grouped_size) +
+        static_cast<std::size_t>(grouped_idx)] = flat_input[idx];
+}
+
+__global__ void grouped_batch_to_flat_kernel(
+    const Complex* grouped_input,
+    Complex* flat_output,
+    const Index* grouped_to_flat,
+    Index flat_size,
+    Index grouped_size,
+    Index batch_size)
+{
+    const std::size_t idx =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const std::size_t total_size =
+        static_cast<std::size_t>(grouped_size) * static_cast<std::size_t>(batch_size);
+
+    if (idx >= total_size) {
+        return;
+    }
+
+    const Index batch =
+        static_cast<Index>(idx / static_cast<std::size_t>(grouped_size));
+    const Index local_idx =
+        static_cast<Index>(idx % static_cast<std::size_t>(grouped_size));
+    const Index flat_idx =
+        grouped_to_flat[local_idx];
+
+    flat_output[
+        static_cast<std::size_t>(batch) * static_cast<std::size_t>(flat_size) +
+        static_cast<std::size_t>(flat_idx)] = grouped_input[idx];
+}
+
 bool cuda_malloc_indices(Index** ptr, std::size_t count)
 {
     return cudaMalloc(reinterpret_cast<void**>(ptr), count * sizeof(Index)) == cudaSuccess;
@@ -154,6 +212,54 @@ bool launch_grouped_to_flat_kernel(
         reinterpret_cast<Complex*>(d_flat_output),
         cuda_layout.d_grouped_to_flat,
         cuda_layout.grouped_size);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_flat_batch_to_grouped_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    const void* d_flat_input,
+    void* d_grouped_output,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    const std::size_t total_size =
+        static_cast<std::size_t>(cuda_layout.flat_size) * static_cast<std::size_t>(batch_size);
+    const int block_size = 256;
+    const int grid_size =
+        static_cast<int>((total_size + block_size - 1) / block_size);
+
+    flat_batch_to_grouped_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const Complex*>(d_flat_input),
+        reinterpret_cast<Complex*>(d_grouped_output),
+        cuda_layout.d_flat_to_grouped,
+        cuda_layout.flat_size,
+        cuda_layout.grouped_size,
+        batch_size);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_grouped_batch_to_flat_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    const std::size_t total_size =
+        static_cast<std::size_t>(cuda_layout.grouped_size) * static_cast<std::size_t>(batch_size);
+    const int block_size = 256;
+    const int grid_size =
+        static_cast<int>((total_size + block_size - 1) / block_size);
+
+    grouped_batch_to_flat_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const Complex*>(d_grouped_input),
+        reinterpret_cast<Complex*>(d_flat_output),
+        cuda_layout.d_grouped_to_flat,
+        cuda_layout.flat_size,
+        cuda_layout.grouped_size,
+        batch_size);
 
     return cudaGetLastError() == cudaSuccess;
 }

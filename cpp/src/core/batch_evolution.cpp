@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <petscts.h>
@@ -11,7 +12,11 @@
 #include <cuda_runtime.h>
 
 #include "culindblad/backend.hpp"
+#include "culindblad/cuda_elementwise.hpp"
 #include "culindblad/cuda_grouped_layout.hpp"
+#include "culindblad/cutensor_contraction_desc.hpp"
+#include "culindblad/cutensor_executor.hpp"
+#include "culindblad/cutensor_executor_cache.hpp"
 #include "culindblad/grouped_state_layout.hpp"
 #include "culindblad/local_operator_utils.hpp"
 #include "culindblad/time_dependent_term.hpp"
@@ -159,6 +164,549 @@ PetscErrorCode destroy_rhs_work_vectors(
         PetscCall(VecDestroy(&rhs_ctx.work_vec_a));
     }
     return 0;
+}
+
+const CachedGroupedLayoutEntry* find_cached_grouped_layout(
+    const std::vector<CachedGroupedLayoutEntry>& cached_grouped_layouts,
+    const std::vector<Index>& sites)
+{
+    for (const CachedGroupedLayoutEntry& entry : cached_grouped_layouts) {
+        if (same_sites(entry.sites, sites)) {
+            return &entry;
+        }
+    }
+
+    return nullptr;
+}
+
+struct BatchedDeviceStateBuffers {
+    void* d_state = nullptr;
+    void* d_accum = nullptr;
+    void* d_term = nullptr;
+    void* d_scaled_term = nullptr;
+    std::size_t flat_bytes = 0;
+};
+
+void allocate_batched_device_state_buffers(
+    Index density_dim,
+    Index batch_size,
+    BatchedDeviceStateBuffers& buffers)
+{
+    buffers.flat_bytes =
+        static_cast<std::size_t>(density_dim) *
+        static_cast<std::size_t>(batch_size) *
+        sizeof(Complex);
+
+    if (cudaMalloc(&buffers.d_state, buffers.flat_bytes) != cudaSuccess ||
+        cudaMalloc(&buffers.d_accum, buffers.flat_bytes) != cudaSuccess ||
+        cudaMalloc(&buffers.d_term, buffers.flat_bytes) != cudaSuccess ||
+        cudaMalloc(&buffers.d_scaled_term, buffers.flat_bytes) != cudaSuccess) {
+        throw std::runtime_error(
+            "allocate_batched_device_state_buffers: device allocation failed");
+    }
+}
+
+void free_batched_device_state_buffers(
+    BatchedDeviceStateBuffers& buffers)
+{
+    if (buffers.d_scaled_term != nullptr) {
+        cudaFree(buffers.d_scaled_term);
+        buffers.d_scaled_term = nullptr;
+    }
+    if (buffers.d_term != nullptr) {
+        cudaFree(buffers.d_term);
+        buffers.d_term = nullptr;
+    }
+    if (buffers.d_accum != nullptr) {
+        cudaFree(buffers.d_accum);
+        buffers.d_accum = nullptr;
+    }
+    if (buffers.d_state != nullptr) {
+        cudaFree(buffers.d_state);
+        buffers.d_state = nullptr;
+    }
+    buffers.flat_bytes = 0;
+}
+
+std::vector<Complex> flatten_state_batch(
+    const std::vector<std::vector<Complex>>& states,
+    Index density_dim)
+{
+    std::vector<Complex> flat(
+        static_cast<std::size_t>(states.size()) * static_cast<std::size_t>(density_dim),
+        Complex{0.0, 0.0});
+
+    for (Index batch = 0; batch < states.size(); ++batch) {
+        if (states[batch].size() != density_dim) {
+            throw std::invalid_argument(
+                "flatten_state_batch: state size mismatch");
+        }
+
+        const std::size_t offset =
+            static_cast<std::size_t>(batch) * static_cast<std::size_t>(density_dim);
+        for (Index i = 0; i < density_dim; ++i) {
+            flat[offset + static_cast<std::size_t>(i)] = states[batch][i];
+        }
+    }
+
+    return flat;
+}
+
+void unflatten_state_batch(
+    const std::vector<Complex>& flat_states,
+    Index density_dim,
+    std::vector<std::vector<Complex>>& states)
+{
+    const Index batch_size =
+        static_cast<Index>(flat_states.size() / static_cast<std::size_t>(density_dim));
+
+    states.resize(batch_size);
+    for (Index batch = 0; batch < batch_size; ++batch) {
+        states[batch].resize(density_dim);
+        const std::size_t offset =
+            static_cast<std::size_t>(batch) * static_cast<std::size_t>(density_dim);
+        for (Index i = 0; i < density_dim; ++i) {
+            states[batch][i] = flat_states[offset + static_cast<std::size_t>(i)];
+        }
+    }
+}
+
+void upload_flat_state_batch(
+    const std::vector<std::vector<Complex>>& states,
+    Index density_dim,
+    void* d_state,
+    cudaStream_t stream)
+{
+    const std::vector<Complex> flat_states =
+        flatten_state_batch(states, density_dim);
+
+    if (cudaMemcpyAsync(
+            d_state,
+            flat_states.data(),
+            flat_states.size() * sizeof(Complex),
+            cudaMemcpyHostToDevice,
+            stream) != cudaSuccess) {
+        throw std::runtime_error(
+            "upload_flat_state_batch: device upload failed");
+    }
+}
+
+std::vector<std::vector<Complex>> download_flat_state_batch(
+    Index density_dim,
+    Index batch_size,
+    const void* d_state,
+    cudaStream_t stream)
+{
+    std::vector<Complex> flat_states(
+        static_cast<std::size_t>(density_dim) * static_cast<std::size_t>(batch_size),
+        Complex{0.0, 0.0});
+
+    if (cudaMemcpyAsync(
+            flat_states.data(),
+            d_state,
+            flat_states.size() * sizeof(Complex),
+            cudaMemcpyDeviceToHost,
+            stream) != cudaSuccess) {
+        throw std::runtime_error(
+            "download_flat_state_batch: device download failed");
+    }
+
+    if (cudaStreamSynchronize(stream) != cudaSuccess) {
+        throw std::runtime_error(
+            "download_flat_state_batch: stream synchronize failed");
+    }
+
+    std::vector<std::vector<Complex>> states;
+    unflatten_state_batch(flat_states, density_dim, states);
+    return states;
+}
+
+void zero_device_buffer(
+    void* d_buffer,
+    std::size_t bytes,
+    cudaStream_t stream)
+{
+    if (cudaMemsetAsync(d_buffer, 0, bytes, stream) != cudaSuccess) {
+        throw std::runtime_error("zero_device_buffer: memset failed");
+    }
+}
+
+void add_device_buffers(
+    const void* d_a,
+    const void* d_b,
+    void* d_out,
+    Index size,
+    cudaStream_t stream)
+{
+    if (!launch_vector_add_kernel(d_a, d_b, d_out, size, stream)) {
+        throw std::runtime_error("add_device_buffers: vector add failed");
+    }
+}
+
+void scale_device_buffer(
+    const void* d_in,
+    double scale,
+    void* d_out,
+    Index size,
+    cudaStream_t stream)
+{
+    if (!launch_vector_scale_kernel(d_in, scale, d_out, size, stream)) {
+        throw std::runtime_error("scale_device_buffer: vector scale failed");
+    }
+}
+
+CuTensorExecutor* get_or_prepare_executor(
+    CuTensorExecutorCache& executor_cache,
+    const std::string& cache_key,
+    const CuTensorContractionDesc& contraction_desc,
+    const std::string& operator_tag,
+    const std::vector<Complex>& local_op,
+    std::size_t grouped_bytes)
+{
+    CuTensorExecutor* executor = nullptr;
+    const bool cache_ok =
+        get_or_create_cutensor_executor(
+            executor_cache,
+            cache_key,
+            contraction_desc,
+            local_op.size() * sizeof(Complex),
+            grouped_bytes,
+            grouped_bytes,
+            executor);
+
+    if (!cache_ok || executor == nullptr) {
+        throw std::runtime_error(
+            "get_or_prepare_executor: executor creation failed");
+    }
+
+    if (!ensure_cutensor_executor_operator(*executor, operator_tag, local_op)) {
+        throw std::runtime_error(
+            "get_or_prepare_executor: operator upload failed");
+    }
+
+    return executor;
+}
+
+void apply_grouped_cuda_batch_impl(
+    const Solver& solver,
+    const std::vector<Complex>& local_op,
+    const std::vector<Index>& target_sites,
+    const GroupedStateLayout& grouped_layout,
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    Index batch_size,
+    CuTensorExecutorCache& executor_cache,
+    const CuTensorContractionDesc& contraction_desc,
+    const std::string& cache_key,
+    const std::string& operator_tag,
+    const void* d_flat_input,
+    void* d_flat_output,
+    cudaStream_t consumer_stream)
+{
+    (void)solver;
+    (void)target_sites;
+
+    const std::size_t grouped_bytes =
+        static_cast<std::size_t>(grouped_layout.grouped_size) *
+        static_cast<std::size_t>(batch_size) *
+        sizeof(Complex);
+
+    CuTensorExecutor* executor =
+        get_or_prepare_executor(
+            executor_cache,
+            cache_key,
+            contraction_desc,
+            operator_tag,
+            local_op,
+            grouped_bytes);
+
+    if (!launch_flat_batch_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            executor->d_input,
+            batch_size,
+            executor->stream)) {
+        throw std::runtime_error(
+            "apply_grouped_cuda_batch_impl: flat->grouped regroup failed");
+    }
+
+    zero_device_buffer(executor->d_output, grouped_bytes, executor->stream);
+
+    if (!execute_cutensor_executor_device(*executor)) {
+        throw std::runtime_error(
+            "apply_grouped_cuda_batch_impl: cuTENSOR execution failed");
+    }
+
+    if (!launch_grouped_batch_to_flat_kernel(
+            cuda_grouped_layout,
+            executor->d_output,
+            d_flat_output,
+            batch_size,
+            executor->stream)) {
+        throw std::runtime_error(
+            "apply_grouped_cuda_batch_impl: grouped->flat regroup failed");
+    }
+
+    if (!record_cutensor_executor_completion(*executor) ||
+        !wait_for_cutensor_executor_completion(*executor, consumer_stream)) {
+        throw std::runtime_error(
+            "apply_grouped_cuda_batch_impl: stream dependency handoff failed");
+    }
+}
+
+void apply_grouped_commutator_cuda_batch(
+    const Solver& solver,
+    const std::string& term_label,
+    const std::vector<Complex>& local_op,
+    const std::vector<Index>& target_sites,
+    const GroupedStateLayout& grouped_layout,
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    Index batch_size,
+    CuTensorExecutorCache& executor_cache,
+    const void* d_flat_input,
+    void* d_flat_output,
+    cudaStream_t consumer_stream)
+{
+    const std::size_t grouped_elements =
+        static_cast<std::size_t>(grouped_layout.grouped_size) *
+        static_cast<std::size_t>(batch_size);
+    const std::size_t grouped_bytes = grouped_elements * sizeof(Complex);
+
+    const CuTensorContractionDesc left_desc =
+        make_batched_cutensor_left_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batch_size);
+    const CuTensorContractionDesc right_desc =
+        make_batched_cutensor_right_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batch_size);
+
+    CuTensorExecutor* left_executor =
+        get_or_prepare_executor(
+            executor_cache,
+            "batched_comm_left_apply_" + term_label,
+            left_desc,
+            "batched_comm_left_operator_" + term_label,
+            local_op,
+            grouped_bytes);
+    CuTensorExecutor* right_executor =
+        get_or_prepare_executor(
+            executor_cache,
+            "batched_comm_right_apply_" + term_label,
+            right_desc,
+            "batched_comm_right_operator_" + term_label,
+            local_op,
+            grouped_bytes);
+    CuTensorExecutor* combine_executor =
+        get_or_prepare_executor(
+            executor_cache,
+            "batched_comm_combine_buffer_" + term_label,
+            left_desc,
+            "batched_comm_combine_operator_" + term_label,
+            local_op,
+            grouped_bytes);
+
+    if (!launch_flat_batch_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            left_executor->d_input,
+            batch_size,
+            left_executor->stream) ||
+        !launch_flat_batch_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            right_executor->d_input,
+            batch_size,
+            right_executor->stream)) {
+        throw std::runtime_error(
+            "apply_grouped_commutator_cuda_batch: flat->grouped regroup failed");
+    }
+
+    zero_device_buffer(left_executor->d_output, grouped_bytes, left_executor->stream);
+    zero_device_buffer(right_executor->d_output, grouped_bytes, right_executor->stream);
+    zero_device_buffer(combine_executor->d_output, grouped_bytes, combine_executor->stream);
+
+    if (!execute_cutensor_executor_device(*left_executor) ||
+        !execute_cutensor_executor_device(*right_executor)) {
+        throw std::runtime_error(
+            "apply_grouped_commutator_cuda_batch: cuTENSOR execution failed");
+    }
+
+    if (!wait_for_cutensor_executor_completion(*left_executor, combine_executor->stream) ||
+        !wait_for_cutensor_executor_completion(*right_executor, combine_executor->stream)) {
+        throw std::runtime_error(
+            "apply_grouped_commutator_cuda_batch: stream dependency wait failed");
+    }
+
+    if (!launch_commutator_combine_kernel(
+            left_executor->d_output,
+            right_executor->d_output,
+            combine_executor->d_output,
+            grouped_elements,
+            combine_executor->stream)) {
+        throw std::runtime_error(
+            "apply_grouped_commutator_cuda_batch: combine kernel failed");
+    }
+
+    if (!launch_grouped_batch_to_flat_kernel(
+            cuda_grouped_layout,
+            combine_executor->d_output,
+            d_flat_output,
+            batch_size,
+            combine_executor->stream)) {
+        throw std::runtime_error(
+            "apply_grouped_commutator_cuda_batch: grouped->flat regroup failed");
+    }
+
+    if (!record_cutensor_executor_completion(*combine_executor) ||
+        !wait_for_cutensor_executor_completion(*combine_executor, consumer_stream)) {
+        throw std::runtime_error(
+            "apply_grouped_commutator_cuda_batch: final stream handoff failed");
+    }
+}
+
+void apply_grouped_dissipator_cuda_batch(
+    const Solver& solver,
+    const std::string& term_label,
+    const std::vector<Complex>& local_op,
+    const std::vector<Complex>& local_op_dag,
+    const std::vector<Complex>& local_op_dag_op,
+    const std::vector<Index>& target_sites,
+    const GroupedStateLayout& grouped_layout,
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    Index batch_size,
+    CuTensorExecutorCache& executor_cache,
+    const void* d_flat_input,
+    void* d_flat_output,
+    cudaStream_t consumer_stream)
+{
+    const std::size_t grouped_elements =
+        static_cast<std::size_t>(grouped_layout.grouped_size) *
+        static_cast<std::size_t>(batch_size);
+    const std::size_t grouped_bytes = grouped_elements * sizeof(Complex);
+
+    const CuTensorContractionDesc left_desc =
+        make_batched_cutensor_left_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batch_size);
+    const CuTensorContractionDesc right_desc =
+        make_batched_cutensor_right_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batch_size);
+
+    CuTensorExecutor* jump_left_executor =
+        get_or_prepare_executor(
+            executor_cache,
+            "batched_diss_jump_left_" + term_label,
+            left_desc,
+            "batched_diss_L_" + term_label,
+            local_op,
+            grouped_bytes);
+    CuTensorExecutor* jump_right_executor =
+        get_or_prepare_executor(
+            executor_cache,
+            "batched_diss_jump_right_" + term_label,
+            right_desc,
+            "batched_diss_Ldag_" + term_label,
+            local_op_dag,
+            grouped_bytes);
+    CuTensorExecutor* norm_left_executor =
+        get_or_prepare_executor(
+            executor_cache,
+            "batched_diss_norm_left_" + term_label,
+            left_desc,
+            "batched_diss_LdagL_" + term_label,
+            local_op_dag_op,
+            grouped_bytes);
+    CuTensorExecutor* norm_right_executor =
+        get_or_prepare_executor(
+            executor_cache,
+            "batched_diss_norm_right_" + term_label,
+            right_desc,
+            "batched_diss_LdagL_" + term_label,
+            local_op_dag_op,
+            grouped_bytes);
+
+    if (!launch_flat_batch_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            jump_left_executor->d_input,
+            batch_size,
+            jump_left_executor->stream) ||
+        !launch_flat_batch_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            norm_left_executor->d_input,
+            batch_size,
+            norm_left_executor->stream) ||
+        !launch_flat_batch_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            norm_right_executor->d_input,
+            batch_size,
+            norm_right_executor->stream)) {
+        throw std::runtime_error(
+            "apply_grouped_dissipator_cuda_batch: flat->grouped regroup failed");
+    }
+
+    zero_device_buffer(jump_left_executor->d_output, grouped_bytes, jump_left_executor->stream);
+    zero_device_buffer(jump_right_executor->d_output, grouped_bytes, jump_right_executor->stream);
+    zero_device_buffer(norm_left_executor->d_output, grouped_bytes, norm_left_executor->stream);
+    zero_device_buffer(norm_right_executor->d_output, grouped_bytes, norm_right_executor->stream);
+
+    if (!execute_cutensor_executor_device(*jump_left_executor)) {
+        throw std::runtime_error(
+            "apply_grouped_dissipator_cuda_batch: jump-left execution failed");
+    }
+
+    if (!copy_cutensor_executor_output_to_input(*jump_left_executor, *jump_right_executor) ||
+        !execute_cutensor_executor_device(*jump_right_executor)) {
+        throw std::runtime_error(
+            "apply_grouped_dissipator_cuda_batch: jump-right execution failed");
+    }
+
+    if (!execute_cutensor_executor_device(*norm_left_executor) ||
+        !execute_cutensor_executor_device(*norm_right_executor)) {
+        throw std::runtime_error(
+            "apply_grouped_dissipator_cuda_batch: norm execution failed");
+    }
+
+    if (!wait_for_cutensor_executor_completion(*jump_right_executor, norm_right_executor->stream) ||
+        !wait_for_cutensor_executor_completion(*norm_left_executor, norm_right_executor->stream) ||
+        !wait_for_cutensor_executor_completion(*norm_right_executor, norm_right_executor->stream)) {
+        throw std::runtime_error(
+            "apply_grouped_dissipator_cuda_batch: stream dependency wait failed");
+    }
+
+    if (!launch_dissipator_combine_kernel(
+            jump_right_executor->d_output,
+            norm_left_executor->d_output,
+            norm_right_executor->d_output,
+            norm_right_executor->d_output,
+            grouped_elements,
+            norm_right_executor->stream)) {
+        throw std::runtime_error(
+            "apply_grouped_dissipator_cuda_batch: combine kernel failed");
+    }
+
+    if (!launch_grouped_batch_to_flat_kernel(
+            cuda_grouped_layout,
+            norm_right_executor->d_output,
+            d_flat_output,
+            batch_size,
+            norm_right_executor->stream)) {
+        throw std::runtime_error(
+            "apply_grouped_dissipator_cuda_batch: grouped->flat regroup failed");
+    }
+
+    if (!record_cutensor_executor_completion(*norm_right_executor) ||
+        !wait_for_cutensor_executor_completion(*norm_right_executor, consumer_stream)) {
+        throw std::runtime_error(
+            "apply_grouped_dissipator_cuda_batch: final stream handoff failed");
+    }
 }
 
 } // namespace
@@ -332,102 +880,188 @@ BatchEvolutionResult evolve_density_batch_cuda_ts(
     result.final_states.resize(initial_states.size());
 
     const Index density_dim = solver.layout.density_dim;
+    const std::vector<CachedDissipatorAuxiliaries> cached_static_dissipators =
+        build_cached_static_dissipators(solver);
+    std::vector<CachedGroupedLayoutEntry> cached_grouped_layouts =
+        build_cached_grouped_layouts(solver);
 
-    CudaBatchExecutionContext ctx{};
-    PetscCallAbort(PETSC_COMM_SELF, create_cuda_batch_execution_context(solver, ctx));
-
-    for (Index batch_begin = 0; batch_begin < initial_states.size(); batch_begin += config.batch_size) {
-        const Index batch_end =
-            std::min<Index>(batch_begin + config.batch_size, initial_states.size());
-
-        for (Index state_idx = batch_begin; state_idx < batch_end; ++state_idx) {
-            if (initial_states[state_idx].size() != density_dim) {
-                PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
-                throw std::invalid_argument(
-                    "evolve_density_batch_cuda_ts: initial state size mismatch");
-            }
-
-            PetscScalar* x_ptr = nullptr;
-#if defined(PETSC_HAVE_CUDA)
-            PetscCallAbort(PETSC_COMM_SELF, VecCUDAGetArrayWrite(ctx.x, &x_ptr));
-#else
-            PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
-#endif
-#if defined(PETSC_HAVE_CUDA)
-            if (cudaMemcpy(
-                    x_ptr,
-                    initial_states[state_idx].data(),
-                    density_dim * sizeof(Complex),
-                    cudaMemcpyHostToDevice) != cudaSuccess) {
-                PetscCallAbort(PETSC_COMM_SELF, VecCUDARestoreArrayWrite(ctx.x, &x_ptr));
-                PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
-                throw std::runtime_error(
-                    "evolve_density_batch_cuda_ts: failed to upload state to device");
-            }
-#else
-            for (Index i = 0; i < density_dim; ++i) {
-                x_ptr[i] = initial_states[state_idx][i];
-            }
-#endif
-#if defined(PETSC_HAVE_CUDA)
-            PetscCallAbort(PETSC_COMM_SELF, VecCUDARestoreArrayWrite(ctx.x, &x_ptr));
-#else
-            PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
-#endif
-
-            if (ctx.ts != nullptr) {
-                PetscCallAbort(PETSC_COMM_SELF, TSDestroy(&ctx.ts));
-                ctx.ts = nullptr;
-            }
-
-            PetscCallAbort(PETSC_COMM_SELF, TSCreate(PETSC_COMM_SELF, &ctx.ts));
-            PetscCallAbort(PETSC_COMM_SELF, TSSetType(ctx.ts, TSEULER));
-            PetscCallAbort(
-                PETSC_COMM_SELF,
-                TSSetRHSFunction(
-                    ctx.ts,
-                    nullptr,
-                    ts_rhs_function_cuda_full_model_liouvillian,
-                    &ctx.rhs_ctx));
-            PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ctx.ts, config.t0));
-            PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ctx.ts, config.dt));
-            PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ctx.ts, static_cast<PetscInt>(config.num_steps)));
-            PetscCallAbort(PETSC_COMM_SELF, TSSetExactFinalTime(ctx.ts, TS_EXACTFINALTIME_MATCHSTEP));
-            PetscCallAbort(PETSC_COMM_SELF, TSSetFromOptions(ctx.ts));
-            PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
-
-            const PetscScalar* x_read_ptr = nullptr;
-#if defined(PETSC_HAVE_CUDA)
-            PetscCallAbort(PETSC_COMM_SELF, VecCUDAGetArrayRead(ctx.x, &x_read_ptr));
-#else
-            PetscCallAbort(PETSC_COMM_SELF, VecGetArrayRead(ctx.x, &x_read_ptr));
-#endif
-            result.final_states[state_idx].resize(density_dim);
-#if defined(PETSC_HAVE_CUDA)
-            if (cudaMemcpy(
-                    result.final_states[state_idx].data(),
-                    x_read_ptr,
-                    density_dim * sizeof(Complex),
-                    cudaMemcpyDeviceToHost) != cudaSuccess) {
-                PetscCallAbort(PETSC_COMM_SELF, VecCUDARestoreArrayRead(ctx.x, &x_read_ptr));
-                PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
-                throw std::runtime_error(
-                    "evolve_density_batch_cuda_ts: failed to download state from device");
-            }
-#else
-            for (Index i = 0; i < density_dim; ++i) {
-                result.final_states[state_idx][i] = x_read_ptr[i];
-            }
-#endif
-#if defined(PETSC_HAVE_CUDA)
-            PetscCallAbort(PETSC_COMM_SELF, VecCUDARestoreArrayRead(ctx.x, &x_read_ptr));
-#else
-            PetscCallAbort(PETSC_COMM_SELF, VecRestoreArrayRead(ctx.x, &x_read_ptr));
-#endif
-        }
+    cudaStream_t stream = nullptr;
+    if (cudaStreamCreate(&stream) != cudaSuccess) {
+        destroy_cached_grouped_layouts(cached_grouped_layouts);
+        throw std::runtime_error(
+            "evolve_density_batch_cuda_ts: stream creation failed");
     }
 
-    PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
+    CuTensorExecutorCache executor_cache{};
+
+    try {
+        for (Index batch_begin = 0; batch_begin < initial_states.size(); batch_begin += config.batch_size) {
+            const Index batch_end =
+                std::min<Index>(batch_begin + config.batch_size, initial_states.size());
+            const Index chunk_size = batch_end - batch_begin;
+
+            std::vector<std::vector<Complex>> state_chunk(
+                initial_states.begin() + batch_begin,
+                initial_states.begin() + batch_end);
+
+            BatchedDeviceStateBuffers buffers{};
+            allocate_batched_device_state_buffers(density_dim, chunk_size, buffers);
+
+            try {
+                upload_flat_state_batch(state_chunk, density_dim, buffers.d_state, stream);
+                if (cudaStreamSynchronize(stream) != cudaSuccess) {
+                    throw std::runtime_error(
+                        "evolve_density_batch_cuda_ts: upload synchronize failed");
+                }
+
+                const Index total_size = density_dim * chunk_size;
+                for (Index step = 0; step < config.num_steps; ++step) {
+                    const double t =
+                        config.t0 + static_cast<double>(step) * config.dt;
+
+                    zero_device_buffer(buffers.d_accum, buffers.flat_bytes, stream);
+
+                    for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
+                        const CachedGroupedLayoutEntry* layout_entry =
+                            find_cached_grouped_layout(cached_grouped_layouts, h_term.sites);
+
+                        if (layout_entry == nullptr) {
+                            throw std::runtime_error(
+                                "evolve_density_batch_cuda_ts: missing cached grouped Hamiltonian layout");
+                        }
+
+                        apply_grouped_commutator_cuda_batch(
+                            solver,
+                            h_term.name,
+                            h_term.matrix,
+                            h_term.sites,
+                            layout_entry->grouped_layout,
+                            layout_entry->cuda_grouped_layout,
+                            chunk_size,
+                            executor_cache,
+                            buffers.d_state,
+                            buffers.d_term,
+                            stream);
+
+                        add_device_buffers(
+                            buffers.d_accum,
+                            buffers.d_term,
+                            buffers.d_accum,
+                            total_size,
+                            stream);
+                    }
+
+                    for (const CachedDissipatorAuxiliaries& d_aux : cached_static_dissipators) {
+                        const CachedGroupedLayoutEntry* layout_entry =
+                            find_cached_grouped_layout(cached_grouped_layouts, d_aux.sites);
+
+                        if (layout_entry == nullptr) {
+                            throw std::runtime_error(
+                                "evolve_density_batch_cuda_ts: missing cached grouped dissipator layout");
+                        }
+
+                        apply_grouped_dissipator_cuda_batch(
+                            solver,
+                            d_aux.name,
+                            d_aux.l_op,
+                            d_aux.l_dag,
+                            d_aux.l_dag_l,
+                            d_aux.sites,
+                            layout_entry->grouped_layout,
+                            layout_entry->cuda_grouped_layout,
+                            chunk_size,
+                            executor_cache,
+                            buffers.d_state,
+                            buffers.d_term,
+                            stream);
+
+                        add_device_buffers(
+                            buffers.d_accum,
+                            buffers.d_term,
+                            buffers.d_accum,
+                            total_size,
+                            stream);
+                    }
+
+                    for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
+                        const CachedGroupedLayoutEntry* layout_entry =
+                            find_cached_grouped_layout(cached_grouped_layouts, td_term.sites);
+
+                        if (layout_entry == nullptr) {
+                            throw std::runtime_error(
+                                "evolve_density_batch_cuda_ts: missing cached grouped time-dependent layout");
+                        }
+
+                        const double coeff =
+                            evaluate_time_dependent_coefficient(td_term, t);
+
+                        apply_grouped_commutator_cuda_batch(
+                            solver,
+                            td_term.name,
+                            td_term.matrix,
+                            td_term.sites,
+                            layout_entry->grouped_layout,
+                            layout_entry->cuda_grouped_layout,
+                            chunk_size,
+                            executor_cache,
+                            buffers.d_state,
+                            buffers.d_term,
+                            stream);
+
+                        scale_device_buffer(
+                            buffers.d_term,
+                            coeff,
+                            buffers.d_scaled_term,
+                            total_size,
+                            stream);
+
+                        add_device_buffers(
+                            buffers.d_accum,
+                            buffers.d_scaled_term,
+                            buffers.d_accum,
+                            total_size,
+                            stream);
+                    }
+
+                    scale_device_buffer(
+                        buffers.d_accum,
+                        config.dt,
+                        buffers.d_scaled_term,
+                        total_size,
+                        stream);
+                    add_device_buffers(
+                        buffers.d_state,
+                        buffers.d_scaled_term,
+                        buffers.d_state,
+                        total_size,
+                        stream);
+                }
+
+                const std::vector<std::vector<Complex>> final_states =
+                    download_flat_state_batch(density_dim, chunk_size, buffers.d_state, stream);
+
+                for (Index state_idx = 0; state_idx < chunk_size; ++state_idx) {
+                    result.final_states[batch_begin + state_idx] = final_states[state_idx];
+                }
+            } catch (...) {
+                free_batched_device_state_buffers(buffers);
+                throw;
+            }
+
+            free_batched_device_state_buffers(buffers);
+        }
+    } catch (...) {
+        (void)destroy_cutensor_executor_cache(executor_cache);
+        destroy_cached_grouped_layouts(cached_grouped_layouts);
+        if (stream != nullptr) {
+            cudaStreamDestroy(stream);
+        }
+        throw;
+    }
+
+    (void)destroy_cutensor_executor_cache(executor_cache);
+    destroy_cached_grouped_layouts(cached_grouped_layouts);
+    cudaStreamDestroy(stream);
     return result;
 }
 
