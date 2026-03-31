@@ -9,6 +9,15 @@ namespace culindblad {
 
 namespace {
 
+__device__ __forceinline__ std::size_t batch_major_offset(
+    Index batch,
+    Index per_batch_size,
+    Index local_idx)
+{
+    return static_cast<std::size_t>(batch) * static_cast<std::size_t>(per_batch_size) +
+           static_cast<std::size_t>(local_idx);
+}
+
 __global__ void flat_to_grouped_kernel(
     const Complex* flat_input,
     Complex* grouped_output,
@@ -65,9 +74,8 @@ __global__ void flat_batch_to_grouped_kernel(
     const Index grouped_idx =
         flat_to_grouped[local_idx];
 
-    grouped_output[
-        static_cast<std::size_t>(batch) * static_cast<std::size_t>(grouped_size) +
-        static_cast<std::size_t>(grouped_idx)] = flat_input[idx];
+    grouped_output[batch_major_offset(batch, grouped_size, grouped_idx)] =
+        flat_input[batch_major_offset(batch, flat_size, local_idx)];
 }
 
 __global__ void grouped_batch_to_flat_kernel(
@@ -94,9 +102,8 @@ __global__ void grouped_batch_to_flat_kernel(
     const Index flat_idx =
         grouped_to_flat[local_idx];
 
-    flat_output[
-        static_cast<std::size_t>(batch) * static_cast<std::size_t>(flat_size) +
-        static_cast<std::size_t>(flat_idx)] = grouped_input[idx];
+    flat_output[batch_major_offset(batch, flat_size, flat_idx)] =
+        grouped_input[batch_major_offset(batch, grouped_size, local_idx)];
 }
 
 bool cuda_malloc_indices(Index** ptr, std::size_t count)

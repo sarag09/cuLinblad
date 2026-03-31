@@ -9,6 +9,35 @@
 
 namespace culindblad {
 
+namespace {
+
+std::vector<int64_t> make_row_major_strides(
+    const std::vector<int64_t>& extents)
+{
+    std::vector<int64_t> strides(extents.size(), 1);
+
+    if (extents.empty()) {
+        return strides;
+    }
+
+    strides.back() = 1;
+    for (Index i = extents.size() - 1; i > 0; --i) {
+        strides[i - 1] = strides[i] * extents[i];
+    }
+
+    return strides;
+}
+
+void set_default_row_major_strides(
+    CuTensorContractionDesc& desc)
+{
+    desc.operator_strides = make_row_major_strides(desc.operator_extents);
+    desc.input_strides = make_row_major_strides(desc.input_extents);
+    desc.output_strides = make_row_major_strides(desc.output_extents);
+}
+
+} // namespace
+
 CuTensorContractionDesc make_cutensor_left_contraction_desc(
     const std::vector<Index>& target_sites,
     const std::vector<Index>& local_dims)
@@ -41,6 +70,8 @@ CuTensorContractionDesc make_cutensor_left_contraction_desc(
         static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
     };
 
+    set_default_row_major_strides(desc);
+
     return desc;
 }
 
@@ -62,6 +93,7 @@ CuTensorContractionDesc make_batched_cutensor_left_contraction_desc(
     desc.output_extents.insert(
         desc.output_extents.begin(),
         static_cast<int64_t>(batch_size));
+    set_default_row_major_strides(desc);
 
     return desc;
 }
@@ -98,6 +130,8 @@ CuTensorContractionDesc make_cutensor_right_contraction_desc(
         static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
     };
 
+    set_default_row_major_strides(desc);
+
     return desc;
 }
 
@@ -119,6 +153,7 @@ CuTensorContractionDesc make_batched_cutensor_right_contraction_desc(
     desc.output_extents.insert(
         desc.output_extents.begin(),
         static_cast<int64_t>(batch_size));
+    set_default_row_major_strides(desc);
 
     return desc;
 }

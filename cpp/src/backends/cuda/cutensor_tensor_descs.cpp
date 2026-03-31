@@ -48,11 +48,17 @@ bool create_cutensor_tensor_descs(
     constexpr cutensorDataType_t data_type = CUTENSOR_C_64F;
 
     const std::vector<int64_t> op_strides =
-        make_row_major_strides(desc.operator_extents);
+        desc.operator_strides.empty()
+            ? make_row_major_strides(desc.operator_extents)
+            : desc.operator_strides;
     const std::vector<int64_t> input_strides =
-        make_row_major_strides(desc.input_extents);
+        desc.input_strides.empty()
+            ? make_row_major_strides(desc.input_extents)
+            : desc.input_strides;
     const std::vector<int64_t> output_strides =
-        make_row_major_strides(desc.output_extents);
+        desc.output_strides.empty()
+            ? make_row_major_strides(desc.output_extents)
+            : desc.output_strides;
 
     const cutensorStatus_t op_status = cutensorCreateTensorDescriptor(
         tensor_descs.handle,

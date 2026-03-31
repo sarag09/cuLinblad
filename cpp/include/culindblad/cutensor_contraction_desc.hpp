@@ -17,8 +17,11 @@ struct CuTensorContractionDesc {
     std::vector<int32_t> output_modes;
 
     std::vector<int64_t> operator_extents;
+    std::vector<int64_t> operator_strides;
     std::vector<int64_t> input_extents;
+    std::vector<int64_t> input_strides;
     std::vector<int64_t> output_extents;
+    std::vector<int64_t> output_strides;
 
     std::string debug_name;
 };

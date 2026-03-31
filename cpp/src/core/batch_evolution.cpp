@@ -453,117 +453,106 @@ PetscErrorCode create_batch_ts_execution_context(
             try {
                 zero_device_buffer(reinterpret_cast<void*>(d_f), total_bytes, ctx->stream);
 
-                for (Index batch_idx = 0; batch_idx < ctx->batch_size; ++batch_idx) {
-                    const std::size_t offset =
-                        static_cast<std::size_t>(batch_idx) *
-                        static_cast<std::size_t>(density_dim);
-                    const void* d_x_state =
-                        reinterpret_cast<const Complex*>(d_x) + offset;
-                    void* d_f_state =
-                        reinterpret_cast<Complex*>(d_f) + offset;
-                    void* d_term_state =
-                        reinterpret_cast<Complex*>(d_term) + offset;
-                    void* d_scaled_state =
-                        reinterpret_cast<Complex*>(d_scaled) + offset;
+                for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
+                    const CachedGroupedLayoutEntry* layout_entry =
+                        find_cached_grouped_layout(ctx->cached_grouped_layouts, h_term.sites);
 
-                    for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
-                        const CachedGroupedLayoutEntry* layout_entry =
-                            find_cached_grouped_layout(ctx->cached_grouped_layouts, h_term.sites);
-
-                        if (layout_entry == nullptr) {
-                            throw std::runtime_error(
-                                "batch TS RHS: missing cached grouped Hamiltonian layout");
-                        }
-
-                        apply_grouped_commutator_cuda_single(
-                            solver,
-                            h_term.name,
-                            h_term.matrix,
-                            h_term.sites,
-                            layout_entry->grouped_layout,
-                            layout_entry->cuda_grouped_layout,
-                            ctx->executor_cache,
-                            d_x_state,
-                            d_term_state,
-                            ctx->stream);
-
-                        add_device_buffers(
-                            d_f_state,
-                            d_term_state,
-                            d_f_state,
-                            density_dim,
-                            ctx->stream);
+                    if (layout_entry == nullptr) {
+                        throw std::runtime_error(
+                            "batch TS RHS: missing cached grouped Hamiltonian layout");
                     }
 
-                    for (const CachedDissipatorAuxiliaries& d_aux : ctx->cached_static_dissipators) {
-                        const CachedGroupedLayoutEntry* layout_entry =
-                            find_cached_grouped_layout(ctx->cached_grouped_layouts, d_aux.sites);
+                    apply_grouped_commutator_cuda_batch(
+                        solver,
+                        h_term.name,
+                        h_term.matrix,
+                        h_term.sites,
+                        layout_entry->grouped_layout,
+                        layout_entry->cuda_grouped_layout,
+                        ctx->batch_size,
+                        ctx->executor_cache,
+                        d_x,
+                        d_term,
+                        ctx->stream);
 
-                        if (layout_entry == nullptr) {
-                            throw std::runtime_error(
-                                "batch TS RHS: missing cached grouped dissipator layout");
-                        }
+                    add_device_buffers(
+                        d_f,
+                        d_term,
+                        d_f,
+                        total_size,
+                        ctx->stream);
+                }
 
-                        apply_grouped_dissipator_cuda_single(
-                            solver,
-                            d_aux.name,
-                            d_aux.l_op,
-                            d_aux.l_dag,
-                            d_aux.l_dag_l,
-                            d_aux.sites,
-                            layout_entry->grouped_layout,
-                            layout_entry->cuda_grouped_layout,
-                            ctx->executor_cache,
-                            d_x_state,
-                            d_term_state,
-                            ctx->stream);
+                for (const CachedDissipatorAuxiliaries& d_aux : ctx->cached_static_dissipators) {
+                    const CachedGroupedLayoutEntry* layout_entry =
+                        find_cached_grouped_layout(ctx->cached_grouped_layouts, d_aux.sites);
 
-                        add_device_buffers(
-                            d_f_state,
-                            d_term_state,
-                            d_f_state,
-                            density_dim,
-                            ctx->stream);
+                    if (layout_entry == nullptr) {
+                        throw std::runtime_error(
+                            "batch TS RHS: missing cached grouped dissipator layout");
                     }
 
-                    for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
-                        const CachedGroupedLayoutEntry* layout_entry =
-                            find_cached_grouped_layout(ctx->cached_grouped_layouts, td_term.sites);
+                    apply_grouped_dissipator_cuda_batch(
+                        solver,
+                        d_aux.name,
+                        d_aux.l_op,
+                        d_aux.l_dag,
+                        d_aux.l_dag_l,
+                        d_aux.sites,
+                        layout_entry->grouped_layout,
+                        layout_entry->cuda_grouped_layout,
+                        ctx->batch_size,
+                        ctx->executor_cache,
+                        d_x,
+                        d_term,
+                        ctx->stream);
 
-                        if (layout_entry == nullptr) {
-                            throw std::runtime_error(
-                                "batch TS RHS: missing cached grouped time-dependent layout");
-                        }
+                    add_device_buffers(
+                        d_f,
+                        d_term,
+                        d_f,
+                        total_size,
+                        ctx->stream);
+                }
 
-                        const double coeff =
-                            evaluate_time_dependent_coefficient(td_term, static_cast<double>(t));
+                for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
+                    const CachedGroupedLayoutEntry* layout_entry =
+                        find_cached_grouped_layout(ctx->cached_grouped_layouts, td_term.sites);
 
-                        apply_grouped_commutator_cuda_single(
-                            solver,
-                            td_term.name,
-                            td_term.matrix,
-                            td_term.sites,
-                            layout_entry->grouped_layout,
-                            layout_entry->cuda_grouped_layout,
-                            ctx->executor_cache,
-                            d_x_state,
-                            d_term_state,
-                            ctx->stream);
-
-                        scale_device_buffer(
-                            d_term_state,
-                            coeff,
-                            d_scaled_state,
-                            density_dim,
-                            ctx->stream);
-
-                        add_device_buffers(
-                            d_f_state,
-                            d_scaled_state,
-                            d_f_state,
-                            density_dim,
-                            ctx->stream);
+                    if (layout_entry == nullptr) {
+                        throw std::runtime_error(
+                            "batch TS RHS: missing cached grouped time-dependent layout");
                     }
+
+                    const double coeff =
+                        evaluate_time_dependent_coefficient(td_term, static_cast<double>(t));
+
+                    apply_grouped_commutator_cuda_batch(
+                        solver,
+                        td_term.name,
+                        td_term.matrix,
+                        td_term.sites,
+                        layout_entry->grouped_layout,
+                        layout_entry->cuda_grouped_layout,
+                        ctx->batch_size,
+                        ctx->executor_cache,
+                        d_x,
+                        d_term,
+                        ctx->stream);
+
+                    scale_device_buffer(
+                        d_term,
+                        coeff,
+                        d_scaled,
+                        total_size,
+                        ctx->stream);
+
+                    add_device_buffers(
+                        d_f,
+                        d_scaled,
+                        d_f,
+                        total_size,
+                        ctx->stream);
                 }
 
                 if (cudaStreamSynchronize(ctx->stream) != cudaSuccess) {
@@ -1553,19 +1542,7 @@ BatchEvolutionResult evolve_density_batch_cuda_ts(
 
                 const double total_time =
                     config.dt * static_cast<double>(config.num_steps);
-                const Index effective_num_steps =
-                    density_dim <= 16
-                        ? std::max<Index>(config.num_steps, static_cast<Index>(1000))
-                        : config.num_steps;
-                const double dt_initial =
-                    total_time / static_cast<double>(effective_num_steps);
-                TSAdapt adapt = nullptr;
-                PetscCallAbort(PETSC_COMM_SELF, TSGetAdapt(ctx.ts, &adapt));
-                PetscCallAbort(PETSC_COMM_SELF, TSAdaptSetType(adapt, TSADAPTNONE));
-                PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ctx.ts, effective_num_steps));
-                PetscCallAbort(PETSC_COMM_SELF, TSSetExactFinalTime(
-                    ctx.ts,
-                    TS_EXACTFINALTIME_MATCHSTEP));
+                const double dt_initial = total_time / 1000.0;
                 PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ctx.ts, config.t0));
                 PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ctx.ts, 0));
                 PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ctx.ts, dt_initial));
