@@ -88,6 +88,7 @@ PetscErrorCode restore_petsc_vec_device_write_ptr(
 
 PetscErrorCode get_or_prepare_executor(
     CuTensorExecutorCache& executor_cache,
+    CuTensorExecutorRole role,
     const CuTensorContractionDesc& contraction_desc,
     const std::vector<Complex>& local_op,
     std::size_t grouped_bytes,
@@ -96,6 +97,7 @@ PetscErrorCode get_or_prepare_executor(
     const bool cache_ok =
         get_or_create_cutensor_executor(
             executor_cache,
+            role,
             contraction_desc,
             local_op.size() * sizeof(Complex),
             grouped_bytes,
@@ -158,6 +160,7 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
     const GroupedStateLayout& grouped_layout,
     const CudaGroupedStateLayout& cuda_grouped_layout,
     CuTensorExecutorCache& executor_cache,
+    CuTensorExecutorRole role,
     const CuTensorContractionDesc& contraction_desc,
     Vec x,
     Vec y,
@@ -178,6 +181,7 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
     CuTensorExecutor* executor = nullptr;
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
+        role,
         contraction_desc,
         local_op,
         grouped_bytes,
@@ -275,6 +279,7 @@ PetscErrorCode apply_grouped_left_cuda_vec(
         grouped_layout,
         cuda_grouped_layout,
         executor_cache,
+        CuTensorExecutorRole::GroupedLeftApply,
         left_desc,
         x,
         y,
@@ -303,6 +308,7 @@ PetscErrorCode apply_grouped_right_cuda_vec(
         grouped_layout,
         cuda_grouped_layout,
         executor_cache,
+        CuTensorExecutorRole::GroupedRightApply,
         right_desc,
         x,
         y,
@@ -375,6 +381,7 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
+        CuTensorExecutorRole::CommutatorLeft,
         left_desc,
         local_op,
         grouped_bytes,
@@ -387,6 +394,7 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
+        CuTensorExecutorRole::CommutatorRight,
         right_desc,
         local_op,
         grouped_bytes,
@@ -399,6 +407,7 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
+        CuTensorExecutorRole::CommutatorCombine,
         left_desc,
         local_op,
         grouped_bytes,
@@ -578,6 +587,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
+        CuTensorExecutorRole::DissipatorJumpLeft,
         left_desc,
         local_op,
         grouped_bytes,
@@ -590,6 +600,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
+        CuTensorExecutorRole::DissipatorJumpRight,
         right_desc,
         local_op_dag,
         grouped_bytes,
@@ -602,6 +613,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
+        CuTensorExecutorRole::DissipatorNormLeft,
         left_desc,
         local_op_dag_op,
         grouped_bytes,
@@ -614,6 +626,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
+        CuTensorExecutorRole::DissipatorNormRight,
         right_desc,
         local_op_dag_op,
         grouped_bytes,

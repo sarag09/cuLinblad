@@ -40,6 +40,7 @@ std::uint64_t fnv1a_append_vector(
 }
 
 std::uint64_t make_executor_structural_key(
+    CuTensorExecutorRole role,
     const CuTensorContractionDesc& desc,
     size_t op_bytes,
     size_t input_bytes,
@@ -47,6 +48,7 @@ std::uint64_t make_executor_structural_key(
 {
     std::uint64_t hash = kFnvOffsetBasis;
 
+    hash = fnv1a_append_scalar(hash, static_cast<std::uint64_t>(role));
     hash = fnv1a_append_scalar(hash, op_bytes);
     hash = fnv1a_append_scalar(hash, input_bytes);
     hash = fnv1a_append_scalar(hash, output_bytes);
@@ -70,6 +72,7 @@ std::uint64_t make_executor_structural_key(
 
 bool get_or_create_cutensor_executor(
     CuTensorExecutorCache& cache,
+    CuTensorExecutorRole role,
     const CuTensorContractionDesc& desc,
     size_t op_bytes,
     size_t input_bytes,
@@ -78,6 +81,7 @@ bool get_or_create_cutensor_executor(
 {
     const std::uint64_t key =
         make_executor_structural_key(
+            role,
             desc,
             op_bytes,
             input_bytes,

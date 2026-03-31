@@ -8,6 +8,18 @@
 
 namespace culindblad {
 
+enum class CuTensorExecutorRole : std::uint64_t {
+    GroupedLeftApply = 1,
+    GroupedRightApply = 2,
+    CommutatorLeft = 3,
+    CommutatorRight = 4,
+    CommutatorCombine = 5,
+    DissipatorJumpLeft = 6,
+    DissipatorJumpRight = 7,
+    DissipatorNormLeft = 8,
+    DissipatorNormRight = 9
+};
+
 struct CuTensorExecutorCacheEntry {
     std::unique_ptr<CuTensorExecutor> executor;
 };
@@ -18,6 +30,7 @@ struct CuTensorExecutorCache {
 
 bool get_or_create_cutensor_executor(
     CuTensorExecutorCache& cache,
+    CuTensorExecutorRole role,
     const CuTensorContractionDesc& desc,
     size_t op_bytes,
     size_t input_bytes,
