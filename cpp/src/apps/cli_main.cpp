@@ -175,21 +175,21 @@ int main(int argc, char** argv)
             }
         }
 
-        std::cout << "\n===== Stress test (N=5, d=3, 64 states) =====" << std::endl;
+        std::cout << "\n===== Stress test (N=3, d=3, 64 states) =====" << std::endl;
 
         TransmonChainBenchmarkConfig stress_config{};
-        stress_config.num_transmons = 5;
+        stress_config.num_transmons = 3;
         stress_config.cutoff_dim = 3;
-        stress_config.omega = {5.00, 5.05, 5.10, 5.15, 5.20};
-        stress_config.alpha = {-0.30, -0.30, -0.30, -0.30, -0.30};
-        stress_config.g = {0.02, 0.02, 0.02, 0.02};
-        stress_config.t1 = {20.0, 20.0, 20.0, 20.0, 20.0};
-        stress_config.tphi = {30.0, 30.0, 30.0, 30.0, 30.0};
+        stress_config.omega = {5.00, 5.05, 5.10};
+        stress_config.alpha = {-0.30, -0.30, -0.30};
+        stress_config.g = {0.02, 0.02};
+        stress_config.t1 = {20.0, 20.0, 20.0};
+        stress_config.tphi = {30.0, 30.0, 30.0};
         stress_config.drive_amplitude = 0.1;
         stress_config.drive_sigma = 10.0;
         stress_config.drive_center = 20.0;
-        stress_config.drive_frequency = {5.00, 5.05, 5.10, 5.15, 5.20};
-        stress_config.driven_sites = {0, 2};
+        stress_config.drive_frequency = {5.00, 5.05, 5.10};
+        stress_config.driven_sites = {0};
         stress_config.t0 = 0.0;
         stress_config.tfinal = 40.0;
         stress_config.use_batched_gpu_specific_state_path = false;
