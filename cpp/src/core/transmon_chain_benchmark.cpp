@@ -125,11 +125,32 @@ PetscErrorCode destroy_cpu_benchmark_execution_context(
     return 0;
 }
 
+void configure_fixed_step_ts(
+    TS ts,
+    double t0,
+    double dt,
+    Index num_steps)
+{
+    TSAdapt adapt = nullptr;
+
+    PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ts, t0));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ts, 0));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ts, dt));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ts, static_cast<PetscInt>(num_steps)));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxTime(
+        ts,
+        t0 + dt * static_cast<double>(num_steps)));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetExactFinalTime(
+        ts,
+        TS_EXACTFINALTIME_MATCHSTEP));
+    PetscCallAbort(PETSC_COMM_SELF, TSGetAdapt(ts, &adapt));
+    PetscCallAbort(PETSC_COMM_SELF, TSAdaptSetType(adapt, TSADAPTNONE));
+}
+
 std::vector<Complex> evolve_single_state_cpu_ts(
     const Solver& solver,
     const std::vector<Complex>& initial_state,
-    double t0,
-    double tfinal,
+    const BatchEvolutionConfig& config,
     CpuBenchmarkExecutionContext& ctx)
 {
     if (!ctx.initialized) {
@@ -146,12 +167,11 @@ std::vector<Complex> evolve_single_state_cpu_ts(
     }
     PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
 
-    const double dt_initial = (tfinal - t0) / 1000.0;
-
-    PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ctx.ts, t0));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ctx.ts, 0));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ctx.ts, dt_initial));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxTime(ctx.ts, tfinal));
+    configure_fixed_step_ts(
+        ctx.ts,
+        config.t0,
+        config.dt,
+        config.num_steps);
     PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
 
     PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
@@ -374,6 +394,12 @@ bool matrix_matches_within_tolerance(
     return compute_max_abs_diff(actual, expected) <= tolerance;
 }
 
+bool first_element_in_expected_regime(
+    const std::vector<Complex>& rho)
+{
+    return !rho.empty() && rho.front().real() >= 0.61;
+}
+
 TransmonChainBenchmarkConfig make_milestone0_validation_config()
 {
     TransmonChainBenchmarkConfig config{};
@@ -396,28 +422,6 @@ TransmonChainBenchmarkConfig make_milestone0_validation_config()
     config.state_selection.evolve_all_states = false;
     config.state_selection.selected_state_indices = {0, 1};
     return config;
-}
-
-void configure_fixed_step_ts(
-    TS ts,
-    double t0,
-    double dt,
-    Index num_steps)
-{
-    TSAdapt adapt = nullptr;
-
-    PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ts, t0));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ts, 0));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ts, dt));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ts, static_cast<PetscInt>(num_steps)));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxTime(
-        ts,
-        t0 + dt * static_cast<double>(num_steps)));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetExactFinalTime(
-        ts,
-        TS_EXACTFINALTIME_MATCHSTEP));
-    PetscCallAbort(PETSC_COMM_SELF, TSGetAdapt(ts, &adapt));
-    PetscCallAbort(PETSC_COMM_SELF, TSAdaptSetType(adapt, TSADAPTNONE));
 }
 
 std::vector<Complex> evolve_single_state_cuda_ts(
@@ -715,6 +719,19 @@ TransmonChainBenchmarkTiming run_transmon_chain_cpu_benchmark(
     const std::vector<std::vector<Complex>> initial_states =
         make_selected_basis_density_states(solver, selected_indices);
 
+    if (config.batched_num_steps == 0) {
+        throw std::invalid_argument(
+            "run_transmon_chain_cpu_benchmark: batched_num_steps must be > 0");
+    }
+
+    const BatchEvolutionConfig batch_config{
+        config.t0,
+        (config.tfinal - config.t0) /
+            static_cast<double>(config.batched_num_steps),
+        config.batched_num_steps,
+        1
+    };
+
     CpuBenchmarkExecutionContext ctx{};
     PetscCallAbort(PETSC_COMM_SELF, create_cpu_benchmark_execution_context(solver, ctx));
 
@@ -729,8 +746,7 @@ TransmonChainBenchmarkTiming run_transmon_chain_cpu_benchmark(
             evolve_single_state_cpu_ts(
                 solver,
                 initial_states[i],
-                config.t0,
-                config.tfinal,
+                batch_config,
                 ctx);
     }
 
@@ -857,6 +873,10 @@ Milestone0ValidationReport run_milestone0_n2_d2_gpu_validation()
         compute_max_abs_diff(
             report.batched_gpu_batch2_state0,
             report.expected_state0);
+    report.max_diff_single_vs_batch1 =
+        compute_max_abs_diff(
+            report.single_state_gpu_state0,
+            report.batched_gpu_batch1_state0);
     report.max_diff_single_vs_batch2 =
         compute_max_abs_diff(
             report.single_state_gpu_state0,
@@ -881,6 +901,11 @@ Milestone0ValidationReport run_milestone0_n2_d2_gpu_validation()
             report.batched_gpu_batch2_state0,
             report.expected_state0,
             kMatrixTolerance);
+    report.single_matches_batch1 =
+        matrix_matches_within_tolerance(
+            report.single_state_gpu_state0,
+            report.batched_gpu_batch1_state0,
+            kMatrixTolerance);
     report.single_matches_batch2 =
         matrix_matches_within_tolerance(
             report.single_state_gpu_state0,
@@ -892,7 +917,26 @@ Milestone0ValidationReport run_milestone0_n2_d2_gpu_validation()
             report.batched_gpu_batch2_state0,
             kMatrixTolerance);
 
+    report.single_state0_00_real = report.single_state_gpu_state0.front().real();
+    report.batch1_state0_00_real = report.batched_gpu_batch1_state0.front().real();
+    report.batch2_state0_00_real = report.batched_gpu_batch2_state0.front().real();
+    report.single_state0_regime_ok =
+        first_element_in_expected_regime(report.single_state_gpu_state0);
+    report.batch1_state0_regime_ok =
+        first_element_in_expected_regime(report.batched_gpu_batch1_state0);
+    report.batch2_state0_regime_ok =
+        first_element_in_expected_regime(report.batched_gpu_batch2_state0);
+    report.triple_invariance_passed =
+        report.single_matches_batch1 &&
+        report.single_matches_batch2 &&
+        report.batch1_matches_batch2;
+    report.hard_failure_first_element =
+        !report.single_state0_regime_ok ||
+        !report.batch1_state0_regime_ok ||
+        !report.batch2_state0_regime_ok;
+
     report.solver_semantics_mismatch_present =
+        !report.single_matches_batch1 ||
         !report.single_matches_batch2;
     report.batched_path_batch_invariance_failure =
         !report.batch1_matches_batch2;

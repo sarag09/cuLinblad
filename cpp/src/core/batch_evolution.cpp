@@ -235,6 +235,14 @@ struct BatchTsExecutionContext {
     Index total_size = 0;
 };
 
+struct CpuBatchTsExecutionContext {
+    TS ts = nullptr;
+    Vec x = nullptr;
+    const Solver* solver = nullptr;
+    Index density_dim = 0;
+    bool initialized = false;
+};
+
 void zero_device_buffer(
     void* d_ptr,
     std::size_t bytes,
@@ -307,6 +315,90 @@ void apply_grouped_dissipator_cuda_single(
     const void* d_flat_input,
     void* d_flat_output,
     cudaStream_t consumer_stream);
+
+PetscErrorCode ts_rhs_function_cpu_batch_reference(
+    TS,
+    PetscReal t,
+    Vec x,
+    Vec f,
+    void* raw_ctx)
+{
+    auto* ctx = static_cast<CpuBatchTsExecutionContext*>(raw_ctx);
+    if (ctx == nullptr || ctx->solver == nullptr) {
+        return PETSC_ERR_ARG_NULL;
+    }
+
+    const PetscScalar* x_ptr = nullptr;
+    PetscScalar* f_ptr = nullptr;
+
+    PetscCall(VecGetArrayRead(x, &x_ptr));
+    PetscCall(VecGetArray(f, &f_ptr));
+
+    ConstStateBuffer in_buf{
+        reinterpret_cast<const Complex*>(x_ptr),
+        ctx->density_dim
+    };
+    StateBuffer out_buf{
+        reinterpret_cast<Complex*>(f_ptr),
+        ctx->density_dim
+    };
+
+    apply_liouvillian_at_time(
+        *ctx->solver,
+        static_cast<double>(t),
+        in_buf,
+        out_buf);
+
+    PetscCall(VecRestoreArray(f, &f_ptr));
+    PetscCall(VecRestoreArrayRead(x, &x_ptr));
+    return 0;
+}
+
+PetscErrorCode create_cpu_batch_ts_execution_context(
+    const Solver& solver,
+    CpuBatchTsExecutionContext& ctx)
+{
+    ctx.ts = nullptr;
+    ctx.x = nullptr;
+    ctx.solver = &solver;
+    ctx.density_dim = solver.layout.density_dim;
+    ctx.initialized = false;
+
+    PetscCall(TSCreate(PETSC_COMM_SELF, &ctx.ts));
+    PetscCall(TSSetType(ctx.ts, TSRK));
+
+    PetscCall(VecCreate(PETSC_COMM_SELF, &ctx.x));
+    PetscCall(VecSetSizes(ctx.x, PETSC_DECIDE, solver.layout.density_dim));
+    PetscCall(VecSetFromOptions(ctx.x));
+    PetscCall(VecSet(ctx.x, 0.0));
+
+    PetscCall(TSSetRHSFunction(
+        ctx.ts,
+        nullptr,
+        ts_rhs_function_cpu_batch_reference,
+        &ctx));
+
+    ctx.initialized = true;
+    return 0;
+}
+
+PetscErrorCode destroy_cpu_batch_ts_execution_context(
+    CpuBatchTsExecutionContext& ctx)
+{
+    if (!ctx.initialized) {
+        return 0;
+    }
+
+    if (ctx.x != nullptr) {
+        PetscCall(VecDestroy(&ctx.x));
+    }
+    if (ctx.ts != nullptr) {
+        PetscCall(TSDestroy(&ctx.ts));
+    }
+
+    ctx.initialized = false;
+    return 0;
+}
 
 void allocate_batched_device_state_buffers(
     Index density_dim,
@@ -833,6 +925,24 @@ void apply_grouped_commutator_cuda_batch(
     void* d_flat_output,
     cudaStream_t consumer_stream)
 {
+    if (should_use_tiny_dense_path(solver, target_sites)) {
+        const std::vector<Complex> full_op =
+            embed_k_site_operator(local_op, target_sites, solver.model.local_dims);
+        TinyDenseOperatorKernelArg op_arg{};
+        build_tiny_dense_operator_arg(full_op, solver.layout.hilbert_dim, op_arg);
+
+        if (!launch_batched_tiny_dense_commutator_kernel(
+                op_arg,
+                d_flat_input,
+                d_flat_output,
+                batch_size,
+                consumer_stream)) {
+            throw std::runtime_error(
+                "apply_grouped_commutator_cuda_batch: batched tiny dense kernel failed");
+        }
+        return;
+    }
+
     const std::size_t grouped_elements =
         static_cast<std::size_t>(grouped_layout.grouped_size) *
         static_cast<std::size_t>(batch_size);
@@ -1060,6 +1170,29 @@ void apply_grouped_dissipator_cuda_batch(
     void* d_flat_output,
     cudaStream_t consumer_stream)
 {
+    if (should_use_tiny_dense_path(solver, target_sites)) {
+        const std::vector<Complex> full_jump_op =
+            embed_k_site_operator(local_op, target_sites, solver.model.local_dims);
+        const std::vector<Complex> full_norm_op =
+            embed_k_site_operator(local_op_dag_op, target_sites, solver.model.local_dims);
+        TinyDenseOperatorKernelArg jump_arg{};
+        TinyDenseOperatorKernelArg norm_arg{};
+        build_tiny_dense_operator_arg(full_jump_op, solver.layout.hilbert_dim, jump_arg);
+        build_tiny_dense_operator_arg(full_norm_op, solver.layout.hilbert_dim, norm_arg);
+
+        if (!launch_batched_tiny_dense_dissipator_kernel(
+                jump_arg,
+                norm_arg,
+                d_flat_input,
+                d_flat_output,
+                batch_size,
+                consumer_stream)) {
+            throw std::runtime_error(
+                "apply_grouped_dissipator_cuda_batch: batched tiny dense kernel failed");
+        }
+        return;
+    }
+
     const std::size_t grouped_elements =
         static_cast<std::size_t>(grouped_layout.grouped_size) *
         static_cast<std::size_t>(batch_size);
@@ -1449,38 +1582,49 @@ BatchEvolutionResult evolve_density_batch_cpu_reference(
     result.final_states.resize(initial_states.size());
 
     const Index density_dim = solver.layout.density_dim;
+    CpuBatchTsExecutionContext ctx{};
+    PetscCallAbort(PETSC_COMM_SELF, create_cpu_batch_ts_execution_context(solver, ctx));
 
-    for (Index batch_begin = 0; batch_begin < initial_states.size(); batch_begin += config.batch_size) {
-        const Index batch_end =
-            std::min<Index>(batch_begin + config.batch_size, initial_states.size());
-
-        for (Index state_idx = batch_begin; state_idx < batch_end; ++state_idx) {
+    try {
+        for (Index state_idx = 0; state_idx < initial_states.size(); ++state_idx) {
             if (initial_states[state_idx].size() != density_dim) {
                 throw std::invalid_argument(
                     "evolve_density_batch_cpu_reference: initial state size mismatch");
             }
 
-            std::vector<Complex> state = initial_states[state_idx];
-            std::vector<Complex> rhs(density_dim, Complex{0.0, 0.0});
+            PetscCallAbort(PETSC_COMM_SELF, VecSet(ctx.x, 0.0));
 
-            for (Index step = 0; step < config.num_steps; ++step) {
-                const double t =
-                    config.t0 + static_cast<double>(step) * config.dt;
+            PetscScalar* x_ptr = nullptr;
+            PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
+            for (Index i = 0; i < density_dim; ++i) {
+                x_ptr[i] = initial_states[state_idx][i];
+            }
+            PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
 
-                ConstStateBuffer in_buf{state.data(), state.size()};
-                StateBuffer rhs_buf{rhs.data(), rhs.size()};
+            configure_fixed_step_ts(
+                ctx.ts,
+                config.t0,
+                config.dt,
+                config.num_steps);
+            PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
 
-                apply_liouvillian_at_time(solver, t, in_buf, rhs_buf);
+            const PetscScalar* x_read_ptr = nullptr;
+            PetscCallAbort(PETSC_COMM_SELF, VecGetArrayRead(ctx.x, &x_read_ptr));
 
-                for (Index i = 0; i < density_dim; ++i) {
-                    state[i] += config.dt * rhs[i];
-                }
+            std::vector<Complex> final_state(density_dim, Complex{0.0, 0.0});
+            for (Index i = 0; i < density_dim; ++i) {
+                final_state[i] = x_read_ptr[i];
             }
 
-            result.final_states[state_idx] = std::move(state);
+            PetscCallAbort(PETSC_COMM_SELF, VecRestoreArrayRead(ctx.x, &x_read_ptr));
+            result.final_states[state_idx] = std::move(final_state);
         }
+    } catch (...) {
+        PetscCallAbort(PETSC_COMM_SELF, destroy_cpu_batch_ts_execution_context(ctx));
+        throw;
     }
 
+    PetscCallAbort(PETSC_COMM_SELF, destroy_cpu_batch_ts_execution_context(ctx));
     return result;
 }
 

@@ -46,8 +46,11 @@ void print_matrix_with_fixed_precision(
 bool milestone0_validation_passed(
     const culindblad::Milestone0ValidationReport& report)
 {
-    return report.batch2_matches_expected &&
-           report.single_matches_batch2;
+    return !report.hard_failure_first_element &&
+           report.single_matches_expected &&
+           report.batch1_matches_expected &&
+           report.batch2_matches_expected &&
+           report.triple_invariance_passed;
 }
 
 std::vector<std::vector<std::complex<double>>> make_selected_basis_density_states_for_cli(
@@ -124,17 +127,31 @@ int main(int argc, char** argv)
                       << report.max_diff_batch2_vs_expected << std::endl;
             std::cout << std::endl;
 
+            std::cout << "max|single - batch1| = "
+                      << report.max_diff_single_vs_batch1 << std::endl;
             std::cout << "max|single - batch2| = "
                       << report.max_diff_single_vs_batch2 << std::endl;
             std::cout << "max|batch1 - batch2| = "
                       << report.max_diff_batch1_vs_batch2 << std::endl;
             std::cout << std::endl;
 
+            std::cout << "State 0 (0,0) real parts:" << std::endl;
+            std::cout << "single: " << report.single_state0_00_real << std::endl;
+            std::cout << "batch1: " << report.batch1_state0_00_real << std::endl;
+            std::cout << "batch2: " << report.batch2_state0_00_real << std::endl;
+            std::cout << "hard first-element failure (< 0.61): "
+                      << (report.hard_failure_first_element ? "yes" : "no") << std::endl;
+            std::cout << std::endl;
+
             std::cout << "Diagnosis:" << std::endl;
+            std::cout << "single matches batch1: "
+                      << (report.single_matches_batch1 ? "yes" : "no") << std::endl;
             std::cout << "solver semantics mismatch present: "
                       << (report.solver_semantics_mismatch_present ? "yes" : "no") << std::endl;
             std::cout << "batched path batch-invariance failure present: "
                       << (report.batched_path_batch_invariance_failure ? "yes" : "no") << std::endl;
+            std::cout << "triple invariance passed: "
+                      << (report.triple_invariance_passed ? "yes" : "no") << std::endl;
             std::cout << "label-based cache identity present: "
                       << (report.label_based_cache_identity_present ? "yes" : "no") << std::endl;
             std::cout << "multiple sources present: "

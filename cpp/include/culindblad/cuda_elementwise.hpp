@@ -51,11 +51,26 @@ bool launch_tiny_dense_commutator_kernel(
     void* d_out,
     cudaStream_t stream);
 
+bool launch_batched_tiny_dense_commutator_kernel(
+    const TinyDenseOperatorKernelArg& op,
+    const void* d_rho,
+    void* d_out,
+    Index batch_size,
+    cudaStream_t stream);
+
 bool launch_tiny_dense_dissipator_kernel(
     const TinyDenseOperatorKernelArg& jump_op,
     const TinyDenseOperatorKernelArg& norm_op,
     const void* d_rho,
     void* d_out,
+    cudaStream_t stream);
+
+bool launch_batched_tiny_dense_dissipator_kernel(
+    const TinyDenseOperatorKernelArg& jump_op,
+    const TinyDenseOperatorKernelArg& norm_op,
+    const void* d_rho,
+    void* d_out,
+    Index batch_size,
     cudaStream_t stream);
   
 bool launch_zero_batched_buffer_kernel(
