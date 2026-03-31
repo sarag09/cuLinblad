@@ -44,6 +44,28 @@ CuTensorContractionDesc make_cutensor_left_contraction_desc(
     return desc;
 }
 
+CuTensorContractionDesc make_batched_cutensor_left_contraction_desc(
+    const std::vector<Index>& target_sites,
+    const std::vector<Index>& local_dims,
+    Index batch_size)
+{
+    CuTensorContractionDesc desc =
+        make_cutensor_left_contraction_desc(target_sites, local_dims);
+
+    desc.debug_name = "cutensor_grouped_left_action_batched";
+    desc.input_modes = {5, 1, 2, 3, 4};
+    desc.output_modes = {5, 0, 2, 3, 4};
+
+    desc.input_extents.insert(
+        desc.input_extents.begin(),
+        static_cast<int64_t>(batch_size));
+    desc.output_extents.insert(
+        desc.output_extents.begin(),
+        static_cast<int64_t>(batch_size));
+
+    return desc;
+}
+
 CuTensorContractionDesc make_cutensor_right_contraction_desc(
     const std::vector<Index>& target_sites,
     const std::vector<Index>& local_dims)
@@ -75,6 +97,28 @@ CuTensorContractionDesc make_cutensor_right_contraction_desc(
         static_cast<int64_t>(desc.spec.roles.desc.view.bra_target_dim),
         static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
     };
+
+    return desc;
+}
+
+CuTensorContractionDesc make_batched_cutensor_right_contraction_desc(
+    const std::vector<Index>& target_sites,
+    const std::vector<Index>& local_dims,
+    Index batch_size)
+{
+    CuTensorContractionDesc desc =
+        make_cutensor_right_contraction_desc(target_sites, local_dims);
+
+    desc.debug_name = "cutensor_grouped_right_action_batched";
+    desc.input_modes = {5, 2, 3, 1, 4};
+    desc.output_modes = {5, 2, 3, 0, 4};
+
+    desc.input_extents.insert(
+        desc.input_extents.begin(),
+        static_cast<int64_t>(batch_size));
+    desc.output_extents.insert(
+        desc.output_extents.begin(),
+        static_cast<int64_t>(batch_size));
 
     return desc;
 }

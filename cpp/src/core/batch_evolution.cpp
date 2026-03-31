@@ -8,6 +8,8 @@
 #include <petscts.h>
 #include <petscvec.h>
 
+#include <cuda_runtime.h>
+
 #include "culindblad/backend.hpp"
 #include "culindblad/cuda_grouped_layout.hpp"
 #include "culindblad/grouped_state_layout.hpp"
@@ -33,6 +35,32 @@ bool same_sites(
     }
 
     return true;
+}
+
+std::vector<Index> choose_seed_target_sites(
+    const Solver& solver)
+{
+    if (!solver.model.hamiltonian_terms.empty() &&
+        !solver.model.hamiltonian_terms.front().sites.empty()) {
+        return solver.model.hamiltonian_terms.front().sites;
+    }
+
+    if (!solver.model.dissipator_terms.empty() &&
+        !solver.model.dissipator_terms.front().sites.empty()) {
+        return solver.model.dissipator_terms.front().sites;
+    }
+
+    if (!solver.model.time_dependent_hamiltonian_terms.empty() &&
+        !solver.model.time_dependent_hamiltonian_terms.front().sites.empty()) {
+        return solver.model.time_dependent_hamiltonian_terms.front().sites;
+    }
+
+    if (solver.model.local_dims.empty()) {
+        throw std::runtime_error(
+            "choose_seed_target_sites: solver model has no subsystems");
+    }
+
+    return {0};
 }
 
 std::vector<CachedDissipatorAuxiliaries> build_cached_static_dissipators(
@@ -143,7 +171,8 @@ PetscErrorCode create_cuda_batch_execution_context(
     ctx.x = nullptr;
     ctx.initialized = false;
 
-    const std::vector<Index> seed_target_sites = {0, 1, 2};
+    const std::vector<Index> seed_target_sites =
+        choose_seed_target_sites(solver);
 
     PetscCall(TSCreate(PETSC_COMM_SELF, &ctx.ts));
     PetscCall(TSSetType(ctx.ts, TSEULER));
@@ -318,14 +347,33 @@ BatchEvolutionResult evolve_density_batch_cuda_ts(
                     "evolve_density_batch_cuda_ts: initial state size mismatch");
             }
 
-            PetscCallAbort(PETSC_COMM_SELF, VecSet(ctx.x, 0.0));
-
             PetscScalar* x_ptr = nullptr;
+#if defined(PETSC_HAVE_CUDA)
+            PetscCallAbort(PETSC_COMM_SELF, VecCUDAGetArrayWrite(ctx.x, &x_ptr));
+#else
             PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
+#endif
+#if defined(PETSC_HAVE_CUDA)
+            if (cudaMemcpy(
+                    x_ptr,
+                    initial_states[state_idx].data(),
+                    density_dim * sizeof(Complex),
+                    cudaMemcpyHostToDevice) != cudaSuccess) {
+                PetscCallAbort(PETSC_COMM_SELF, VecCUDARestoreArrayWrite(ctx.x, &x_ptr));
+                PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
+                throw std::runtime_error(
+                    "evolve_density_batch_cuda_ts: failed to upload state to device");
+            }
+#else
             for (Index i = 0; i < density_dim; ++i) {
                 x_ptr[i] = initial_states[state_idx][i];
             }
+#endif
+#if defined(PETSC_HAVE_CUDA)
+            PetscCallAbort(PETSC_COMM_SELF, VecCUDARestoreArrayWrite(ctx.x, &x_ptr));
+#else
             PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
+#endif
 
             if (ctx.ts != nullptr) {
                 PetscCallAbort(PETSC_COMM_SELF, TSDestroy(&ctx.ts));
@@ -348,12 +396,34 @@ BatchEvolutionResult evolve_density_batch_cuda_ts(
             PetscCallAbort(PETSC_COMM_SELF, TSSetFromOptions(ctx.ts));
             PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
 
-            PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
+            const PetscScalar* x_read_ptr = nullptr;
+#if defined(PETSC_HAVE_CUDA)
+            PetscCallAbort(PETSC_COMM_SELF, VecCUDAGetArrayRead(ctx.x, &x_read_ptr));
+#else
+            PetscCallAbort(PETSC_COMM_SELF, VecGetArrayRead(ctx.x, &x_read_ptr));
+#endif
             result.final_states[state_idx].resize(density_dim);
-            for (Index i = 0; i < density_dim; ++i) {
-                result.final_states[state_idx][i] = x_ptr[i];
+#if defined(PETSC_HAVE_CUDA)
+            if (cudaMemcpy(
+                    result.final_states[state_idx].data(),
+                    x_read_ptr,
+                    density_dim * sizeof(Complex),
+                    cudaMemcpyDeviceToHost) != cudaSuccess) {
+                PetscCallAbort(PETSC_COMM_SELF, VecCUDARestoreArrayRead(ctx.x, &x_read_ptr));
+                PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
+                throw std::runtime_error(
+                    "evolve_density_batch_cuda_ts: failed to download state from device");
             }
-            PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
+#else
+            for (Index i = 0; i < density_dim; ++i) {
+                result.final_states[state_idx][i] = x_read_ptr[i];
+            }
+#endif
+#if defined(PETSC_HAVE_CUDA)
+            PetscCallAbort(PETSC_COMM_SELF, VecCUDARestoreArrayRead(ctx.x, &x_read_ptr));
+#else
+            PetscCallAbort(PETSC_COMM_SELF, VecRestoreArrayRead(ctx.x, &x_read_ptr));
+#endif
         }
     }
 

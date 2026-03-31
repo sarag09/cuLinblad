@@ -414,11 +414,76 @@ std::vector<std::vector<Complex>> apply_batched_grouped_left_cuda_batch_object(
     const std::vector<Index>& target_sites,
     const std::vector<std::vector<Complex>>& flat_states)
 {
-    return apply_batched_grouped_left_cuda_device_staged(
-        solver,
-        local_op,
-        target_sites,
-        flat_states);
+    if (flat_states.empty()) {
+        return {};
+    }
+
+    GroupedStateLayout single_layout =
+        make_grouped_state_layout(target_sites, solver.model.local_dims);
+
+    BatchedGroupedLayout batched_layout =
+        make_batched_grouped_layout(single_layout, flat_states.size());
+
+    std::vector<Complex> grouped_batch;
+    pack_flat_batch_to_grouped_batch(
+        batched_layout,
+        flat_states,
+        grouped_batch);
+
+    const CuTensorContractionDesc left_desc =
+        make_batched_cutensor_left_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batched_layout.batch_size);
+
+    CuTensorExecutor executor{};
+    const std::size_t grouped_bytes =
+        static_cast<std::size_t>(batched_layout.total_grouped_size) * sizeof(Complex);
+
+    if (!create_cutensor_executor(
+            left_desc,
+            local_op.size() * sizeof(Complex),
+            grouped_bytes,
+            grouped_bytes,
+            executor)) {
+        throw std::runtime_error(
+            "apply_batched_grouped_left_cuda_batch_object: create_cutensor_executor failed");
+    }
+
+    try {
+        if (!upload_cutensor_executor_operator(executor, local_op)) {
+            throw std::runtime_error(
+                "apply_batched_grouped_left_cuda_batch_object: operator upload failed");
+        }
+
+        if (!upload_cutensor_executor_input(executor, grouped_batch)) {
+            throw std::runtime_error(
+                "apply_batched_grouped_left_cuda_batch_object: grouped batch upload failed");
+        }
+
+        if (!execute_cutensor_executor_device(executor)) {
+            throw std::runtime_error(
+                "apply_batched_grouped_left_cuda_batch_object: batched contraction failed");
+        }
+
+        std::vector<Complex> grouped_output_batch;
+        if (!download_cutensor_executor_output(executor, grouped_output_batch)) {
+            throw std::runtime_error(
+                "apply_batched_grouped_left_cuda_batch_object: grouped batch download failed");
+        }
+
+        std::vector<std::vector<Complex>> flat_output_states;
+        unpack_grouped_batch_to_flat_batch(
+            batched_layout,
+            grouped_output_batch,
+            flat_output_states);
+
+        (void)destroy_cutensor_executor(executor);
+        return flat_output_states;
+    } catch (...) {
+        (void)destroy_cutensor_executor(executor);
+        throw;
+    }
 }
 
 std::vector<std::vector<Complex>> apply_batched_grouped_left_cuda_fused_candidate(

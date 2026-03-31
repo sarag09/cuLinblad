@@ -27,8 +27,18 @@ CuTensorContractionDesc make_cutensor_left_contraction_desc(
     const std::vector<Index>& target_sites,
     const std::vector<Index>& local_dims);
 
+CuTensorContractionDesc make_batched_cutensor_left_contraction_desc(
+    const std::vector<Index>& target_sites,
+    const std::vector<Index>& local_dims,
+    Index batch_size);
+
 CuTensorContractionDesc make_cutensor_right_contraction_desc(
     const std::vector<Index>& target_sites,
     const std::vector<Index>& local_dims);
+
+CuTensorContractionDesc make_batched_cutensor_right_contraction_desc(
+    const std::vector<Index>& target_sites,
+    const std::vector<Index>& local_dims,
+    Index batch_size);
 
 } // namespace culindblad

@@ -63,7 +63,7 @@ PetscErrorCode zero_petsc_cuda_vec(
             size * sizeof(Complex),
             stream);
 
-    if (memset_status != cudaSuccess || cudaStreamSynchronize(stream) != cudaSuccess) {
+    if (memset_status != cudaSuccess) {
 #if defined(PETSC_HAVE_CUDA)
         PetscCall(VecCUDARestoreArray(v, &d_v_ptr));
 #else
@@ -91,15 +91,60 @@ PetscErrorCode add_petsc_cuda_vecs(
     const PetscScalar* d_a_ptr = nullptr;
     const PetscScalar* d_b_ptr = nullptr;
     PetscScalar* d_out_ptr = nullptr;
+    bool restore_a_read = false;
+    bool restore_b_read = false;
+    bool restore_out_write = false;
 
 #if defined(PETSC_HAVE_CUDA)
-    PetscCall(VecCUDAGetArrayRead(a, &d_a_ptr));
-    PetscCall(VecCUDAGetArrayRead(b, &d_b_ptr));
-    PetscCall(VecCUDAGetArray(out, &d_out_ptr));
+    if (a == out) {
+        PetscCall(VecCUDAGetArray(out, &d_out_ptr));
+        d_a_ptr = d_out_ptr;
+        restore_out_write = true;
+    } else {
+        PetscCall(VecCUDAGetArrayRead(a, &d_a_ptr));
+        restore_a_read = true;
+    }
+
+    if (b == out) {
+        if (!restore_out_write) {
+            PetscCall(VecCUDAGetArray(out, &d_out_ptr));
+            restore_out_write = true;
+        }
+        d_b_ptr = d_out_ptr;
+    } else {
+        PetscCall(VecCUDAGetArrayRead(b, &d_b_ptr));
+        restore_b_read = true;
+    }
+
+    if (!restore_out_write) {
+        PetscCall(VecCUDAGetArray(out, &d_out_ptr));
+        restore_out_write = true;
+    }
 #else
-    PetscCall(VecGetArrayRead(a, &d_a_ptr));
-    PetscCall(VecGetArrayRead(b, &d_b_ptr));
-    PetscCall(VecGetArray(out, &d_out_ptr));
+    if (a == out) {
+        PetscCall(VecGetArray(out, &d_out_ptr));
+        d_a_ptr = d_out_ptr;
+        restore_out_write = true;
+    } else {
+        PetscCall(VecGetArrayRead(a, &d_a_ptr));
+        restore_a_read = true;
+    }
+
+    if (b == out) {
+        if (!restore_out_write) {
+            PetscCall(VecGetArray(out, &d_out_ptr));
+            restore_out_write = true;
+        }
+        d_b_ptr = d_out_ptr;
+    } else {
+        PetscCall(VecGetArrayRead(b, &d_b_ptr));
+        restore_b_read = true;
+    }
+
+    if (!restore_out_write) {
+        PetscCall(VecGetArray(out, &d_out_ptr));
+        restore_out_write = true;
+    }
 #endif
 
     const bool add_ok =
@@ -110,27 +155,51 @@ PetscErrorCode add_petsc_cuda_vecs(
             size,
             stream);
 
-    if (!add_ok || cudaStreamSynchronize(stream) != cudaSuccess) {
+    if (!add_ok) {
 #if defined(PETSC_HAVE_CUDA)
-        PetscCall(VecCUDARestoreArray(out, &d_out_ptr));
-        PetscCall(VecCUDARestoreArrayRead(b, &d_b_ptr));
-        PetscCall(VecCUDARestoreArrayRead(a, &d_a_ptr));
+        if (restore_out_write) {
+            PetscCall(VecCUDARestoreArray(out, &d_out_ptr));
+        }
+        if (restore_b_read) {
+            PetscCall(VecCUDARestoreArrayRead(b, &d_b_ptr));
+        }
+        if (restore_a_read) {
+            PetscCall(VecCUDARestoreArrayRead(a, &d_a_ptr));
+        }
 #else
-        PetscCall(VecRestoreArray(out, &d_out_ptr));
-        PetscCall(VecRestoreArrayRead(b, &d_b_ptr));
-        PetscCall(VecRestoreArrayRead(a, &d_a_ptr));
+        if (restore_out_write) {
+            PetscCall(VecRestoreArray(out, &d_out_ptr));
+        }
+        if (restore_b_read) {
+            PetscCall(VecRestoreArrayRead(b, &d_b_ptr));
+        }
+        if (restore_a_read) {
+            PetscCall(VecRestoreArrayRead(a, &d_a_ptr));
+        }
 #endif
         return PETSC_ERR_LIB;
     }
 
 #if defined(PETSC_HAVE_CUDA)
-    PetscCall(VecCUDARestoreArray(out, &d_out_ptr));
-    PetscCall(VecCUDARestoreArrayRead(b, &d_b_ptr));
-    PetscCall(VecCUDARestoreArrayRead(a, &d_a_ptr));
+    if (restore_out_write) {
+        PetscCall(VecCUDARestoreArray(out, &d_out_ptr));
+    }
+    if (restore_b_read) {
+        PetscCall(VecCUDARestoreArrayRead(b, &d_b_ptr));
+    }
+    if (restore_a_read) {
+        PetscCall(VecCUDARestoreArrayRead(a, &d_a_ptr));
+    }
 #else
-    PetscCall(VecRestoreArray(out, &d_out_ptr));
-    PetscCall(VecRestoreArrayRead(b, &d_b_ptr));
-    PetscCall(VecRestoreArrayRead(a, &d_a_ptr));
+    if (restore_out_write) {
+        PetscCall(VecRestoreArray(out, &d_out_ptr));
+    }
+    if (restore_b_read) {
+        PetscCall(VecRestoreArrayRead(b, &d_b_ptr));
+    }
+    if (restore_a_read) {
+        PetscCall(VecRestoreArrayRead(a, &d_a_ptr));
+    }
 #endif
 
     return 0;
@@ -162,7 +231,7 @@ PetscErrorCode scale_petsc_cuda_vec(
             size,
             stream);
 
-    if (!scale_ok || cudaStreamSynchronize(stream) != cudaSuccess) {
+    if (!scale_ok) {
 #if defined(PETSC_HAVE_CUDA)
         PetscCall(VecCUDARestoreArray(out, &d_out_ptr));
         PetscCall(VecCUDARestoreArrayRead(in, &d_in_ptr));
@@ -207,7 +276,8 @@ PetscErrorCode ts_rhs_function_cuda_grouped_commutator(
         rhs_ctx->cuda_grouped_layout,
         rhs_ctx->executor_cache,
         x,
-        f));
+        f,
+        rhs_ctx->elementwise_stream));
 
     return 0;
 }
@@ -239,7 +309,8 @@ PetscErrorCode ts_rhs_function_cuda_grouped_liouvillian(
         rhs_ctx->cuda_grouped_layout,
         rhs_ctx->executor_cache,
         x,
-        temp_comm));
+        temp_comm,
+        s));
 
     PetscCall(apply_grouped_dissipator_cuda_vec(
         *rhs_ctx->solver,
@@ -252,7 +323,8 @@ PetscErrorCode ts_rhs_function_cuda_grouped_liouvillian(
         rhs_ctx->cuda_grouped_layout,
         rhs_ctx->executor_cache,
         x,
-        temp_diss));
+        temp_diss,
+        s));
 
     PetscCall(add_petsc_cuda_vecs(
         temp_comm,
@@ -260,6 +332,10 @@ PetscErrorCode ts_rhs_function_cuda_grouped_liouvillian(
         f,
         rhs_ctx->solver->layout.density_dim,
         s));
+
+    if (cudaStreamSynchronize(s) != cudaSuccess) {
+        return PETSC_ERR_LIB;
+    }
 
     return 0;
 }
@@ -302,7 +378,8 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
             layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
-            term_out));
+            term_out,
+            s));
 
         PetscCall(add_petsc_cuda_vecs(
             accum,
@@ -333,7 +410,8 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
             layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
-            term_out));
+            term_out,
+            s));
 
         PetscCall(add_petsc_cuda_vecs(
             accum,
@@ -346,6 +424,11 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
     }
 
     PetscCall(VecCopy(accum, f));
+
+    if (cudaStreamSynchronize(s) != cudaSuccess) {
+        return PETSC_ERR_LIB;
+    }
+
     return 0;
 }
 
@@ -388,7 +471,8 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
-            term_out));
+            term_out,
+            s));
 
         PetscCall(add_petsc_cuda_vecs(
             accum,
@@ -419,7 +503,8 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
-            term_out));
+            term_out,
+            s));
 
         PetscCall(add_petsc_cuda_vecs(
             accum,
@@ -451,7 +536,8 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
-            term_out));
+            term_out,
+            s));
 
         PetscCall(scale_petsc_cuda_vec(
             term_out,
@@ -471,6 +557,11 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
     }
 
     PetscCall(VecCopy(accum, f));
+
+    if (cudaStreamSynchronize(s) != cudaSuccess) {
+        return PETSC_ERR_LIB;
+    }
+        
     return 0;
 }
 
