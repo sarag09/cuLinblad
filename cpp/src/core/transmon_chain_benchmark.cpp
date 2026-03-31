@@ -661,40 +661,33 @@ TransmonChainBenchmarkTiming run_transmon_chain_cuda_benchmark(
     const std::vector<std::vector<Complex>> initial_states =
         make_selected_basis_density_states(solver, selected_indices);
 
-    CudaBatchExecutionContext ctx{};
-    PetscCallAbort(PETSC_COMM_SELF, create_cuda_batch_execution_context(solver, ctx));
+    if (config.batched_num_steps == 0) {
+        throw std::invalid_argument(
+            "run_transmon_chain_cuda_benchmark: batched_num_steps must be > 0");
+    }
 
-    PetscCallAbort(PETSC_COMM_SELF, TSSetType(ctx.ts, TSRK));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetRHSFunction(
-        ctx.ts,
-        nullptr,
-        ts_rhs_function_cuda_full_model_liouvillian,
-        &ctx.rhs_ctx));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ctx.ts, 1000000));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetExactFinalTime(ctx.ts, TS_EXACTFINALTIME_MATCHSTEP));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetFromOptions(ctx.ts));
+    const BatchEvolutionConfig batch_config{
+        config.t0,
+        (config.tfinal - config.t0) /
+            static_cast<double>(config.batched_num_steps),
+        config.batched_num_steps,
+        std::max<Index>(static_cast<Index>(1), selected_indices.size())
+    };
 
     const auto t_start = std::chrono::steady_clock::now();
 
     TransmonChainBenchmarkTiming timing;
     timing.num_evolved_states = selected_indices.size();
-    timing.final_states.resize(selected_indices.size());
-
-    for (Index i = 0; i < initial_states.size(); ++i) {
-        timing.final_states[i] =
-            evolve_single_state_cuda_ts(
-                solver,
-                initial_states[i],
-                config.t0,
-                config.tfinal,
-                ctx);
-    }
+    timing.final_states =
+        evolve_density_batch_cuda_ts(
+            solver,
+            initial_states,
+            batch_config).final_states;
 
     const auto t_end = std::chrono::steady_clock::now();
     timing.wall_seconds =
         std::chrono::duration<double>(t_end - t_start).count();
 
-    PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
     return timing;
 }
 
