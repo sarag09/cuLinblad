@@ -703,6 +703,28 @@ void scale_device_buffer(
     }
 }
 
+void configure_fixed_step_ts(
+    TS ts,
+    double t0,
+    double dt,
+    Index num_steps)
+{
+    TSAdapt adapt = nullptr;
+
+    PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ts, t0));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ts, 0));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ts, dt));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ts, static_cast<PetscInt>(num_steps)));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxTime(
+        ts,
+        t0 + dt * static_cast<double>(num_steps)));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetExactFinalTime(
+        ts,
+        TS_EXACTFINALTIME_MATCHSTEP));
+    PetscCallAbort(PETSC_COMM_SELF, TSGetAdapt(ts, &adapt));
+    PetscCallAbort(PETSC_COMM_SELF, TSAdaptSetType(adapt, TSADAPTNONE));
+}
+
 CuTensorExecutor* get_or_prepare_executor(
     CuTensorExecutorCache& executor_cache,
     const std::string& cache_key,
@@ -1341,7 +1363,7 @@ PetscErrorCode create_cuda_batch_execution_context(
         choose_seed_target_sites(solver);
 
     PetscCall(TSCreate(PETSC_COMM_SELF, &ctx.ts));
-    PetscCall(TSSetType(ctx.ts, TSEULER));
+    PetscCall(TSSetType(ctx.ts, TSRK));
 
     PetscCall(VecCreate(PETSC_COMM_SELF, &ctx.x));
     PetscCall(VecSetSizes(ctx.x, PETSC_DECIDE, solver.layout.density_dim));
@@ -1540,16 +1562,11 @@ BatchEvolutionResult evolve_density_batch_cuda_ts(
                 PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
 #endif
 
-                const double total_time =
-                    config.dt * static_cast<double>(config.num_steps);
-                const double dt_initial = total_time / 1000.0;
-                PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ctx.ts, config.t0));
-                PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ctx.ts, 0));
-                PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ctx.ts, dt_initial));
-                PetscCallAbort(PETSC_COMM_SELF, TSSetMaxTime(
+                configure_fixed_step_ts(
                     ctx.ts,
-                    config.t0 + total_time));
-                PetscCallAbort(PETSC_COMM_SELF, TSSetFromOptions(ctx.ts));
+                    config.t0,
+                    config.dt,
+                    config.num_steps);
                 PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
 
                 const PetscScalar* x_read_ptr = nullptr;

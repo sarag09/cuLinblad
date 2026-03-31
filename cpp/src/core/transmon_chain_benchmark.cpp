@@ -398,11 +398,32 @@ TransmonChainBenchmarkConfig make_milestone0_validation_config()
     return config;
 }
 
+void configure_fixed_step_ts(
+    TS ts,
+    double t0,
+    double dt,
+    Index num_steps)
+{
+    TSAdapt adapt = nullptr;
+
+    PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ts, t0));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ts, 0));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ts, dt));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ts, static_cast<PetscInt>(num_steps)));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxTime(
+        ts,
+        t0 + dt * static_cast<double>(num_steps)));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetExactFinalTime(
+        ts,
+        TS_EXACTFINALTIME_MATCHSTEP));
+    PetscCallAbort(PETSC_COMM_SELF, TSGetAdapt(ts, &adapt));
+    PetscCallAbort(PETSC_COMM_SELF, TSAdaptSetType(adapt, TSADAPTNONE));
+}
+
 std::vector<Complex> evolve_single_state_cuda_ts(
     const Solver& solver,
     const std::vector<Complex>& initial_state,
-    double t0,
-    double tfinal,
+    const BatchEvolutionConfig& config,
     CudaBatchExecutionContext& ctx)
 {
     if (!ctx.initialized || ctx.ts == nullptr || ctx.x == nullptr) {
@@ -437,12 +458,11 @@ std::vector<Complex> evolve_single_state_cuda_ts(
     PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
 #endif
 
-    const double dt_initial = (tfinal - t0) / 1000.0;
-
-    PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ctx.ts, t0));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ctx.ts, 0));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ctx.ts, dt_initial));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxTime(ctx.ts, tfinal));
+    configure_fixed_step_ts(
+        ctx.ts,
+        config.t0,
+        config.dt,
+        config.num_steps);
     PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
 
     const PetscScalar* x_read_ptr = nullptr;
@@ -804,8 +824,7 @@ Milestone0ValidationReport run_milestone0_n2_d2_gpu_validation()
             evolve_single_state_cuda_ts(
                 solver,
                 initial_states[0],
-                config.t0,
-                config.tfinal,
+                batch1_config,
                 single_ctx);
     } catch (...) {
         PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(single_ctx));
