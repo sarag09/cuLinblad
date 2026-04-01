@@ -223,6 +223,57 @@ struct ExecutorInputBinding {
     void* original_d_input = nullptr;
 };
 
+struct ExecutorStreamBinding {
+    CuTensorExecutor* executor = nullptr;
+    cudaStream_t original_stream = nullptr;
+};
+
+bool execute_executor_for_stream_mode(
+    CuTensorExecutor& executor,
+    bool use_direct_consumer_stream)
+{
+    return use_direct_consumer_stream
+        ? execute_cutensor_executor_device_no_completion(executor)
+        : execute_cutensor_executor_device(executor);
+}
+
+bool finalize_executor_stream_work(
+    CuTensorExecutor& executor,
+    cudaStream_t consumer_stream)
+{
+    if (consumer_stream == nullptr) {
+        return cudaStreamSynchronize(executor.stream) == cudaSuccess;
+    }
+
+    if (consumer_stream == executor.stream) {
+        return true;
+    }
+
+    return record_cutensor_executor_completion(executor) &&
+           wait_for_cutensor_executor_completion(executor, consumer_stream);
+}
+
+void bind_executor_stream(
+    CuTensorExecutor& executor,
+    cudaStream_t stream,
+    ExecutorStreamBinding& binding)
+{
+    binding.executor = &executor;
+    binding.original_stream = executor.stream;
+    executor.stream = stream;
+}
+
+void restore_executor_stream_binding(
+    ExecutorStreamBinding& binding)
+{
+    if (binding.executor != nullptr) {
+        binding.executor->stream = binding.original_stream;
+    }
+
+    binding.executor = nullptr;
+    binding.original_stream = nullptr;
+}
+
 bool bind_device_buffer_as_executor_input(
     const void* d_input,
     std::size_t input_bytes,
@@ -235,11 +286,16 @@ bool bind_device_buffer_as_executor_input(
         return false;
     }
 
+    const bool same_stream =
+        producer_stream != nullptr &&
+        producer_stream == dst_executor.stream;
     const bool input_wait_ok =
-        input_ready_event != nullptr
+        same_stream
+            ? true
+            : (input_ready_event != nullptr
             ? wait_for_cuda_event(input_ready_event, dst_executor.stream)
             : (producer_stream == nullptr ||
-               wait_for_stream_event(producer_stream, dst_executor.stream));
+               wait_for_stream_event(producer_stream, dst_executor.stream)));
     if (!input_wait_ok) {
         return false;
     }
@@ -312,6 +368,7 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
 
     const std::size_t grouped_bytes =
         batch_size * grouped_layout.grouped_size * sizeof(Complex);
+    const bool use_direct_consumer_stream = consumer_stream != nullptr;
 
     const void* d_flat_input = nullptr;
     void* d_flat_output = nullptr;
@@ -334,6 +391,11 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
         return ierr;
     }
 
+    ExecutorStreamBinding stream_binding{};
+    if (use_direct_consumer_stream) {
+        bind_executor_stream(*executor, consumer_stream, stream_binding);
+    }
+
     const bool regroup_in_ok =
         launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
@@ -343,6 +405,7 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
             executor->stream);
 
     if (!regroup_in_ok) {
+        restore_executor_stream_binding(stream_binding);
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
@@ -353,15 +416,17 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
             0,
             grouped_bytes,
             executor->stream) != cudaSuccess) {
+        restore_executor_stream_binding(stream_binding);
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
 
     const bool exec_ok =
-        execute_cutensor_executor_device(*executor);
+        execute_executor_for_stream_mode(*executor, use_direct_consumer_stream);
 
     if (!exec_ok) {
+        restore_executor_stream_binding(stream_binding);
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
@@ -376,18 +441,20 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
             executor->stream);
 
     if (!regroup_out_ok) {
+        restore_executor_stream_binding(stream_binding);
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
 
-    if (!record_cutensor_executor_completion(*executor) ||
-        !wait_for_executor_event(*executor, consumer_stream)) {
+    if (!finalize_executor_stream_work(*executor, consumer_stream)) {
+        restore_executor_stream_binding(stream_binding);
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
 
+    restore_executor_stream_binding(stream_binding);
     PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
     PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
     return 0;
@@ -478,6 +545,9 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
     CuTensorExecutor* right_executor = nullptr;
     ExecutorInputBinding left_input_binding{};
     ExecutorInputBinding right_input_binding{};
+    ExecutorStreamBinding left_stream_binding{};
+    ExecutorStreamBinding right_stream_binding{};
+    const bool use_direct_consumer_stream = consumer_stream != nullptr;
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
@@ -503,6 +573,11 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
         return ierr;
     }
 
+    if (use_direct_consumer_stream) {
+        bind_executor_stream(*left_executor, consumer_stream, left_stream_binding);
+        bind_executor_stream(*right_executor, consumer_stream, right_stream_binding);
+    }
+
     if (!bind_device_buffer_as_executor_input(
             d_grouped_input,
             grouped_bytes,
@@ -517,6 +592,8 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
             consumer_stream,
             *right_executor,
             right_input_binding)) {
+        restore_executor_stream_binding(right_stream_binding);
+        restore_executor_stream_binding(left_stream_binding);
         restore_executor_input_binding(right_input_binding);
         restore_executor_input_binding(left_input_binding);
         return PETSC_ERR_LIB;
@@ -524,13 +601,17 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
 
     if (!zero_executor_output(*left_executor, grouped_bytes) ||
         !zero_executor_output(*right_executor, grouped_bytes)) {
+        restore_executor_stream_binding(right_stream_binding);
+        restore_executor_stream_binding(left_stream_binding);
         restore_executor_input_binding(right_input_binding);
         restore_executor_input_binding(left_input_binding);
         return PETSC_ERR_LIB;
     }
 
-    if (!execute_cutensor_executor_device(*left_executor) ||
-        !execute_cutensor_executor_device(*right_executor)) {
+    if (!execute_executor_for_stream_mode(*left_executor, use_direct_consumer_stream) ||
+        !execute_executor_for_stream_mode(*right_executor, use_direct_consumer_stream)) {
+        restore_executor_stream_binding(right_stream_binding);
+        restore_executor_stream_binding(left_stream_binding);
         restore_executor_input_binding(right_input_binding);
         restore_executor_input_binding(left_input_binding);
         return PETSC_ERR_LIB;
@@ -538,9 +619,12 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
 
     const bool output_wait_ok =
         output_ready_event == nullptr ||
+        consumer_stream == left_executor->stream ||
         wait_for_cuda_event(output_ready_event, left_executor->stream);
     if (!output_wait_ok ||
         !wait_for_cutensor_executor_completion(*right_executor, left_executor->stream)) {
+        restore_executor_stream_binding(right_stream_binding);
+        restore_executor_stream_binding(left_stream_binding);
         restore_executor_input_binding(right_input_binding);
         restore_executor_input_binding(left_input_binding);
         return PETSC_ERR_LIB;
@@ -552,18 +636,23 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
             d_grouped_output,
             batch_size * grouped_layout.grouped_size,
             left_executor->stream)) {
+        restore_executor_stream_binding(right_stream_binding);
+        restore_executor_stream_binding(left_stream_binding);
         restore_executor_input_binding(right_input_binding);
         restore_executor_input_binding(left_input_binding);
         return PETSC_ERR_LIB;
     }
 
-    if (!record_cutensor_executor_completion(*left_executor) ||
-        !wait_for_executor_event(*left_executor, consumer_stream)) {
+    if (!finalize_executor_stream_work(*left_executor, consumer_stream)) {
+        restore_executor_stream_binding(right_stream_binding);
+        restore_executor_stream_binding(left_stream_binding);
         restore_executor_input_binding(right_input_binding);
         restore_executor_input_binding(left_input_binding);
         return PETSC_ERR_LIB;
     }
 
+    restore_executor_stream_binding(right_stream_binding);
+    restore_executor_stream_binding(left_stream_binding);
     restore_executor_input_binding(right_input_binding);
     restore_executor_input_binding(left_input_binding);
     return 0;
@@ -608,6 +697,11 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
     ExecutorInputBinding jump_right_input_binding{};
     ExecutorInputBinding norm_left_input_binding{};
     ExecutorInputBinding norm_right_input_binding{};
+    ExecutorStreamBinding jump_left_stream_binding{};
+    ExecutorStreamBinding jump_right_stream_binding{};
+    ExecutorStreamBinding norm_left_stream_binding{};
+    ExecutorStreamBinding norm_right_stream_binding{};
+    const bool use_direct_consumer_stream = consumer_stream != nullptr;
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
@@ -657,6 +751,13 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
         return ierr;
     }
 
+    if (use_direct_consumer_stream) {
+        bind_executor_stream(*jump_left_executor, consumer_stream, jump_left_stream_binding);
+        bind_executor_stream(*jump_right_executor, consumer_stream, jump_right_stream_binding);
+        bind_executor_stream(*norm_left_executor, consumer_stream, norm_left_stream_binding);
+        bind_executor_stream(*norm_right_executor, consumer_stream, norm_right_stream_binding);
+    }
+
     if (!bind_device_buffer_as_executor_input(
             d_grouped_input,
             grouped_bytes,
@@ -678,6 +779,10 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
             consumer_stream,
             *norm_right_executor,
             norm_right_input_binding)) {
+        restore_executor_stream_binding(norm_right_stream_binding);
+        restore_executor_stream_binding(norm_left_stream_binding);
+        restore_executor_stream_binding(jump_right_stream_binding);
+        restore_executor_stream_binding(jump_left_stream_binding);
         restore_executor_input_binding(norm_right_input_binding);
         restore_executor_input_binding(norm_left_input_binding);
         restore_executor_input_binding(jump_right_input_binding);
@@ -689,6 +794,10 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
         !zero_executor_output(*jump_right_executor, grouped_bytes) ||
         !zero_executor_output(*norm_left_executor, grouped_bytes) ||
         !zero_executor_output(*norm_right_executor, grouped_bytes)) {
+        restore_executor_stream_binding(norm_right_stream_binding);
+        restore_executor_stream_binding(norm_left_stream_binding);
+        restore_executor_stream_binding(jump_right_stream_binding);
+        restore_executor_stream_binding(jump_left_stream_binding);
         restore_executor_input_binding(norm_right_input_binding);
         restore_executor_input_binding(norm_left_input_binding);
         restore_executor_input_binding(jump_right_input_binding);
@@ -696,7 +805,11 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
         return PETSC_ERR_LIB;
     }
 
-    if (!execute_cutensor_executor_device(*jump_left_executor)) {
+    if (!execute_executor_for_stream_mode(*jump_left_executor, use_direct_consumer_stream)) {
+        restore_executor_stream_binding(norm_right_stream_binding);
+        restore_executor_stream_binding(norm_left_stream_binding);
+        restore_executor_stream_binding(jump_right_stream_binding);
+        restore_executor_stream_binding(jump_left_stream_binding);
         restore_executor_input_binding(norm_right_input_binding);
         restore_executor_input_binding(norm_left_input_binding);
         restore_executor_input_binding(jump_right_input_binding);
@@ -708,7 +821,11 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
             *jump_left_executor,
             *jump_right_executor,
             jump_right_input_binding) ||
-        !execute_cutensor_executor_device(*jump_right_executor)) {
+        !execute_executor_for_stream_mode(*jump_right_executor, use_direct_consumer_stream)) {
+        restore_executor_stream_binding(norm_right_stream_binding);
+        restore_executor_stream_binding(norm_left_stream_binding);
+        restore_executor_stream_binding(jump_right_stream_binding);
+        restore_executor_stream_binding(jump_left_stream_binding);
         restore_executor_input_binding(norm_right_input_binding);
         restore_executor_input_binding(norm_left_input_binding);
         restore_executor_input_binding(jump_right_input_binding);
@@ -716,8 +833,12 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
         return PETSC_ERR_LIB;
     }
 
-    if (!execute_cutensor_executor_device(*norm_left_executor) ||
-        !execute_cutensor_executor_device(*norm_right_executor)) {
+    if (!execute_executor_for_stream_mode(*norm_left_executor, use_direct_consumer_stream) ||
+        !execute_executor_for_stream_mode(*norm_right_executor, use_direct_consumer_stream)) {
+        restore_executor_stream_binding(norm_right_stream_binding);
+        restore_executor_stream_binding(norm_left_stream_binding);
+        restore_executor_stream_binding(jump_right_stream_binding);
+        restore_executor_stream_binding(jump_left_stream_binding);
         restore_executor_input_binding(norm_right_input_binding);
         restore_executor_input_binding(norm_left_input_binding);
         restore_executor_input_binding(jump_right_input_binding);
@@ -727,10 +848,15 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
 
     const bool output_wait_ok =
         output_ready_event == nullptr ||
+        consumer_stream == norm_right_executor->stream ||
         wait_for_cuda_event(output_ready_event, norm_right_executor->stream);
     if (!output_wait_ok ||
         !wait_for_cutensor_executor_completion(*jump_right_executor, norm_right_executor->stream) ||
         !wait_for_cutensor_executor_completion(*norm_left_executor, norm_right_executor->stream)) {
+        restore_executor_stream_binding(norm_right_stream_binding);
+        restore_executor_stream_binding(norm_left_stream_binding);
+        restore_executor_stream_binding(jump_right_stream_binding);
+        restore_executor_stream_binding(jump_left_stream_binding);
         restore_executor_input_binding(norm_right_input_binding);
         restore_executor_input_binding(norm_left_input_binding);
         restore_executor_input_binding(jump_right_input_binding);
@@ -745,6 +871,10 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
             d_grouped_output,
             batch_size * grouped_layout.grouped_size,
             norm_right_executor->stream)) {
+        restore_executor_stream_binding(norm_right_stream_binding);
+        restore_executor_stream_binding(norm_left_stream_binding);
+        restore_executor_stream_binding(jump_right_stream_binding);
+        restore_executor_stream_binding(jump_left_stream_binding);
         restore_executor_input_binding(norm_right_input_binding);
         restore_executor_input_binding(norm_left_input_binding);
         restore_executor_input_binding(jump_right_input_binding);
@@ -752,8 +882,11 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
         return PETSC_ERR_LIB;
     }
 
-    if (!record_cutensor_executor_completion(*norm_right_executor) ||
-        !wait_for_executor_event(*norm_right_executor, consumer_stream)) {
+    if (!finalize_executor_stream_work(*norm_right_executor, consumer_stream)) {
+        restore_executor_stream_binding(norm_right_stream_binding);
+        restore_executor_stream_binding(norm_left_stream_binding);
+        restore_executor_stream_binding(jump_right_stream_binding);
+        restore_executor_stream_binding(jump_left_stream_binding);
         restore_executor_input_binding(norm_right_input_binding);
         restore_executor_input_binding(norm_left_input_binding);
         restore_executor_input_binding(jump_right_input_binding);
@@ -761,6 +894,10 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
         return PETSC_ERR_LIB;
     }
 
+    restore_executor_stream_binding(norm_right_stream_binding);
+    restore_executor_stream_binding(norm_left_stream_binding);
+    restore_executor_stream_binding(jump_right_stream_binding);
+    restore_executor_stream_binding(jump_left_stream_binding);
     restore_executor_input_binding(norm_right_input_binding);
     restore_executor_input_binding(norm_left_input_binding);
     restore_executor_input_binding(jump_right_input_binding);

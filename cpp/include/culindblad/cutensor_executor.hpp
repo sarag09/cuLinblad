@@ -68,6 +68,9 @@ bool copy_cutensor_executor_output_to_input(
 bool execute_cutensor_executor_device(
     CuTensorExecutor& executor);
 
+bool execute_cutensor_executor_device_no_completion(
+    CuTensorExecutor& executor);
+
 bool download_cutensor_executor_output(
     CuTensorExecutor& executor,
     std::vector<Complex>& output_tensor);
