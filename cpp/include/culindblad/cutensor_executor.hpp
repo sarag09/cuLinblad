@@ -19,6 +19,8 @@ struct CuTensorExecutor {
 
     cudaStream_t stream;
     cudaEvent_t completion_event;
+    cudaStream_t completion_stream;
+    bool completion_recorded;
 
     void* d_op;
     void* d_input;
@@ -47,14 +49,30 @@ bool upload_cutensor_executor_operator(
     CuTensorExecutor& executor,
     const std::vector<Complex>& local_op);
 
+bool upload_cutensor_executor_operator_on_stream(
+    CuTensorExecutor& executor,
+    const std::vector<Complex>& local_op,
+    cudaStream_t stream);
+
 bool ensure_cutensor_executor_operator(
     CuTensorExecutor& executor,
     const std::string& operator_tag,
     const std::vector<Complex>& local_op);
 
+bool ensure_cutensor_executor_operator_on_stream(
+    CuTensorExecutor& executor,
+    const std::string& operator_tag,
+    const std::vector<Complex>& local_op,
+    cudaStream_t stream);
+
 bool upload_cutensor_executor_input(
     CuTensorExecutor& executor,
     const std::vector<Complex>& input_tensor);
+
+bool upload_cutensor_executor_input_on_stream(
+    CuTensorExecutor& executor,
+    const std::vector<Complex>& input_tensor,
+    cudaStream_t stream);
 
 bool upload_cutensor_executor_inputs(
     CuTensorExecutor& executor,
@@ -68,8 +86,16 @@ bool copy_cutensor_executor_output_to_input(
 bool execute_cutensor_executor_device(
     CuTensorExecutor& executor);
 
+bool execute_cutensor_executor_device_on_stream(
+    CuTensorExecutor& executor,
+    cudaStream_t stream);
+
 bool execute_cutensor_executor_device_no_completion(
     CuTensorExecutor& executor);
+
+bool execute_cutensor_executor_device_no_completion_on_stream(
+    CuTensorExecutor& executor,
+    cudaStream_t stream);
 
 bool download_cutensor_executor_output(
     CuTensorExecutor& executor,
@@ -93,6 +119,10 @@ bool execute_cutensor_executor_with_resident_operator_pinned(
 
 bool record_cutensor_executor_completion(
     CuTensorExecutor& executor);
+
+bool record_cutensor_executor_completion_on_stream(
+    CuTensorExecutor& executor,
+    cudaStream_t stream);
 
 bool wait_for_cutensor_executor_completion(
     CuTensorExecutor& producer,

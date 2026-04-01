@@ -13,6 +13,38 @@ namespace culindblad {
 
 namespace {
 
+cudaStream_t resolve_execution_stream(
+    CuTensorExecutor& executor,
+    cudaStream_t stream)
+{
+    return stream != nullptr ? stream : executor.stream;
+}
+
+bool prepare_cutensor_executor_stream(
+    CuTensorExecutor& executor,
+    cudaStream_t stream)
+{
+    cudaStream_t execution_stream = resolve_execution_stream(executor, stream);
+    if (execution_stream == nullptr) {
+        return false;
+    }
+
+    if (!executor.completion_recorded ||
+        executor.completion_stream == nullptr ||
+        executor.completion_stream == execution_stream) {
+        return true;
+    }
+
+    if (executor.completion_event == nullptr) {
+        return false;
+    }
+
+    return cudaStreamWaitEvent(
+               execution_stream,
+               executor.completion_event,
+               0) == cudaSuccess;
+}
+
 bool cuda_malloc_bytes(void** ptr, size_t bytes)
 {
     return cudaMalloc(ptr, bytes) == cudaSuccess;
@@ -35,8 +67,14 @@ bool cuda_copy_d2d_async(void* dst, const void* src, size_t bytes, cudaStream_t 
 
 bool execute_cutensor_executor_device_impl(
     CuTensorExecutor& executor,
+    cudaStream_t stream,
     bool record_completion)
 {
+    cudaStream_t execution_stream = resolve_execution_stream(executor, stream);
+    if (!prepare_cutensor_executor_stream(executor, execution_stream)) {
+        return false;
+    }
+
     const Complex alpha{1.0, 0.0};
     const Complex beta{0.0, 0.0};
 
@@ -52,14 +90,14 @@ bool execute_cutensor_executor_device_impl(
             executor.d_output,
             executor.d_workspace,
             executor.plan_bundle.workspace_size,
-            executor.stream);
+            execution_stream);
 
     if (exec_status != CUTENSOR_STATUS_SUCCESS) {
         return false;
     }
 
     if (record_completion &&
-        !record_cutensor_executor_completion(executor)) {
+        !record_cutensor_executor_completion_on_stream(executor, execution_stream)) {
         return false;
     }
 
@@ -78,6 +116,8 @@ bool create_cutensor_executor(
     executor.desc = desc;
     executor.stream = nullptr;
     executor.completion_event = nullptr;
+    executor.completion_stream = nullptr;
+    executor.completion_recorded = false;
     executor.d_op = nullptr;
     executor.d_input = nullptr;
     executor.d_output = nullptr;
@@ -176,6 +216,8 @@ bool destroy_cutensor_executor(
 
     executor.operator_resident = false;
     executor.resident_operator_tag.clear();
+    executor.completion_stream = nullptr;
+    executor.completion_recorded = false;
 
     return ok;
 }
@@ -184,11 +226,27 @@ bool upload_cutensor_executor_operator(
     CuTensorExecutor& executor,
     const std::vector<Complex>& local_op)
 {
+    return upload_cutensor_executor_operator_on_stream(
+        executor,
+        local_op,
+        executor.stream);
+}
+
+bool upload_cutensor_executor_operator_on_stream(
+    CuTensorExecutor& executor,
+    const std::vector<Complex>& local_op,
+    cudaStream_t stream)
+{
     if (local_op.size() * sizeof(Complex) != executor.op_bytes) {
         return false;
     }
 
-    if (!cuda_copy_h2d_async(executor.d_op, local_op.data(), executor.op_bytes, executor.stream)) {
+    cudaStream_t execution_stream = resolve_execution_stream(executor, stream);
+    if (!prepare_cutensor_executor_stream(executor, execution_stream)) {
+        return false;
+    }
+
+    if (!cuda_copy_h2d_async(executor.d_op, local_op.data(), executor.op_bytes, execution_stream)) {
         return false;
     }
 
@@ -202,12 +260,25 @@ bool ensure_cutensor_executor_operator(
     const std::string& operator_tag,
     const std::vector<Complex>& local_op)
 {
+    return ensure_cutensor_executor_operator_on_stream(
+        executor,
+        operator_tag,
+        local_op,
+        executor.stream);
+}
+
+bool ensure_cutensor_executor_operator_on_stream(
+    CuTensorExecutor& executor,
+    const std::string& operator_tag,
+    const std::vector<Complex>& local_op,
+    cudaStream_t stream)
+{
     if (executor.operator_resident &&
         executor.resident_operator_tag == operator_tag) {
         return true;
     }
 
-    if (!upload_cutensor_executor_operator(executor, local_op)) {
+    if (!upload_cutensor_executor_operator_on_stream(executor, local_op, stream)) {
         return false;
     }
 
@@ -220,15 +291,31 @@ bool upload_cutensor_executor_input(
     CuTensorExecutor& executor,
     const std::vector<Complex>& input_tensor)
 {
+    return upload_cutensor_executor_input_on_stream(
+        executor,
+        input_tensor,
+        executor.stream);
+}
+
+bool upload_cutensor_executor_input_on_stream(
+    CuTensorExecutor& executor,
+    const std::vector<Complex>& input_tensor,
+    cudaStream_t stream)
+{
     if (input_tensor.size() * sizeof(Complex) != executor.input_bytes) {
         return false;
     }
 
-    if (!cuda_copy_h2d_async(executor.d_input, input_tensor.data(), executor.input_bytes, executor.stream)) {
+    cudaStream_t execution_stream = resolve_execution_stream(executor, stream);
+    if (!prepare_cutensor_executor_stream(executor, execution_stream)) {
         return false;
     }
 
-    if (cudaMemsetAsync(executor.d_output, 0, executor.output_bytes, executor.stream) != cudaSuccess) {
+    if (!cuda_copy_h2d_async(executor.d_input, input_tensor.data(), executor.input_bytes, execution_stream)) {
+        return false;
+    }
+
+    if (cudaMemsetAsync(executor.d_output, 0, executor.output_bytes, execution_stream) != cudaSuccess) {
         return false;
     }
 
@@ -259,6 +346,10 @@ bool copy_cutensor_executor_output_to_input(
         return false;
     }
 
+    if (!prepare_cutensor_executor_stream(dst_executor, dst_executor.stream)) {
+        return false;
+    }
+
     if (!wait_for_cutensor_executor_completion(src_executor, dst_executor.stream)) {
         return false;
     }
@@ -286,13 +377,27 @@ bool copy_cutensor_executor_output_to_input(
 bool execute_cutensor_executor_device(
     CuTensorExecutor& executor)
 {
-    return execute_cutensor_executor_device_impl(executor, true);
+    return execute_cutensor_executor_device_impl(executor, executor.stream, true);
+}
+
+bool execute_cutensor_executor_device_on_stream(
+    CuTensorExecutor& executor,
+    cudaStream_t stream)
+{
+    return execute_cutensor_executor_device_impl(executor, stream, true);
 }
 
 bool execute_cutensor_executor_device_no_completion(
     CuTensorExecutor& executor)
 {
-    return execute_cutensor_executor_device_impl(executor, false);
+    return execute_cutensor_executor_device_impl(executor, executor.stream, false);
+}
+
+bool execute_cutensor_executor_device_no_completion_on_stream(
+    CuTensorExecutor& executor,
+    cudaStream_t stream)
+{
+    return execute_cutensor_executor_device_impl(executor, stream, false);
 }
 
 bool download_cutensor_executor_output(
@@ -300,6 +405,10 @@ bool download_cutensor_executor_output(
     std::vector<Complex>& output_tensor)
 {
     if (output_tensor.size() * sizeof(Complex) != executor.output_bytes) {
+        return false;
+    }
+
+    if (!prepare_cutensor_executor_stream(executor, executor.stream)) {
         return false;
     }
 
@@ -376,6 +485,10 @@ bool execute_cutensor_executor_with_resident_operator_pinned(
         return false;
     }
 
+    if (!prepare_cutensor_executor_stream(executor, executor.stream)) {
+        return false;
+    }
+
     if (!cuda_copy_h2d_async(
             executor.d_input,
             input_buffer.data,
@@ -414,31 +527,43 @@ bool execute_cutensor_executor_with_resident_operator_pinned(
 bool record_cutensor_executor_completion(
     CuTensorExecutor& executor)
 {
-    if (executor.completion_event == nullptr || executor.stream == nullptr) {
+    return record_cutensor_executor_completion_on_stream(
+        executor,
+        executor.stream);
+}
+
+bool record_cutensor_executor_completion_on_stream(
+    CuTensorExecutor& executor,
+    cudaStream_t stream)
+{
+    cudaStream_t completion_stream = resolve_execution_stream(executor, stream);
+    if (executor.completion_event == nullptr || completion_stream == nullptr) {
         return false;
     }
 
-    return cudaEventRecord(executor.completion_event, executor.stream) == cudaSuccess;
+    if (cudaEventRecord(executor.completion_event, completion_stream) != cudaSuccess) {
+        return false;
+    }
+
+    executor.completion_stream = completion_stream;
+    executor.completion_recorded = true;
+    return true;
 }
 
 bool wait_for_cutensor_executor_completion(
     CuTensorExecutor& producer,
     cudaStream_t consumer_stream)
 {
-    if (producer.stream == nullptr) {
-        return false;
-    }
-
-    if (consumer_stream == nullptr) {
-        return cudaStreamSynchronize(producer.stream) == cudaSuccess;
-    }
-
-    if (producer.stream == consumer_stream) {
+    if (!producer.completion_recorded || producer.completion_event == nullptr) {
         return true;
     }
 
-    if (producer.completion_event == nullptr) {
-        return false;
+    if (consumer_stream == nullptr) {
+        return cudaEventSynchronize(producer.completion_event) == cudaSuccess;
+    }
+
+    if (producer.completion_stream == consumer_stream) {
+        return true;
     }
 
     return cudaStreamWaitEvent(
