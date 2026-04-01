@@ -104,6 +104,13 @@ bool execute_cutensor_executor_device_impl(
     return true;
 }
 
+bool finalize_cutensor_executor_preparation(
+    CuTensorExecutor& executor,
+    cudaStream_t stream)
+{
+    return record_cutensor_executor_completion_on_stream(executor, stream);
+}
+
 } // namespace
 
 bool create_cutensor_executor(
@@ -252,7 +259,7 @@ bool upload_cutensor_executor_operator_on_stream(
 
     executor.operator_resident = true;
     executor.resident_operator_tag.clear();
-    return true;
+    return finalize_cutensor_executor_preparation(executor, execution_stream);
 }
 
 bool ensure_cutensor_executor_operator(
@@ -319,7 +326,7 @@ bool upload_cutensor_executor_input_on_stream(
         return false;
     }
 
-    return true;
+    return finalize_cutensor_executor_preparation(executor, execution_stream);
 }
 
 bool upload_cutensor_executor_inputs(
@@ -371,7 +378,7 @@ bool copy_cutensor_executor_output_to_input(
         return false;
     }
 
-    return true;
+    return finalize_cutensor_executor_preparation(dst_executor, dst_executor.stream);
 }
 
 bool execute_cutensor_executor_device(
