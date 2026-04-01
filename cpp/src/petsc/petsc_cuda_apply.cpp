@@ -126,7 +126,8 @@ bool wait_for_executor_event(
     cudaStream_t consumer_stream)
 {
     if (consumer_stream == nullptr) {
-        return true;
+        return producer.stream != nullptr &&
+               cudaStreamSynchronize(producer.stream) == cudaSuccess;
     }
 
     return wait_for_cutensor_executor_completion(producer, consumer_stream);

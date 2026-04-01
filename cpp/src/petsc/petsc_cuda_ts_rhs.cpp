@@ -216,6 +216,10 @@ PetscErrorCode ts_rhs_function_cuda_grouped_commutator(
         rhs_ctx->batch_size,
         rhs_ctx->elementwise_stream));
 
+    if (cudaStreamSynchronize(rhs_ctx->elementwise_stream) != cudaSuccess) {
+        return PETSC_ERR_LIB;
+    }
+
     return 0;
 }
 
