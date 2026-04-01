@@ -34,13 +34,24 @@ bool execute_cutensor_dissipator_staged(
         return false;
     }
 
-    if (!copy_cutensor_executor_output_to_input(jump_left_executor, jump_right_executor)) {
+    void* const original_jump_right_input = jump_right_executor.d_input;
+    if (!wait_for_cutensor_executor_completion(
+            jump_left_executor,
+            jump_right_executor.stream)) {
+        return false;
+    }
+
+    jump_right_executor.d_input = jump_left_executor.d_output;
+    if (jump_left_executor.output_bytes != jump_right_executor.input_bytes) {
+        jump_right_executor.d_input = original_jump_right_input;
         return false;
     }
 
     if (!execute_cutensor_executor_device(jump_right_executor)) {
+        jump_right_executor.d_input = original_jump_right_input;
         return false;
     }
+    jump_right_executor.d_input = original_jump_right_input;
 
     if (!upload_cutensor_executor_operator(norm_left_executor, local_op_dag_op)) {
         return false;
