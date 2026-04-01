@@ -136,6 +136,45 @@ bool launch_vector_add_kernel(
     return cudaGetLastError() == cudaSuccess;
 }
 
+__global__ void vector_accumulate_kernel(
+    const culindblad::Complex* src,
+    culindblad::Complex* dst,
+    culindblad::Index size)
+{
+    const culindblad::Index idx =
+        static_cast<culindblad::Index>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+    if (idx >= size) {
+        return;
+    }
+
+    const cuDoubleComplex src_val =
+        reinterpret_cast<const cuDoubleComplex*>(src)[idx];
+    const cuDoubleComplex dst_val =
+        reinterpret_cast<const cuDoubleComplex*>(dst)[idx];
+
+    reinterpret_cast<cuDoubleComplex*>(dst)[idx] =
+        cuCadd(dst_val, src_val);
+}
+
+bool launch_vector_accumulate_kernel(
+    const void* d_src,
+    void* d_dst,
+    Index size,
+    cudaStream_t stream)
+{
+    const int block_size = 256;
+    const int grid_size =
+        static_cast<int>((size + block_size - 1) / block_size);
+
+    vector_accumulate_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const Complex*>(d_src),
+        reinterpret_cast<Complex*>(d_dst),
+        size);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
 __global__ void vector_scale_kernel(
     const culindblad::Complex* in,
     double scale,
@@ -173,6 +212,50 @@ bool launch_vector_scale_kernel(
         reinterpret_cast<const Complex*>(d_in),
         scale,
         reinterpret_cast<Complex*>(d_out),
+        size);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+__global__ void vector_scaled_accumulate_kernel(
+    const culindblad::Complex* src,
+    double scale,
+    culindblad::Complex* dst,
+    culindblad::Index size)
+{
+    const culindblad::Index idx =
+        static_cast<culindblad::Index>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+    if (idx >= size) {
+        return;
+    }
+
+    const cuDoubleComplex src_val =
+        reinterpret_cast<const cuDoubleComplex*>(src)[idx];
+    const cuDoubleComplex dst_val =
+        reinterpret_cast<const cuDoubleComplex*>(dst)[idx];
+    const cuDoubleComplex s =
+        make_cuDoubleComplex(scale, 0.0);
+
+    reinterpret_cast<cuDoubleComplex*>(dst)[idx] =
+        cuCadd(dst_val, cuCmul(s, src_val));
+}
+
+bool launch_vector_scaled_accumulate_kernel(
+    const void* d_src,
+    double scale,
+    void* d_dst,
+    Index size,
+    cudaStream_t stream)
+{
+    const int block_size = 256;
+    const int grid_size =
+        static_cast<int>((size + block_size - 1) / block_size);
+
+    vector_scaled_accumulate_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const Complex*>(d_src),
+        scale,
+        reinterpret_cast<Complex*>(d_dst),
         size);
 
     return cudaGetLastError() == cudaSuccess;

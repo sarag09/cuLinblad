@@ -27,6 +27,12 @@ bool launch_vector_add_kernel(
     void* d_out,
     Index size,
     cudaStream_t stream);
+
+bool launch_vector_accumulate_kernel(
+    const void* d_src,
+    void* d_dst,
+    Index size,
+    cudaStream_t stream);
     
 bool launch_vector_scale_kernel(
     const void* d_in,
@@ -34,7 +40,14 @@ bool launch_vector_scale_kernel(
     void* d_out,
     Index size,
     cudaStream_t stream);  
-    
+
+bool launch_vector_scaled_accumulate_kernel(
+    const void* d_src,
+    double scale,
+    void* d_dst,
+    Index size,
+    cudaStream_t stream);
+  
 bool launch_zero_batched_buffer_kernel(
     void* buffer,
     Index total_elements,

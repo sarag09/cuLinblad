@@ -2,6 +2,7 @@
 
 #include <petscts.h>
 
+#include <cstddef>
 #include <cuda_runtime.h>
 #include <string>
 #include <vector>
@@ -26,6 +27,10 @@ struct CachedGroupedLayoutEntry {
     std::vector<Index> sites;
     GroupedStateLayout grouped_layout;
     CudaGroupedStateLayout cuda_grouped_layout;
+    void* d_grouped_input;
+    void* d_grouped_term;
+    void* d_grouped_accum;
+    std::size_t grouped_bytes;
 };
 
 struct PetscCudaTsRhsContext {

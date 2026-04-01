@@ -48,6 +48,19 @@ const CachedGroupedLayoutEntry* find_cached_grouped_layout(
     return nullptr;
 }
 
+CachedGroupedLayoutEntry* find_cached_grouped_layout_mutable(
+    PetscCudaTsRhsContext& rhs_ctx,
+    const std::vector<Index>& sites)
+{
+    for (CachedGroupedLayoutEntry& entry : rhs_ctx.cached_grouped_layouts) {
+        if (same_sites(entry.sites, sites)) {
+            return &entry;
+        }
+    }
+
+    return nullptr;
+}
+
 PetscErrorCode zero_petsc_cuda_vec(
     Vec v,
     Index size,
@@ -189,6 +202,173 @@ PetscErrorCode scale_petsc_cuda_vec(
     return 0;
 }
 
+PetscErrorCode zero_grouped_layout_accumulator(
+    CachedGroupedLayoutEntry& layout_entry,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    const bool zero_ok =
+        launch_zero_batched_buffer_kernel(
+            layout_entry.d_grouped_accum,
+            batch_size * layout_entry.grouped_layout.grouped_size,
+            stream);
+
+    return zero_ok ? 0 : PETSC_ERR_LIB;
+}
+
+PetscErrorCode accumulate_grouped_layout_term(
+    CachedGroupedLayoutEntry& layout_entry,
+    double scale,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    const Index grouped_elements =
+        batch_size * layout_entry.grouped_layout.grouped_size;
+
+    const bool accum_ok =
+        scale == 1.0
+            ? launch_vector_accumulate_kernel(
+                  layout_entry.d_grouped_term,
+                  layout_entry.d_grouped_accum,
+                  grouped_elements,
+                  stream)
+            : launch_vector_scaled_accumulate_kernel(
+                  layout_entry.d_grouped_term,
+                  scale,
+                  layout_entry.d_grouped_accum,
+                  grouped_elements,
+                  stream);
+
+    return accum_ok ? 0 : PETSC_ERR_LIB;
+}
+
+PetscErrorCode apply_grouped_layout_terms_to_rhs(
+    const Solver& solver,
+    PetscCudaTsRhsContext& rhs_ctx,
+    Vec x,
+    Vec f,
+    CachedGroupedLayoutEntry& layout_entry,
+    PetscReal t)
+{
+    cudaStream_t s = rhs_ctx.elementwise_stream;
+    PetscCall(regroup_petsc_cuda_vec_to_grouped_buffer(
+        layout_entry.cuda_grouped_layout,
+        x,
+        layout_entry.d_grouped_input,
+        rhs_ctx.batch_size,
+        s));
+
+    PetscCall(zero_grouped_layout_accumulator(
+        layout_entry,
+        rhs_ctx.batch_size,
+        s));
+
+    bool has_contribution = false;
+
+    for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
+        if (!same_sites(layout_entry.sites, h_term.sites)) {
+            continue;
+        }
+
+        PetscCall(apply_grouped_commutator_cuda_buffer(
+            solver,
+            h_term.name,
+            h_term.matrix,
+            h_term.sites,
+            layout_entry.grouped_layout,
+            rhs_ctx.executor_cache,
+            layout_entry.d_grouped_input,
+            layout_entry.d_grouped_term,
+            rhs_ctx.batch_size,
+            s));
+
+        PetscCall(accumulate_grouped_layout_term(
+            layout_entry,
+            1.0,
+            rhs_ctx.batch_size,
+            s));
+        has_contribution = true;
+    }
+
+    for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx.cached_static_dissipators) {
+        if (!same_sites(layout_entry.sites, d_aux.sites)) {
+            continue;
+        }
+
+        PetscCall(apply_grouped_dissipator_cuda_buffer(
+            solver,
+            d_aux.name,
+            d_aux.l_op,
+            d_aux.l_dag,
+            d_aux.l_dag_l,
+            d_aux.sites,
+            layout_entry.grouped_layout,
+            rhs_ctx.executor_cache,
+            layout_entry.d_grouped_input,
+            layout_entry.d_grouped_term,
+            rhs_ctx.batch_size,
+            s));
+
+        PetscCall(accumulate_grouped_layout_term(
+            layout_entry,
+            1.0,
+            rhs_ctx.batch_size,
+            s));
+        has_contribution = true;
+    }
+
+    for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
+        if (!same_sites(layout_entry.sites, td_term.sites)) {
+            continue;
+        }
+
+        const double coeff =
+            evaluate_time_dependent_coefficient(td_term, static_cast<double>(t));
+
+        PetscCall(apply_grouped_commutator_cuda_buffer(
+            solver,
+            td_term.name,
+            td_term.matrix,
+            td_term.sites,
+            layout_entry.grouped_layout,
+            rhs_ctx.executor_cache,
+            layout_entry.d_grouped_input,
+            layout_entry.d_grouped_term,
+            rhs_ctx.batch_size,
+            s));
+
+        PetscCall(accumulate_grouped_layout_term(
+            layout_entry,
+            coeff,
+            rhs_ctx.batch_size,
+            s));
+        has_contribution = true;
+    }
+
+    if (!has_contribution) {
+        return 0;
+    }
+
+    PetscCall(flatten_grouped_buffer_to_petsc_cuda_vec(
+        layout_entry.cuda_grouped_layout,
+        layout_entry.d_grouped_accum,
+        rhs_ctx.work_vec_a,
+        rhs_ctx.batch_size,
+        s,
+        s));
+
+    PetscCall(add_petsc_cuda_vecs(
+        f,
+        rhs_ctx.work_vec_a,
+        rhs_ctx.work_vec_b,
+        rhs_total_density_dim(rhs_ctx),
+        s));
+
+    PetscCall(VecCopy(rhs_ctx.work_vec_b, f));
+
+    return 0;
+}
+
 } // namespace
 
 PetscErrorCode ts_rhs_function_cuda_grouped_commutator(
@@ -298,78 +478,18 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
     const Solver& solver = *rhs_ctx->solver;
     cudaStream_t s = rhs_ctx->elementwise_stream;
 
-    Vec term_out = rhs_ctx->work_vec_a;
-    Vec accum = rhs_ctx->work_vec_b;
-
     const Index total_density_dim = rhs_total_density_dim(*rhs_ctx);
     PetscCall(zero_petsc_cuda_vec(f, total_density_dim, s));
-    PetscCall(zero_petsc_cuda_vec(accum, total_density_dim, s));
 
-    for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
-        const CachedGroupedLayoutEntry* layout_entry =
-            find_cached_grouped_layout(*rhs_ctx, h_term.sites);
-
-        if (layout_entry == nullptr) {
-            return PETSC_ERR_LIB;
-        }
-
-        PetscCall(apply_grouped_commutator_cuda_vec(
+    for (CachedGroupedLayoutEntry& layout_entry : rhs_ctx->cached_grouped_layouts) {
+        PetscCall(apply_grouped_layout_terms_to_rhs(
             solver,
-            h_term.name,
-            h_term.matrix,
-            h_term.sites,
-            layout_entry->grouped_layout,
-            layout_entry->cuda_grouped_layout,
-            rhs_ctx->executor_cache,
+            *rhs_ctx,
             x,
-            term_out,
-            rhs_ctx->batch_size,
-            s));
-
-        PetscCall(add_petsc_cuda_vecs(
-            accum,
-            term_out,
             f,
-            total_density_dim,
-            s));
-
-        PetscCall(VecCopy(f, accum));
+            layout_entry,
+            0.0));
     }
-
-    for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx->cached_static_dissipators) {
-        const CachedGroupedLayoutEntry* layout_entry =
-            find_cached_grouped_layout(*rhs_ctx, d_aux.sites);
-
-        if (layout_entry == nullptr) {
-            return PETSC_ERR_LIB;
-        }
-
-        PetscCall(apply_grouped_dissipator_cuda_vec(
-            solver,
-            d_aux.name,
-            d_aux.l_op,
-            d_aux.l_dag,
-            d_aux.l_dag_l,
-            d_aux.sites,
-            layout_entry->grouped_layout,
-            layout_entry->cuda_grouped_layout,
-            rhs_ctx->executor_cache,
-            x,
-            term_out,
-            rhs_ctx->batch_size,
-            s));
-
-        PetscCall(add_petsc_cuda_vecs(
-            accum,
-            term_out,
-            f,
-            total_density_dim,
-            s));
-
-        PetscCall(VecCopy(f, accum));
-    }
-
-    PetscCall(VecCopy(accum, f));
 
     if (cudaStreamSynchronize(s) != cudaSuccess) {
         return PETSC_ERR_LIB;
@@ -393,120 +513,18 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
     const Solver& solver = *rhs_ctx->solver;
     cudaStream_t s = rhs_ctx->elementwise_stream;
 
-    Vec term_out = rhs_ctx->work_vec_a;
-    Vec scaled_term_out = rhs_ctx->work_vec_b;
-    Vec accum = rhs_ctx->work_vec_c;
-
     const Index total_density_dim = rhs_total_density_dim(*rhs_ctx);
     PetscCall(zero_petsc_cuda_vec(f, total_density_dim, s));
-    PetscCall(zero_petsc_cuda_vec(accum, total_density_dim, s));
 
-    for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
-        const CachedGroupedLayoutEntry* layout_entry =
-            find_cached_grouped_layout(*rhs_ctx, h_term.sites);
-
-        if (layout_entry == nullptr) {
-            return PETSC_ERR_LIB;
-        }
-
-        PetscCall(apply_grouped_commutator_cuda_vec(
+    for (CachedGroupedLayoutEntry& layout_entry : rhs_ctx->cached_grouped_layouts) {
+        PetscCall(apply_grouped_layout_terms_to_rhs(
             solver,
-            h_term.name,
-            h_term.matrix,
-            h_term.sites,
-            layout_entry->grouped_layout,
-            layout_entry->cuda_grouped_layout,
-            rhs_ctx->executor_cache,
+            *rhs_ctx,
             x,
-            term_out,
-            rhs_ctx->batch_size,
-            s));
-
-        PetscCall(add_petsc_cuda_vecs(
-            accum,
-            term_out,
             f,
-            total_density_dim,
-            s));
-
-        PetscCall(VecCopy(f, accum));
+            layout_entry,
+            t));
     }
-
-    for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx->cached_static_dissipators) {
-        const CachedGroupedLayoutEntry* layout_entry =
-            find_cached_grouped_layout(*rhs_ctx, d_aux.sites);
-
-        if (layout_entry == nullptr) {
-            return PETSC_ERR_LIB;
-        }
-
-        PetscCall(apply_grouped_dissipator_cuda_vec(
-            solver,
-            d_aux.name,
-            d_aux.l_op,
-            d_aux.l_dag,
-            d_aux.l_dag_l,
-            d_aux.sites,
-            layout_entry->grouped_layout,
-            layout_entry->cuda_grouped_layout,
-            rhs_ctx->executor_cache,
-            x,
-            term_out,
-            rhs_ctx->batch_size,
-            s));
-
-        PetscCall(add_petsc_cuda_vecs(
-            accum,
-            term_out,
-            f,
-            total_density_dim,
-            s));
-
-        PetscCall(VecCopy(f, accum));
-    }
-
-    for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
-        const CachedGroupedLayoutEntry* layout_entry =
-            find_cached_grouped_layout(*rhs_ctx, td_term.sites);
-
-        if (layout_entry == nullptr) {
-            return PETSC_ERR_LIB;
-        }
-
-        const double coeff =
-            evaluate_time_dependent_coefficient(td_term, static_cast<double>(t));
-
-        PetscCall(apply_grouped_commutator_cuda_vec(
-            solver,
-            td_term.name,
-            td_term.matrix,
-            td_term.sites,
-            layout_entry->grouped_layout,
-            layout_entry->cuda_grouped_layout,
-            rhs_ctx->executor_cache,
-            x,
-            term_out,
-            rhs_ctx->batch_size,
-            s));
-
-        PetscCall(scale_petsc_cuda_vec(
-            term_out,
-            coeff,
-            scaled_term_out,
-            total_density_dim,
-            s));
-
-        PetscCall(add_petsc_cuda_vecs(
-            accum,
-            scaled_term_out,
-            f,
-            total_density_dim,
-            s));
-
-        PetscCall(VecCopy(f, accum));
-    }
-
-    PetscCall(VecCopy(accum, f));
 
     if (cudaStreamSynchronize(s) != cudaSuccess) {
         return PETSC_ERR_LIB;

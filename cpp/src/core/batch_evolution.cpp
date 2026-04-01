@@ -80,7 +80,8 @@ std::vector<CachedDissipatorAuxiliaries> build_cached_static_dissipators(
 }
 
 std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
-    const Solver& solver)
+    const Solver& solver,
+    Index batch_size)
 {
     std::vector<CachedGroupedLayoutEntry> cached;
 
@@ -95,12 +96,39 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
         entry.sites = sites;
         entry.grouped_layout =
             make_grouped_state_layout(sites, solver.model.local_dims);
+        entry.d_grouped_input = nullptr;
+        entry.d_grouped_term = nullptr;
+        entry.d_grouped_accum = nullptr;
+        entry.grouped_bytes =
+            static_cast<std::size_t>(batch_size) *
+            static_cast<std::size_t>(entry.grouped_layout.grouped_size) *
+            sizeof(Complex);
 
         if (!create_cuda_grouped_state_layout(
                 entry.grouped_layout,
                 entry.cuda_grouped_layout)) {
             throw std::runtime_error(
                 "build_cached_grouped_layouts: failed to create CUDA grouped layout");
+        }
+
+        if (cudaMalloc(&entry.d_grouped_input, entry.grouped_bytes) != cudaSuccess ||
+            cudaMalloc(&entry.d_grouped_term, entry.grouped_bytes) != cudaSuccess ||
+            cudaMalloc(&entry.d_grouped_accum, entry.grouped_bytes) != cudaSuccess) {
+            if (entry.d_grouped_accum != nullptr) {
+                cudaFree(entry.d_grouped_accum);
+                entry.d_grouped_accum = nullptr;
+            }
+            if (entry.d_grouped_term != nullptr) {
+                cudaFree(entry.d_grouped_term);
+                entry.d_grouped_term = nullptr;
+            }
+            if (entry.d_grouped_input != nullptr) {
+                cudaFree(entry.d_grouped_input);
+                entry.d_grouped_input = nullptr;
+            }
+            (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
+            throw std::runtime_error(
+                "build_cached_grouped_layouts: failed to allocate grouped RHS buffers");
         }
 
         cached.push_back(std::move(entry));
@@ -125,6 +153,19 @@ void destroy_cached_grouped_layouts(
     std::vector<CachedGroupedLayoutEntry>& cached)
 {
     for (CachedGroupedLayoutEntry& entry : cached) {
+        if (entry.d_grouped_accum != nullptr) {
+            cudaFree(entry.d_grouped_accum);
+            entry.d_grouped_accum = nullptr;
+        }
+        if (entry.d_grouped_term != nullptr) {
+            cudaFree(entry.d_grouped_term);
+            entry.d_grouped_term = nullptr;
+        }
+        if (entry.d_grouped_input != nullptr) {
+            cudaFree(entry.d_grouped_input);
+            entry.d_grouped_input = nullptr;
+        }
+        entry.grouped_bytes = 0;
         (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
     }
     cached.clear();
@@ -211,7 +252,7 @@ PetscErrorCode create_cuda_batch_execution_context(
         cuda_grouped_layout,
         CuTensorExecutorCache{},
         build_cached_static_dissipators(solver),
-        build_cached_grouped_layouts(solver),
+        build_cached_grouped_layouts(solver, batch_size),
         nullptr,
         nullptr,
         nullptr,
