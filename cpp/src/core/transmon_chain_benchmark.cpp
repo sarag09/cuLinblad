@@ -83,6 +83,9 @@ PetscErrorCode create_cpu_benchmark_execution_context(
 
     PetscCall(TSCreate(PETSC_COMM_SELF, &ctx.ts));
     PetscCall(TSSetType(ctx.ts, TSRK));
+    TSAdapt cpu_adapt = nullptr;
+    PetscCall(TSGetAdapt(ctx.ts, &cpu_adapt));
+    PetscCall(TSAdaptSetType(cpu_adapt, TSADAPTNONE));
 
     PetscCall(VecCreate(PETSC_COMM_SELF, &ctx.x));
     PetscCall(VecSetSizes(ctx.x, PETSC_DECIDE, solver.layout.density_dim));
@@ -328,11 +331,17 @@ std::vector<std::vector<Complex>> evolve_state_batch_cuda_ts(
     const std::vector<std::vector<Complex>>& initial_states,
     double t0,
     double tfinal,
+    Index num_steps,
     CudaBatchExecutionContext& ctx)
 {
     if (!ctx.initialized || ctx.ts == nullptr || ctx.x == nullptr) {
         throw std::runtime_error(
             "evolve_state_batch_cuda_ts: CUDA benchmark context not initialized");
+    }
+
+    if (num_steps == 0) {
+        throw std::invalid_argument(
+            "evolve_state_batch_cuda_ts: num_steps must be > 0");
     }
 
     if (initial_states.size() != ctx.rhs_ctx.batch_size) {
@@ -357,11 +366,13 @@ std::vector<std::vector<Complex>> evolve_state_batch_cuda_ts(
     }
     PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
 
-    const double dt_initial = (tfinal - t0) / 1000.0;
+    const double dt_initial =
+        (tfinal - t0) / static_cast<double>(num_steps);
 
     PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ctx.ts, t0));
     PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ctx.ts, 0));
     PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ctx.ts, dt_initial));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ctx.ts, static_cast<PetscInt>(num_steps)));
     PetscCallAbort(PETSC_COMM_SELF, TSSetMaxTime(ctx.ts, tfinal));
     PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
 
@@ -646,6 +657,9 @@ TransmonChainBenchmarkTiming run_transmon_chain_cuda_benchmark(
             ctx));
 
     PetscCallAbort(PETSC_COMM_SELF, TSSetType(ctx.ts, TSRK));
+    TSAdapt gpu_adapt = nullptr;
+    PetscCallAbort(PETSC_COMM_SELF, TSGetAdapt(ctx.ts, &gpu_adapt));
+    PetscCallAbort(PETSC_COMM_SELF, TSAdaptSetType(gpu_adapt, TSADAPTNONE));
     PetscCallAbort(PETSC_COMM_SELF, TSSetRHSFunction(
         ctx.ts,
         nullptr,
@@ -665,6 +679,7 @@ TransmonChainBenchmarkTiming run_transmon_chain_cuda_benchmark(
             initial_states,
             config.t0,
             config.tfinal,
+            config.batched_num_steps,
             ctx);
 
     const auto t_end = std::chrono::steady_clock::now();

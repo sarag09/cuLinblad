@@ -105,7 +105,7 @@ int main(int argc, char** argv)
         base_config.t0 = 0.0;
         base_config.tfinal = 40.0;
         base_config.use_batched_gpu_specific_state_path = true;
-        base_config.batched_num_steps = 500;
+        base_config.batched_num_steps = 4000;
 
         const Model model = build_transmon_chain_model(base_config);
         const Solver solver = make_solver(model);
