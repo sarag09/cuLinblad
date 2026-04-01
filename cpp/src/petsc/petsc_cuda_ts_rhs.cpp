@@ -213,7 +213,8 @@ PetscErrorCode ts_rhs_function_cuda_grouped_commutator(
         rhs_ctx->executor_cache,
         x,
         f,
-        rhs_ctx->batch_size));
+        rhs_ctx->batch_size,
+        rhs_ctx->elementwise_stream));
 
     return 0;
 }
@@ -246,7 +247,8 @@ PetscErrorCode ts_rhs_function_cuda_grouped_liouvillian(
         rhs_ctx->executor_cache,
         x,
         temp_comm,
-        rhs_ctx->batch_size));
+        rhs_ctx->batch_size,
+        s));
 
     PetscCall(apply_grouped_dissipator_cuda_vec(
         *rhs_ctx->solver,
@@ -260,7 +262,8 @@ PetscErrorCode ts_rhs_function_cuda_grouped_liouvillian(
         rhs_ctx->executor_cache,
         x,
         temp_diss,
-        rhs_ctx->batch_size));
+        rhs_ctx->batch_size,
+        s));
 
     PetscCall(add_petsc_cuda_vecs(
         temp_comm,
@@ -316,7 +319,8 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
             rhs_ctx->executor_cache,
             x,
             term_out,
-            rhs_ctx->batch_size));
+            rhs_ctx->batch_size,
+            s));
 
         PetscCall(add_petsc_cuda_vecs(
             accum,
@@ -348,7 +352,8 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
             rhs_ctx->executor_cache,
             x,
             term_out,
-            rhs_ctx->batch_size));
+            rhs_ctx->batch_size,
+            s));
 
         PetscCall(add_petsc_cuda_vecs(
             accum,
@@ -410,7 +415,8 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             rhs_ctx->executor_cache,
             x,
             term_out,
-            rhs_ctx->batch_size));
+            rhs_ctx->batch_size,
+            s));
 
         PetscCall(add_petsc_cuda_vecs(
             accum,
@@ -442,7 +448,8 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             rhs_ctx->executor_cache,
             x,
             term_out,
-            rhs_ctx->batch_size));
+            rhs_ctx->batch_size,
+            s));
 
         PetscCall(add_petsc_cuda_vecs(
             accum,
@@ -475,7 +482,8 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             rhs_ctx->executor_cache,
             x,
             term_out,
-            rhs_ctx->batch_size));
+            rhs_ctx->batch_size,
+            s));
 
         PetscCall(scale_petsc_cuda_vec(
             term_out,

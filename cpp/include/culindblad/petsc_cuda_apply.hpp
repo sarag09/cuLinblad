@@ -22,7 +22,8 @@ PetscErrorCode apply_grouped_left_cuda_vec(
     CuTensorExecutorCache& executor_cache,
     Vec x,
     Vec y,
-    Index batch_size = 1);
+    Index batch_size = 1,
+    cudaStream_t consumer_stream = nullptr);
 
 PetscErrorCode apply_grouped_right_cuda_vec(
     const Solver& solver,
@@ -34,7 +35,8 @@ PetscErrorCode apply_grouped_right_cuda_vec(
     CuTensorExecutorCache& executor_cache,
     Vec x,
     Vec y,
-    Index batch_size = 1);
+    Index batch_size = 1,
+    cudaStream_t consumer_stream = nullptr);
 
 PetscErrorCode apply_grouped_commutator_cuda_vec(
     const Solver& solver,
@@ -46,7 +48,8 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
     CuTensorExecutorCache& executor_cache,
     Vec x,
     Vec y,
-    Index batch_size = 1);
+    Index batch_size = 1,
+    cudaStream_t consumer_stream = nullptr);
 
 PetscErrorCode apply_grouped_dissipator_cuda_vec(
     const Solver& solver,
@@ -60,6 +63,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
     CuTensorExecutorCache& executor_cache,
     Vec x,
     Vec y,
-    Index batch_size = 1);
+    Index batch_size = 1,
+    cudaStream_t consumer_stream = nullptr);
 
 } // namespace culindblad
