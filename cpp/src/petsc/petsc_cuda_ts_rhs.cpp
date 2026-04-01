@@ -13,6 +13,11 @@ namespace culindblad {
 
 namespace {
 
+Index rhs_total_density_dim(const PetscCudaTsRhsContext& rhs_ctx)
+{
+    return rhs_ctx.batch_size * rhs_ctx.solver->layout.density_dim;
+}
+
 bool same_sites(
     const std::vector<Index>& a,
     const std::vector<Index>& b)
@@ -207,7 +212,8 @@ PetscErrorCode ts_rhs_function_cuda_grouped_commutator(
         rhs_ctx->cuda_grouped_layout,
         rhs_ctx->executor_cache,
         x,
-        f));
+        f,
+        rhs_ctx->batch_size));
 
     return 0;
 }
@@ -239,7 +245,8 @@ PetscErrorCode ts_rhs_function_cuda_grouped_liouvillian(
         rhs_ctx->cuda_grouped_layout,
         rhs_ctx->executor_cache,
         x,
-        temp_comm));
+        temp_comm,
+        rhs_ctx->batch_size));
 
     PetscCall(apply_grouped_dissipator_cuda_vec(
         *rhs_ctx->solver,
@@ -252,13 +259,14 @@ PetscErrorCode ts_rhs_function_cuda_grouped_liouvillian(
         rhs_ctx->cuda_grouped_layout,
         rhs_ctx->executor_cache,
         x,
-        temp_diss));
+        temp_diss,
+        rhs_ctx->batch_size));
 
     PetscCall(add_petsc_cuda_vecs(
         temp_comm,
         temp_diss,
         f,
-        rhs_ctx->solver->layout.density_dim,
+        rhs_total_density_dim(*rhs_ctx),
         s));
 
     if (cudaStreamSynchronize(s) != cudaSuccess) {
@@ -286,8 +294,9 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
     Vec term_out = rhs_ctx->work_vec_a;
     Vec accum = rhs_ctx->work_vec_b;
 
-    PetscCall(zero_petsc_cuda_vec(f, solver.layout.density_dim, s));
-    PetscCall(zero_petsc_cuda_vec(accum, solver.layout.density_dim, s));
+    const Index total_density_dim = rhs_total_density_dim(*rhs_ctx);
+    PetscCall(zero_petsc_cuda_vec(f, total_density_dim, s));
+    PetscCall(zero_petsc_cuda_vec(accum, total_density_dim, s));
 
     for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
         const CachedGroupedLayoutEntry* layout_entry =
@@ -306,13 +315,14 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
             layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
-            term_out));
+            term_out,
+            rhs_ctx->batch_size));
 
         PetscCall(add_petsc_cuda_vecs(
             accum,
             term_out,
             f,
-            solver.layout.density_dim,
+            total_density_dim,
             s));
 
         PetscCall(VecCopy(f, accum));
@@ -337,13 +347,14 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
             layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
-            term_out));
+            term_out,
+            rhs_ctx->batch_size));
 
         PetscCall(add_petsc_cuda_vecs(
             accum,
             term_out,
             f,
-            solver.layout.density_dim,
+            total_density_dim,
             s));
 
         PetscCall(VecCopy(f, accum));
@@ -377,8 +388,9 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
     Vec scaled_term_out = rhs_ctx->work_vec_b;
     Vec accum = rhs_ctx->work_vec_c;
 
-    PetscCall(zero_petsc_cuda_vec(f, solver.layout.density_dim, s));
-    PetscCall(zero_petsc_cuda_vec(accum, solver.layout.density_dim, s));
+    const Index total_density_dim = rhs_total_density_dim(*rhs_ctx);
+    PetscCall(zero_petsc_cuda_vec(f, total_density_dim, s));
+    PetscCall(zero_petsc_cuda_vec(accum, total_density_dim, s));
 
     for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
         const CachedGroupedLayoutEntry* layout_entry =
@@ -397,13 +409,14 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
-            term_out));
+            term_out,
+            rhs_ctx->batch_size));
 
         PetscCall(add_petsc_cuda_vecs(
             accum,
             term_out,
             f,
-            solver.layout.density_dim,
+            total_density_dim,
             s));
 
         PetscCall(VecCopy(f, accum));
@@ -428,13 +441,14 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
-            term_out));
+            term_out,
+            rhs_ctx->batch_size));
 
         PetscCall(add_petsc_cuda_vecs(
             accum,
             term_out,
             f,
-            solver.layout.density_dim,
+            total_density_dim,
             s));
 
         PetscCall(VecCopy(f, accum));
@@ -460,20 +474,21 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
             layout_entry->cuda_grouped_layout,
             rhs_ctx->executor_cache,
             x,
-            term_out));
+            term_out,
+            rhs_ctx->batch_size));
 
         PetscCall(scale_petsc_cuda_vec(
             term_out,
             coeff,
             scaled_term_out,
-            solver.layout.density_dim,
+            total_density_dim,
             s));
 
         PetscCall(add_petsc_cuda_vecs(
             accum,
             scaled_term_out,
             f,
-            solver.layout.density_dim,
+            total_density_dim,
             s));
 
         PetscCall(VecCopy(f, accum));

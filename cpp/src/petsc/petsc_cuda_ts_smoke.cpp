@@ -169,6 +169,7 @@ PetscErrorCode run_ts_cuda_grouped_left_smoke_test(
 
     PetscCudaTsRhsContext rhs_ctx{
         &solver,
+        1,
         &local_op,
         nullptr,
         nullptr,
@@ -258,6 +259,7 @@ PetscErrorCode run_ts_cuda_grouped_liouvillian_smoke_test(
 
     PetscCudaTsRhsContext rhs_ctx{
         &solver,
+        1,
         &h_local_op,
         &d_local_op,
         &d_local_op_dag,
@@ -344,6 +346,7 @@ PetscErrorCode run_ts_cuda_static_model_liouvillian_smoke_test(
 
     PetscCudaTsRhsContext rhs_ctx{
         &solver,
+        1,
         nullptr,
         nullptr,
         nullptr,
@@ -433,6 +436,7 @@ PetscErrorCode run_ts_cuda_full_model_liouvillian_smoke_test(
 
     PetscCudaTsRhsContext rhs_ctx{
         &solver,
+        1,
         nullptr,
         nullptr,
         nullptr,

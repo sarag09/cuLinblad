@@ -30,6 +30,7 @@ struct CachedGroupedLayoutEntry {
 
 struct PetscCudaTsRhsContext {
     const Solver* solver;
+    Index batch_size;
     const std::vector<Complex>* h_local_op;
     const std::vector<Complex>* d_local_op;
     const std::vector<Complex>* d_local_op_dag;

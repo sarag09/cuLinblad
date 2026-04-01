@@ -163,8 +163,13 @@ PetscErrorCode destroy_rhs_work_vectors(
 
 PetscErrorCode create_cuda_batch_execution_context(
     const Solver& solver,
+    Index batch_size,
     CudaBatchExecutionContext& ctx)
 {
+    if (batch_size == 0) {
+        return PETSC_ERR_ARG_OUTOFRANGE;
+    }
+
     ctx.ts = nullptr;
     ctx.x = nullptr;
     ctx.initialized = false;
@@ -176,7 +181,11 @@ PetscErrorCode create_cuda_batch_execution_context(
     PetscCall(TSSetType(ctx.ts, TSEULER));
 
     PetscCall(VecCreate(PETSC_COMM_SELF, &ctx.x));
-    PetscCall(VecSetSizes(ctx.x, PETSC_DECIDE, solver.layout.density_dim));
+    PetscCall(
+        VecSetSizes(
+            ctx.x,
+            PETSC_DECIDE,
+            batch_size * solver.layout.density_dim));
     PetscCall(VecSetType(ctx.x, VECCUDA));
     PetscCall(VecSet(ctx.x, 0.0));
 
@@ -192,6 +201,7 @@ PetscErrorCode create_cuda_batch_execution_context(
 
     ctx.rhs_ctx = PetscCudaTsRhsContext{
         &solver,
+        batch_size,
         nullptr,
         nullptr,
         nullptr,
@@ -331,58 +341,65 @@ BatchEvolutionResult evolve_density_batch_cuda_ts(
 
     const Index density_dim = solver.layout.density_dim;
 
-    CudaBatchExecutionContext ctx{};
-    PetscCallAbort(PETSC_COMM_SELF, create_cuda_batch_execution_context(solver, ctx));
+    if (initial_states.size() != config.batch_size) {
+        throw std::invalid_argument(
+            "evolve_density_batch_cuda_ts: initial_states size must equal config.batch_size for true batching");
+    }
 
-    for (Index batch_begin = 0; batch_begin < initial_states.size(); batch_begin += config.batch_size) {
-        const Index batch_end =
-            std::min<Index>(batch_begin + config.batch_size, initial_states.size());
-
-        for (Index state_idx = batch_begin; state_idx < batch_end; ++state_idx) {
-            if (initial_states[state_idx].size() != density_dim) {
-                PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
-                throw std::invalid_argument(
-                    "evolve_density_batch_cuda_ts: initial state size mismatch");
-            }
-
-            PetscCallAbort(PETSC_COMM_SELF, VecSet(ctx.x, 0.0));
-
-            PetscScalar* x_ptr = nullptr;
-            PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
-            for (Index i = 0; i < density_dim; ++i) {
-                x_ptr[i] = initial_states[state_idx][i];
-            }
-            PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
-
-            if (ctx.ts != nullptr) {
-                PetscCallAbort(PETSC_COMM_SELF, TSDestroy(&ctx.ts));
-                ctx.ts = nullptr;
-            }
-
-            PetscCallAbort(PETSC_COMM_SELF, TSCreate(PETSC_COMM_SELF, &ctx.ts));
-            PetscCallAbort(PETSC_COMM_SELF, TSSetType(ctx.ts, TSEULER));
-            PetscCallAbort(
-                PETSC_COMM_SELF,
-                TSSetRHSFunction(
-                    ctx.ts,
-                    nullptr,
-                    ts_rhs_function_cuda_full_model_liouvillian,
-                    &ctx.rhs_ctx));
-            PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ctx.ts, config.t0));
-            PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ctx.ts, config.dt));
-            PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ctx.ts, static_cast<PetscInt>(config.num_steps)));
-            PetscCallAbort(PETSC_COMM_SELF, TSSetExactFinalTime(ctx.ts, TS_EXACTFINALTIME_MATCHSTEP));
-            PetscCallAbort(PETSC_COMM_SELF, TSSetFromOptions(ctx.ts));
-            PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
-
-            PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
-            result.final_states[state_idx].resize(density_dim);
-            for (Index i = 0; i < density_dim; ++i) {
-                result.final_states[state_idx][i] = x_ptr[i];
-            }
-            PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
+    for (const std::vector<Complex>& state : initial_states) {
+        if (state.size() != density_dim) {
+            throw std::invalid_argument(
+                "evolve_density_batch_cuda_ts: initial state size mismatch");
         }
     }
+
+    CudaBatchExecutionContext ctx{};
+    PetscCallAbort(
+        PETSC_COMM_SELF,
+        create_cuda_batch_execution_context(
+            solver,
+            config.batch_size,
+            ctx));
+
+    PetscCallAbort(PETSC_COMM_SELF, VecSet(ctx.x, 0.0));
+
+    PetscScalar* x_ptr = nullptr;
+    PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
+    for (Index batch = 0; batch < config.batch_size; ++batch) {
+        for (Index i = 0; i < density_dim; ++i) {
+            x_ptr[batch * density_dim + i] = initial_states[batch][i];
+        }
+    }
+    PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
+
+    PetscCallAbort(PETSC_COMM_SELF, TSSetType(ctx.ts, TSEULER));
+    PetscCallAbort(
+        PETSC_COMM_SELF,
+        TSSetRHSFunction(
+            ctx.ts,
+            nullptr,
+            ts_rhs_function_cuda_full_model_liouvillian,
+            &ctx.rhs_ctx));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ctx.ts, config.t0));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ctx.ts, config.dt));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ctx.ts, static_cast<PetscInt>(config.num_steps)));
+    PetscCallAbort(
+        PETSC_COMM_SELF,
+        TSSetMaxTime(
+            ctx.ts,
+            config.t0 + static_cast<double>(config.num_steps) * config.dt));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetExactFinalTime(ctx.ts, TS_EXACTFINALTIME_MATCHSTEP));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetFromOptions(ctx.ts));
+    PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
+
+    PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
+    for (Index batch = 0; batch < config.batch_size; ++batch) {
+        result.final_states[batch].resize(density_dim);
+        for (Index i = 0; i < density_dim; ++i) {
+            result.final_states[batch][i] = x_ptr[batch * density_dim + i];
+        }
+    }
+    PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
 
     PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
     return result;

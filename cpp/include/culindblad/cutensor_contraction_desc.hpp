@@ -25,10 +25,12 @@ struct CuTensorContractionDesc {
 
 CuTensorContractionDesc make_cutensor_left_contraction_desc(
     const std::vector<Index>& target_sites,
-    const std::vector<Index>& local_dims);
+    const std::vector<Index>& local_dims,
+    Index batch_size = 1);
 
 CuTensorContractionDesc make_cutensor_right_contraction_desc(
     const std::vector<Index>& target_sites,
-    const std::vector<Index>& local_dims);
+    const std::vector<Index>& local_dims,
+    Index batch_size = 1);
 
 } // namespace culindblad

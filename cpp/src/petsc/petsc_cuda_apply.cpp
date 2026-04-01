@@ -132,13 +132,14 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
     const std::string& cache_key,
     const std::string& operator_tag,
     Vec x,
-    Vec y)
+    Vec y,
+    Index batch_size)
 {
     (void)solver;
     (void)target_sites;
 
     const std::size_t grouped_bytes =
-        grouped_layout.grouped_size * sizeof(Complex);
+        batch_size * grouped_layout.grouped_size * sizeof(Complex);
 
     const void* d_flat_input = nullptr;
     void* d_flat_output = nullptr;
@@ -149,9 +150,9 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
     CuTensorExecutor* executor = nullptr;
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
-        cache_key,
+        cache_key + "_batch_" + std::to_string(batch_size),
         contraction_desc,
-        operator_tag,
+        operator_tag + "_batch_" + std::to_string(batch_size),
         local_op,
         grouped_bytes,
         executor);
@@ -162,8 +163,9 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
     }
 
     const bool regroup_in_ok =
-        launch_flat_to_grouped_kernel(
+        launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
+            batch_size,
             d_flat_input,
             executor->d_input,
             executor->stream);
@@ -194,8 +196,9 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
     }
 
     const bool regroup_out_ok =
-        launch_grouped_to_flat_kernel(
+        launch_grouped_to_flat_batched_kernel(
             cuda_grouped_layout,
+            batch_size,
             executor->d_output,
             d_flat_output,
             executor->stream);
@@ -222,10 +225,14 @@ PetscErrorCode apply_grouped_left_cuda_vec(
     const CudaGroupedStateLayout& cuda_grouped_layout,
     CuTensorExecutorCache& executor_cache,
     Vec x,
-    Vec y)
+    Vec y,
+    Index batch_size)
 {
     const CuTensorContractionDesc left_desc =
-        make_cutensor_left_contraction_desc(target_sites, solver.model.local_dims);
+        make_cutensor_left_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batch_size);
 
     return apply_grouped_cuda_vec_impl(
         solver,
@@ -238,7 +245,8 @@ PetscErrorCode apply_grouped_left_cuda_vec(
         "petsc_grouped_left_apply_" + term_label,
         "petsc_grouped_left_operator_" + term_label,
         x,
-        y);
+        y,
+        batch_size);
 }
 
 PetscErrorCode apply_grouped_right_cuda_vec(
@@ -250,10 +258,14 @@ PetscErrorCode apply_grouped_right_cuda_vec(
     const CudaGroupedStateLayout& cuda_grouped_layout,
     CuTensorExecutorCache& executor_cache,
     Vec x,
-    Vec y)
+    Vec y,
+    Index batch_size)
 {
     const CuTensorContractionDesc right_desc =
-        make_cutensor_right_contraction_desc(target_sites, solver.model.local_dims);
+        make_cutensor_right_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batch_size);
 
     return apply_grouped_cuda_vec_impl(
         solver,
@@ -266,7 +278,8 @@ PetscErrorCode apply_grouped_right_cuda_vec(
         "petsc_grouped_right_apply_" + term_label,
         "petsc_grouped_right_operator_" + term_label,
         x,
-        y);
+        y,
+        batch_size);
 }
 
 PetscErrorCode apply_grouped_commutator_cuda_vec(
@@ -278,10 +291,11 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
     const CudaGroupedStateLayout& cuda_grouped_layout,
     CuTensorExecutorCache& executor_cache,
     Vec x,
-    Vec y)
+    Vec y,
+    Index batch_size)
 {
     const std::size_t grouped_bytes =
-        grouped_layout.grouped_size * sizeof(Complex);
+        batch_size * grouped_layout.grouped_size * sizeof(Complex);
 
     const void* d_flat_input = nullptr;
     void* d_flat_output = nullptr;
@@ -290,9 +304,15 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
     PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
 
     const CuTensorContractionDesc left_desc =
-        make_cutensor_left_contraction_desc(target_sites, solver.model.local_dims);
+        make_cutensor_left_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batch_size);
     const CuTensorContractionDesc right_desc =
-        make_cutensor_right_contraction_desc(target_sites, solver.model.local_dims);
+        make_cutensor_right_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batch_size);
 
     CuTensorExecutor* left_executor = nullptr;
     CuTensorExecutor* right_executor = nullptr;
@@ -300,7 +320,7 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_comm_left_apply_" + term_label,
+        "petsc_grouped_comm_left_apply_" + term_label + "_batch_" + std::to_string(batch_size),
         left_desc,
         "petsc_grouped_comm_left_operator_" + term_label,
         local_op,
@@ -314,7 +334,7 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_comm_right_apply_" + term_label,
+        "petsc_grouped_comm_right_apply_" + term_label + "_batch_" + std::to_string(batch_size),
         right_desc,
         "petsc_grouped_comm_right_operator_" + term_label,
         local_op,
@@ -328,7 +348,7 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_comm_combine_buffer_" + term_label,
+        "petsc_grouped_comm_combine_buffer_" + term_label + "_batch_" + std::to_string(batch_size),
         left_desc,
         "petsc_grouped_comm_combine_operator_" + term_label,
         local_op,
@@ -341,15 +361,17 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
     }
 
     const bool regroup_left_ok =
-        launch_flat_to_grouped_kernel(
+        launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
+            batch_size,
             d_flat_input,
             left_executor->d_input,
             left_executor->stream);
 
     const bool regroup_right_ok =
-        launch_flat_to_grouped_kernel(
+        launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
+            batch_size,
             d_flat_input,
             right_executor->d_input,
             right_executor->stream);
@@ -391,7 +413,7 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
             left_executor->d_output,
             right_executor->d_output,
             combine_executor->d_output,
-            grouped_layout.grouped_size,
+            batch_size * grouped_layout.grouped_size,
             combine_executor->stream);
 
     if (!combine_ok) {
@@ -401,8 +423,9 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
     }
 
     const bool regroup_out_ok =
-        launch_grouped_to_flat_kernel(
+        launch_grouped_to_flat_batched_kernel(
             cuda_grouped_layout,
+            batch_size,
             combine_executor->d_output,
             d_flat_output,
             combine_executor->stream);
@@ -435,10 +458,11 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
     const CudaGroupedStateLayout& cuda_grouped_layout,
     CuTensorExecutorCache& executor_cache,
     Vec x,
-    Vec y)
+    Vec y,
+    Index batch_size)
 {
     const std::size_t grouped_bytes =
-        grouped_layout.grouped_size * sizeof(Complex);
+        batch_size * grouped_layout.grouped_size * sizeof(Complex);
 
     const void* d_flat_input = nullptr;
     void* d_flat_output = nullptr;
@@ -447,9 +471,15 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
     PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
 
     const CuTensorContractionDesc left_desc =
-        make_cutensor_left_contraction_desc(target_sites, solver.model.local_dims);
+        make_cutensor_left_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batch_size);
     const CuTensorContractionDesc right_desc =
-        make_cutensor_right_contraction_desc(target_sites, solver.model.local_dims);
+        make_cutensor_right_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batch_size);
 
     CuTensorExecutor* jump_left_executor = nullptr;
     CuTensorExecutor* jump_right_executor = nullptr;
@@ -458,7 +488,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_diss_jump_left_" + term_label,
+        "petsc_grouped_diss_jump_left_" + term_label + "_batch_" + std::to_string(batch_size),
         left_desc,
         "petsc_grouped_diss_L_" + term_label,
         local_op,
@@ -472,7 +502,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_diss_jump_right_" + term_label,
+        "petsc_grouped_diss_jump_right_" + term_label + "_batch_" + std::to_string(batch_size),
         right_desc,
         "petsc_grouped_diss_Ldag_" + term_label,
         local_op_dag,
@@ -486,7 +516,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_diss_norm_left_" + term_label,
+        "petsc_grouped_diss_norm_left_" + term_label + "_batch_" + std::to_string(batch_size),
         left_desc,
         "petsc_grouped_diss_LdagL_" + term_label,
         local_op_dag_op,
@@ -500,7 +530,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
 
     ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_diss_norm_right_" + term_label,
+        "petsc_grouped_diss_norm_right_" + term_label + "_batch_" + std::to_string(batch_size),
         right_desc,
         "petsc_grouped_diss_LdagL_" + term_label,
         local_op_dag_op,
@@ -513,22 +543,25 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
     }
 
     const bool regroup_jump_left_ok =
-        launch_flat_to_grouped_kernel(
+        launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
+            batch_size,
             d_flat_input,
             jump_left_executor->d_input,
             jump_left_executor->stream);
 
     const bool regroup_norm_left_ok =
-        launch_flat_to_grouped_kernel(
+        launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
+            batch_size,
             d_flat_input,
             norm_left_executor->d_input,
             norm_left_executor->stream);
 
     const bool regroup_norm_right_ok =
-        launch_flat_to_grouped_kernel(
+        launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
+            batch_size,
             d_flat_input,
             norm_right_executor->d_input,
             norm_right_executor->stream);
@@ -592,7 +625,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
             norm_left_executor->d_output,
             norm_right_executor->d_output,
             norm_right_executor->d_output,
-            grouped_layout.grouped_size,
+            batch_size * grouped_layout.grouped_size,
             norm_right_executor->stream);
 
     if (!combine_ok) {
@@ -602,8 +635,9 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
     }
 
     const bool regroup_out_ok =
-        launch_grouped_to_flat_kernel(
+        launch_grouped_to_flat_batched_kernel(
             cuda_grouped_layout,
+            batch_size,
             norm_right_executor->d_output,
             d_flat_output,
             norm_right_executor->stream);

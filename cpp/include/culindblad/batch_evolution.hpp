@@ -57,6 +57,7 @@ BatchEvolutionTiming time_density_batch_cuda_ts(
 
 PetscErrorCode create_cuda_batch_execution_context(
     const Solver& solver,
+    Index batch_size,
     CudaBatchExecutionContext& ctx);
 
 PetscErrorCode destroy_cuda_batch_execution_context(

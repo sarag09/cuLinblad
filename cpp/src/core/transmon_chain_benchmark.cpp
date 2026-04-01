@@ -323,24 +323,37 @@ std::vector<std::vector<Complex>> make_selected_basis_density_states(
     return states;
 }
 
-std::vector<Complex> evolve_single_state_cuda_ts(
+std::vector<std::vector<Complex>> evolve_state_batch_cuda_ts(
     const Solver& solver,
-    const std::vector<Complex>& initial_state,
+    const std::vector<std::vector<Complex>>& initial_states,
     double t0,
     double tfinal,
     CudaBatchExecutionContext& ctx)
 {
     if (!ctx.initialized || ctx.ts == nullptr || ctx.x == nullptr) {
         throw std::runtime_error(
-            "evolve_single_state_cuda_ts: CUDA benchmark context not initialized");
+            "evolve_state_batch_cuda_ts: CUDA benchmark context not initialized");
+    }
+
+    if (initial_states.size() != ctx.rhs_ctx.batch_size) {
+        throw std::invalid_argument(
+            "evolve_state_batch_cuda_ts: initial state count must match context batch size");
     }
 
     PetscCallAbort(PETSC_COMM_SELF, VecSet(ctx.x, 0.0));
 
     PetscScalar* x_ptr = nullptr;
     PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
-    for (Index i = 0; i < solver.layout.density_dim; ++i) {
-        x_ptr[i] = initial_state[i];
+    for (Index batch = 0; batch < initial_states.size(); ++batch) {
+        if (initial_states[batch].size() != solver.layout.density_dim) {
+            PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
+            throw std::invalid_argument(
+                "evolve_state_batch_cuda_ts: initial state size mismatch");
+        }
+
+        for (Index i = 0; i < solver.layout.density_dim; ++i) {
+            x_ptr[batch * solver.layout.density_dim + i] = initial_states[batch][i];
+        }
     }
     PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
 
@@ -353,13 +366,17 @@ std::vector<Complex> evolve_single_state_cuda_ts(
     PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
 
     PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
-    std::vector<Complex> final_state(solver.layout.density_dim, Complex{0.0, 0.0});
-    for (Index i = 0; i < solver.layout.density_dim; ++i) {
-        final_state[i] = x_ptr[i];
+    std::vector<std::vector<Complex>> final_states(
+        initial_states.size(),
+        std::vector<Complex>(solver.layout.density_dim, Complex{0.0, 0.0}));
+    for (Index batch = 0; batch < initial_states.size(); ++batch) {
+        for (Index i = 0; i < solver.layout.density_dim; ++i) {
+            final_states[batch][i] = x_ptr[batch * solver.layout.density_dim + i];
+        }
     }
     PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
 
-    return final_state;
+    return final_states;
 }
 
 } // namespace
@@ -621,7 +638,12 @@ TransmonChainBenchmarkTiming run_transmon_chain_cuda_benchmark(
         make_selected_basis_density_states(solver, selected_indices);
 
     CudaBatchExecutionContext ctx{};
-    PetscCallAbort(PETSC_COMM_SELF, create_cuda_batch_execution_context(solver, ctx));
+    PetscCallAbort(
+        PETSC_COMM_SELF,
+        create_cuda_batch_execution_context(
+            solver,
+            selected_indices.size(),
+            ctx));
 
     PetscCallAbort(PETSC_COMM_SELF, TSSetType(ctx.ts, TSRK));
     PetscCallAbort(PETSC_COMM_SELF, TSSetRHSFunction(
@@ -637,17 +659,13 @@ TransmonChainBenchmarkTiming run_transmon_chain_cuda_benchmark(
 
     TransmonChainBenchmarkTiming timing;
     timing.num_evolved_states = selected_indices.size();
-    timing.final_states.resize(selected_indices.size());
-
-    for (Index i = 0; i < initial_states.size(); ++i) {
-        timing.final_states[i] =
-            evolve_single_state_cuda_ts(
-                solver,
-                initial_states[i],
-                config.t0,
-                config.tfinal,
-                ctx);
-    }
+    timing.final_states =
+        evolve_state_batch_cuda_ts(
+            solver,
+            initial_states,
+            config.t0,
+            config.tfinal,
+            ctx);
 
     const auto t_end = std::chrono::steady_clock::now();
     timing.wall_seconds =

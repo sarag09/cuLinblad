@@ -37,4 +37,18 @@ bool launch_grouped_to_flat_kernel(
     void* d_flat_output,
     cudaStream_t stream);
 
+bool launch_flat_to_grouped_batched_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    Index batch_size,
+    const void* d_flat_input,
+    void* d_grouped_output,
+    cudaStream_t stream);
+
+bool launch_grouped_to_flat_batched_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream);
+
 } // namespace culindblad
