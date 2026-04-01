@@ -162,8 +162,13 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
         return ierr;
     }
 
-    const bool regroup_in_ok =
-        launch_flat_to_grouped_batched_kernel(
+    const bool regroup_in_ok = (batch_size == 1)
+        ? launch_flat_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            executor->d_input,
+            executor->stream)
+        : launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
             batch_size,
             d_flat_input,
@@ -195,8 +200,13 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
         return PETSC_ERR_LIB;
     }
 
-    const bool regroup_out_ok =
-        launch_grouped_to_flat_batched_kernel(
+    const bool regroup_out_ok = (batch_size == 1)
+        ? launch_grouped_to_flat_kernel(
+            cuda_grouped_layout,
+            executor->d_output,
+            d_flat_output,
+            executor->stream)
+        : launch_grouped_to_flat_batched_kernel(
             cuda_grouped_layout,
             batch_size,
             executor->d_output,
@@ -360,16 +370,26 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
         return ierr;
     }
 
-    const bool regroup_left_ok =
-        launch_flat_to_grouped_batched_kernel(
+    const bool regroup_left_ok = (batch_size == 1)
+        ? launch_flat_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            left_executor->d_input,
+            left_executor->stream)
+        : launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
             batch_size,
             d_flat_input,
             left_executor->d_input,
             left_executor->stream);
 
-    const bool regroup_right_ok =
-        launch_flat_to_grouped_batched_kernel(
+    const bool regroup_right_ok = (batch_size == 1)
+        ? launch_flat_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            right_executor->d_input,
+            right_executor->stream)
+        : launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
             batch_size,
             d_flat_input,
@@ -422,8 +442,13 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
         return PETSC_ERR_LIB;
     }
 
-    const bool regroup_out_ok =
-        launch_grouped_to_flat_batched_kernel(
+    const bool regroup_out_ok = (batch_size == 1)
+        ? launch_grouped_to_flat_kernel(
+            cuda_grouped_layout,
+            combine_executor->d_output,
+            d_flat_output,
+            combine_executor->stream)
+        : launch_grouped_to_flat_batched_kernel(
             cuda_grouped_layout,
             batch_size,
             combine_executor->d_output,
@@ -542,24 +567,39 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
         return ierr;
     }
 
-    const bool regroup_jump_left_ok =
-        launch_flat_to_grouped_batched_kernel(
+    const bool regroup_jump_left_ok = (batch_size == 1)
+        ? launch_flat_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            jump_left_executor->d_input,
+            jump_left_executor->stream)
+        : launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
             batch_size,
             d_flat_input,
             jump_left_executor->d_input,
             jump_left_executor->stream);
 
-    const bool regroup_norm_left_ok =
-        launch_flat_to_grouped_batched_kernel(
+    const bool regroup_norm_left_ok = (batch_size == 1)
+        ? launch_flat_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            norm_left_executor->d_input,
+            norm_left_executor->stream)
+        : launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
             batch_size,
             d_flat_input,
             norm_left_executor->d_input,
             norm_left_executor->stream);
 
-    const bool regroup_norm_right_ok =
-        launch_flat_to_grouped_batched_kernel(
+    const bool regroup_norm_right_ok = (batch_size == 1)
+        ? launch_flat_to_grouped_kernel(
+            cuda_grouped_layout,
+            d_flat_input,
+            norm_right_executor->d_input,
+            norm_right_executor->stream)
+        : launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
             batch_size,
             d_flat_input,
@@ -634,8 +674,13 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
         return PETSC_ERR_LIB;
     }
 
-    const bool regroup_out_ok =
-        launch_grouped_to_flat_batched_kernel(
+    const bool regroup_out_ok = (batch_size == 1)
+        ? launch_grouped_to_flat_kernel(
+            cuda_grouped_layout,
+            norm_right_executor->d_output,
+            d_flat_output,
+            norm_right_executor->stream)
+        : launch_grouped_to_flat_batched_kernel(
             cuda_grouped_layout,
             batch_size,
             norm_right_executor->d_output,

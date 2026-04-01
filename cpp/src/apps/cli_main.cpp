@@ -105,7 +105,7 @@ int main(int argc, char** argv)
         base_config.t0 = 0.0;
         base_config.tfinal = 40.0;
         base_config.use_batched_gpu_specific_state_path = true;
-        base_config.batched_num_steps = 4000;
+        base_config.batched_num_steps = 1000;
 
         const Model model = build_transmon_chain_model(base_config);
         const Solver solver = make_solver(model);
@@ -129,30 +129,6 @@ int main(int argc, char** argv)
         const double baseline_diff =
             max_abs_difference(batch1.final_states[0], baseline_state_zero);
         const double state_zero_00 = batch1.final_states[0][0].real();
-
-        if (batch1_vs_batch2 > kConsistencyTolerance) {
-            fail_validation(
-                "batch_size=1 and batch_size=2 produced different State 0 results; max abs diff=" +
-                std::to_string(batch1_vs_batch2));
-        }
-
-        if (single_vs_batched > kConsistencyTolerance) {
-            fail_validation(
-                "GPU single-state and true batched GPU State 0 results disagree; max abs diff=" +
-                std::to_string(single_vs_batched));
-        }
-
-        if (state_zero_00 < kStateZeroMin00) {
-            fail_validation(
-                "State 0 element (0,0)=" + std::to_string(state_zero_00) +
-                " is below 0.61");
-        }
-
-        if (baseline_diff > kMatrixTolerance) {
-            fail_validation(
-                "State 0 full matrix does not match baseline; max abs diff=" +
-                std::to_string(baseline_diff));
-        }
 
         std::cout << "\n===== True Batched GPU Sweep =====" << std::endl;
         for (const Index first_n : std::vector<Index>{1, 2, 4}) {
@@ -178,6 +154,30 @@ int main(int argc, char** argv)
         print_selected_state_matrix(
             batch1.final_states[0],
             solver.layout.hilbert_dim);
+
+        if (batch1_vs_batch2 > kConsistencyTolerance) {
+            fail_validation(
+                "batch_size=1 and batch_size=2 produced different State 0 results; max abs diff=" +
+                std::to_string(batch1_vs_batch2));
+        }
+
+        if (single_vs_batched > kConsistencyTolerance) {
+            fail_validation(
+                "GPU single-state and true batched GPU State 0 results disagree; max abs diff=" +
+                std::to_string(single_vs_batched));
+        }
+
+        if (state_zero_00 < kStateZeroMin00) {
+            fail_validation(
+                "State 0 element (0,0)=" + std::to_string(state_zero_00) +
+                " is below 0.61");
+        }
+
+        if (baseline_diff > kMatrixTolerance) {
+            fail_validation(
+                "State 0 full matrix does not match baseline; max abs diff=" +
+                std::to_string(baseline_diff));
+        }
     } catch (const std::exception& ex) {
         std::cerr << "Fatal error: " << ex.what() << std::endl;
         PetscFinalize();

@@ -21,28 +21,46 @@ CuTensorContractionDesc make_cutensor_left_contraction_desc(
     const int32_t batch_mode = 5;
 
     desc.operator_modes = {0, 1};
-    desc.input_modes = {batch_mode, 1, 2, 3, 4};
-    desc.output_modes = {batch_mode, 0, 2, 3, 4};
+    const bool batched = batch_size > 1;
+    desc.input_modes = batched ? std::vector<int32_t>{batch_mode, 1, 2, 3, 4}
+                               : std::vector<int32_t>{1, 2, 3, 4};
+    desc.output_modes = batched ? std::vector<int32_t>{batch_mode, 0, 2, 3, 4}
+                                : std::vector<int32_t>{0, 2, 3, 4};
 
     desc.operator_extents = {
         static_cast<int64_t>(desc.spec.contracted_dim),
         static_cast<int64_t>(desc.spec.contracted_dim)
     };
 
-    desc.input_extents = {
-        static_cast<int64_t>(batch_size),
-        static_cast<int64_t>(desc.spec.roles.desc.view.ket_target_dim),
-        static_cast<int64_t>(desc.spec.roles.desc.view.ket_complement_dim),
-        static_cast<int64_t>(desc.spec.roles.desc.view.bra_target_dim),
-        static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
-    };
-    desc.output_extents = {
-        static_cast<int64_t>(batch_size),
-        static_cast<int64_t>(desc.spec.roles.desc.view.ket_target_dim),
-        static_cast<int64_t>(desc.spec.roles.desc.view.ket_complement_dim),
-        static_cast<int64_t>(desc.spec.roles.desc.view.bra_target_dim),
-        static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
-    };
+    if (batched) {
+        desc.input_extents = {
+            static_cast<int64_t>(batch_size),
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_complement_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
+        };
+        desc.output_extents = {
+            static_cast<int64_t>(batch_size),
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_complement_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
+        };
+    } else {
+        desc.input_extents = {
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_complement_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
+        };
+        desc.output_extents = {
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_complement_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
+        };
+    }
 
     return desc;
 }
@@ -59,28 +77,46 @@ CuTensorContractionDesc make_cutensor_right_contraction_desc(
     const int32_t batch_mode = 5;
 
     desc.operator_modes = {1, 0};
-    desc.input_modes = {batch_mode, 2, 3, 1, 4};
-    desc.output_modes = {batch_mode, 2, 3, 0, 4};
+    const bool batched = batch_size > 1;
+    desc.input_modes = batched ? std::vector<int32_t>{batch_mode, 2, 3, 1, 4}
+                               : std::vector<int32_t>{2, 3, 1, 4};
+    desc.output_modes = batched ? std::vector<int32_t>{batch_mode, 2, 3, 0, 4}
+                                : std::vector<int32_t>{2, 3, 0, 4};
 
     desc.operator_extents = {
         static_cast<int64_t>(desc.spec.contracted_dim),
         static_cast<int64_t>(desc.spec.contracted_dim)
     };
 
-    desc.input_extents = {
-        static_cast<int64_t>(batch_size),
-        static_cast<int64_t>(desc.spec.roles.desc.view.ket_target_dim),
-        static_cast<int64_t>(desc.spec.roles.desc.view.ket_complement_dim),
-        static_cast<int64_t>(desc.spec.roles.desc.view.bra_target_dim),
-        static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
-    };
-    desc.output_extents = {
-        static_cast<int64_t>(batch_size),
-        static_cast<int64_t>(desc.spec.roles.desc.view.ket_target_dim),
-        static_cast<int64_t>(desc.spec.roles.desc.view.ket_complement_dim),
-        static_cast<int64_t>(desc.spec.roles.desc.view.bra_target_dim),
-        static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
-    };
+    if (batched) {
+        desc.input_extents = {
+            static_cast<int64_t>(batch_size),
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_complement_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
+        };
+        desc.output_extents = {
+            static_cast<int64_t>(batch_size),
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_complement_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
+        };
+    } else {
+        desc.input_extents = {
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_complement_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
+        };
+        desc.output_extents = {
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.ket_complement_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_target_dim),
+            static_cast<int64_t>(desc.spec.roles.desc.view.bra_complement_dim)
+        };
+    }
 
     return desc;
 }
