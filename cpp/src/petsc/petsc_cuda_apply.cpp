@@ -206,12 +206,6 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
         return PETSC_ERR_LIB;
     }
 
-    if (cudaStreamSynchronize(executor->stream) != cudaSuccess) {
-        PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
-        PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
-        return PETSC_ERR_LIB;
-    }
-
     PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
     PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
     return 0;

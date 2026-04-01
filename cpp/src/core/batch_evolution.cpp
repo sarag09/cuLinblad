@@ -35,6 +35,32 @@ bool same_sites(
     return true;
 }
 
+std::vector<Index> choose_seed_target_sites(
+    const Solver& solver)
+{
+    if (!solver.model.hamiltonian_terms.empty() &&
+        !solver.model.hamiltonian_terms.front().sites.empty()) {
+        return solver.model.hamiltonian_terms.front().sites;
+    }
+
+    if (!solver.model.dissipator_terms.empty() &&
+        !solver.model.dissipator_terms.front().sites.empty()) {
+        return solver.model.dissipator_terms.front().sites;
+    }
+
+    if (!solver.model.time_dependent_hamiltonian_terms.empty() &&
+        !solver.model.time_dependent_hamiltonian_terms.front().sites.empty()) {
+        return solver.model.time_dependent_hamiltonian_terms.front().sites;
+    }
+
+    if (solver.model.local_dims.empty()) {
+        throw std::runtime_error(
+            "choose_seed_target_sites: solver model has no subsystems");
+    }
+
+    return {0};
+}
+
 std::vector<CachedDissipatorAuxiliaries> build_cached_static_dissipators(
     const Solver& solver)
 {
@@ -143,7 +169,8 @@ PetscErrorCode create_cuda_batch_execution_context(
     ctx.x = nullptr;
     ctx.initialized = false;
 
-    const std::vector<Index> seed_target_sites = {0, 1, 2};
+    const std::vector<Index> seed_target_sites =
+        choose_seed_target_sites(solver);
 
     PetscCall(TSCreate(PETSC_COMM_SELF, &ctx.ts));
     PetscCall(TSSetType(ctx.ts, TSEULER));

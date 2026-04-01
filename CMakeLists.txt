@@ -63,6 +63,7 @@ add_executable(run_sim
     cpp/src/core/batch_evolution.cpp
     cpp/src/core/batched_grouped_layout.cpp
     cpp/src/backends/cuda/batched_grouped_apply.cpp
+    cpp/src/core/transmon_chain_benchmark.cpp
 )
 
 target_include_directories(run_sim PRIVATE
