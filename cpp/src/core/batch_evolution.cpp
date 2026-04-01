@@ -96,9 +96,6 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
         entry.sites = sites;
         entry.grouped_layout =
             make_grouped_state_layout(sites, solver.model.local_dims);
-        entry.d_grouped_input = nullptr;
-        entry.d_grouped_term = nullptr;
-        entry.d_grouped_accum = nullptr;
         entry.grouped_bytes =
             static_cast<std::size_t>(batch_size) *
             static_cast<std::size_t>(entry.grouped_layout.grouped_size) *
@@ -109,6 +106,14 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
                 entry.cuda_grouped_layout)) {
             throw std::runtime_error(
                 "build_cached_grouped_layouts: failed to create CUDA grouped layout");
+        }
+
+        if (cudaEventCreateWithFlags(
+                &entry.grouped_input_ready_event,
+                cudaEventDisableTiming) != cudaSuccess) {
+            (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
+            throw std::runtime_error(
+                "build_cached_grouped_layouts: failed to create grouped input event");
         }
 
         if (cudaMalloc(&entry.d_grouped_input, entry.grouped_bytes) != cudaSuccess ||
@@ -125,6 +130,10 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
             if (entry.d_grouped_input != nullptr) {
                 cudaFree(entry.d_grouped_input);
                 entry.d_grouped_input = nullptr;
+            }
+            if (entry.grouped_input_ready_event != nullptr) {
+                cudaEventDestroy(entry.grouped_input_ready_event);
+                entry.grouped_input_ready_event = nullptr;
             }
             (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
             throw std::runtime_error(
@@ -164,6 +173,10 @@ void destroy_cached_grouped_layouts(
         if (entry.d_grouped_input != nullptr) {
             cudaFree(entry.d_grouped_input);
             entry.d_grouped_input = nullptr;
+        }
+        if (entry.grouped_input_ready_event != nullptr) {
+            cudaEventDestroy(entry.grouped_input_ready_event);
+            entry.grouped_input_ready_event = nullptr;
         }
         entry.grouped_bytes = 0;
         (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);

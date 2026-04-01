@@ -27,10 +27,11 @@ struct CachedGroupedLayoutEntry {
     std::vector<Index> sites;
     GroupedStateLayout grouped_layout;
     CudaGroupedStateLayout cuda_grouped_layout;
-    void* d_grouped_input;
-    void* d_grouped_term;
-    void* d_grouped_accum;
-    std::size_t grouped_bytes;
+    void* d_grouped_input = nullptr;
+    void* d_grouped_term = nullptr;
+    void* d_grouped_accum = nullptr;
+    cudaEvent_t grouped_input_ready_event = nullptr;
+    std::size_t grouped_bytes = 0;
 };
 
 struct PetscCudaTsRhsContext {
