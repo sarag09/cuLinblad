@@ -194,6 +194,41 @@ bool copy_executor_input_from_executor(
                dst_executor.stream) == cudaSuccess;
 }
 
+bool copy_device_buffer_to_executor_input(
+    const void* d_input,
+    std::size_t input_bytes,
+    cudaEvent_t input_ready_event,
+    cudaStream_t producer_stream,
+    CuTensorExecutor& dst_executor)
+{
+    const bool input_wait_ok =
+        input_ready_event != nullptr
+            ? wait_for_cuda_event(input_ready_event, dst_executor.stream)
+            : (producer_stream == nullptr ||
+               wait_for_stream_event(producer_stream, dst_executor.stream));
+    if (!input_wait_ok) {
+        return false;
+    }
+
+    return cudaMemcpyAsync(
+               dst_executor.d_input,
+               d_input,
+               input_bytes,
+               cudaMemcpyDeviceToDevice,
+               dst_executor.stream) == cudaSuccess;
+}
+
+bool zero_executor_output(
+    CuTensorExecutor& executor,
+    std::size_t output_bytes)
+{
+    return cudaMemsetAsync(
+               executor.d_output,
+               0,
+               output_bytes,
+               executor.stream) == cudaSuccess;
+}
+
 PetscErrorCode apply_grouped_cuda_vec_impl(
     const Solver& solver,
     const std::vector<Complex>& local_op,
@@ -378,7 +413,6 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
 
     CuTensorExecutor* left_executor = nullptr;
     CuTensorExecutor* right_executor = nullptr;
-    CuTensorExecutor* combine_executor = nullptr;
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
@@ -404,42 +438,23 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
         return ierr;
     }
 
-    ierr = get_or_prepare_executor(
-        executor_cache,
-        cache_prefix + "_comm_combine_buffer_" + term_label + "_batch_" + std::to_string(batch_size),
-        left_desc,
-        cache_prefix + "_comm_combine_operator_" + term_label,
-        local_op,
-        grouped_bytes,
-        combine_executor);
-    if (ierr != 0) {
-        return ierr;
-    }
-
-    const bool input_wait_ok =
-        input_ready_event != nullptr
-            ? wait_for_cuda_event(input_ready_event, left_executor->stream)
-            : (consumer_stream == nullptr ||
-               wait_for_stream_event(consumer_stream, left_executor->stream));
-    const cudaError_t copy_left_status =
-        input_wait_ok
-            ? cudaMemcpyAsync(
-                  left_executor->d_input,
-                  d_grouped_input,
-                  grouped_bytes,
-                  cudaMemcpyDeviceToDevice,
-                  left_executor->stream)
-            : cudaErrorUnknown;
-
-    if (copy_left_status != cudaSuccess ||
-        !record_cutensor_executor_completion(*left_executor) ||
-        !copy_executor_input_from_executor(*left_executor, *right_executor)) {
+    if (!copy_device_buffer_to_executor_input(
+            d_grouped_input,
+            grouped_bytes,
+            input_ready_event,
+            consumer_stream,
+            *left_executor) ||
+        !copy_device_buffer_to_executor_input(
+            d_grouped_input,
+            grouped_bytes,
+            input_ready_event,
+            consumer_stream,
+            *right_executor)) {
         return PETSC_ERR_LIB;
     }
 
-    if (cudaMemsetAsync(left_executor->d_output, 0, grouped_bytes, left_executor->stream) != cudaSuccess ||
-        cudaMemsetAsync(right_executor->d_output, 0, grouped_bytes, right_executor->stream) != cudaSuccess ||
-        cudaMemsetAsync(combine_executor->d_output, 0, grouped_bytes, combine_executor->stream) != cudaSuccess) {
+    if (!zero_executor_output(*left_executor, grouped_bytes) ||
+        !zero_executor_output(*right_executor, grouped_bytes)) {
         return PETSC_ERR_LIB;
     }
 
@@ -448,38 +463,25 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
         return PETSC_ERR_LIB;
     }
 
-    if (!wait_for_cutensor_executor_completion(*left_executor, combine_executor->stream) ||
-        !wait_for_cutensor_executor_completion(*right_executor, combine_executor->stream)) {
+    const bool output_wait_ok =
+        output_ready_event == nullptr ||
+        wait_for_cuda_event(output_ready_event, left_executor->stream);
+    if (!output_wait_ok ||
+        !wait_for_cutensor_executor_completion(*right_executor, left_executor->stream)) {
         return PETSC_ERR_LIB;
     }
 
     if (!launch_commutator_combine_kernel(
             left_executor->d_output,
             right_executor->d_output,
-            combine_executor->d_output,
-            batch_size * grouped_layout.grouped_size,
-            combine_executor->stream)) {
-        return PETSC_ERR_LIB;
-    }
-
-    const bool output_wait_ok =
-        output_ready_event == nullptr ||
-        wait_for_cuda_event(output_ready_event, combine_executor->stream);
-    if (!output_wait_ok) {
-        return PETSC_ERR_LIB;
-    }
-
-    const cudaError_t copy_out_status =
-        cudaMemcpyAsync(
             d_grouped_output,
-            combine_executor->d_output,
-            grouped_bytes,
-            cudaMemcpyDeviceToDevice,
-            combine_executor->stream);
+            batch_size * grouped_layout.grouped_size,
+            left_executor->stream)) {
+        return PETSC_ERR_LIB;
+    }
 
-    if (copy_out_status != cudaSuccess ||
-        !record_cutensor_executor_completion(*combine_executor) ||
-        !wait_for_executor_event(*combine_executor, consumer_stream)) {
+    if (!record_cutensor_executor_completion(*left_executor) ||
+        !wait_for_executor_event(*left_executor, consumer_stream)) {
         return PETSC_ERR_LIB;
     }
 
@@ -570,32 +572,31 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
         return ierr;
     }
 
-    const bool input_wait_ok =
-        input_ready_event != nullptr
-            ? wait_for_cuda_event(input_ready_event, jump_left_executor->stream)
-            : (consumer_stream == nullptr ||
-               wait_for_stream_event(consumer_stream, jump_left_executor->stream));
-    const cudaError_t copy_jump_left_status =
-        input_wait_ok
-            ? cudaMemcpyAsync(
-                  jump_left_executor->d_input,
-                  d_grouped_input,
-                  grouped_bytes,
-                  cudaMemcpyDeviceToDevice,
-                  jump_left_executor->stream)
-            : cudaErrorUnknown;
-
-    if (copy_jump_left_status != cudaSuccess ||
-        !record_cutensor_executor_completion(*jump_left_executor) ||
-        !copy_executor_input_from_executor(*jump_left_executor, *norm_left_executor) ||
-        !copy_executor_input_from_executor(*jump_left_executor, *norm_right_executor)) {
+    if (!copy_device_buffer_to_executor_input(
+            d_grouped_input,
+            grouped_bytes,
+            input_ready_event,
+            consumer_stream,
+            *jump_left_executor) ||
+        !copy_device_buffer_to_executor_input(
+            d_grouped_input,
+            grouped_bytes,
+            input_ready_event,
+            consumer_stream,
+            *norm_left_executor) ||
+        !copy_device_buffer_to_executor_input(
+            d_grouped_input,
+            grouped_bytes,
+            input_ready_event,
+            consumer_stream,
+            *norm_right_executor)) {
         return PETSC_ERR_LIB;
     }
 
-    if (cudaMemsetAsync(jump_left_executor->d_output, 0, grouped_bytes, jump_left_executor->stream) != cudaSuccess ||
-        cudaMemsetAsync(jump_right_executor->d_output, 0, grouped_bytes, jump_right_executor->stream) != cudaSuccess ||
-        cudaMemsetAsync(norm_left_executor->d_output, 0, grouped_bytes, norm_left_executor->stream) != cudaSuccess ||
-        cudaMemsetAsync(norm_right_executor->d_output, 0, grouped_bytes, norm_right_executor->stream) != cudaSuccess) {
+    if (!zero_executor_output(*jump_left_executor, grouped_bytes) ||
+        !zero_executor_output(*jump_right_executor, grouped_bytes) ||
+        !zero_executor_output(*norm_left_executor, grouped_bytes) ||
+        !zero_executor_output(*norm_right_executor, grouped_bytes)) {
         return PETSC_ERR_LIB;
     }
 
@@ -613,9 +614,12 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
         return PETSC_ERR_LIB;
     }
 
-    if (!wait_for_cutensor_executor_completion(*jump_right_executor, norm_right_executor->stream) ||
-        !wait_for_cutensor_executor_completion(*norm_left_executor, norm_right_executor->stream) ||
-        !wait_for_cutensor_executor_completion(*norm_right_executor, norm_right_executor->stream)) {
+    const bool output_wait_ok =
+        output_ready_event == nullptr ||
+        wait_for_cuda_event(output_ready_event, norm_right_executor->stream);
+    if (!output_wait_ok ||
+        !wait_for_cutensor_executor_completion(*jump_right_executor, norm_right_executor->stream) ||
+        !wait_for_cutensor_executor_completion(*norm_left_executor, norm_right_executor->stream)) {
         return PETSC_ERR_LIB;
     }
 
@@ -623,29 +627,13 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
             jump_right_executor->d_output,
             norm_left_executor->d_output,
             norm_right_executor->d_output,
-            norm_right_executor->d_output,
+            d_grouped_output,
             batch_size * grouped_layout.grouped_size,
             norm_right_executor->stream)) {
         return PETSC_ERR_LIB;
     }
 
-    const bool output_wait_ok =
-        output_ready_event == nullptr ||
-        wait_for_cuda_event(output_ready_event, norm_right_executor->stream);
-    if (!output_wait_ok) {
-        return PETSC_ERR_LIB;
-    }
-
-    const cudaError_t copy_out_status =
-        cudaMemcpyAsync(
-            d_grouped_output,
-            norm_right_executor->d_output,
-            grouped_bytes,
-            cudaMemcpyDeviceToDevice,
-            norm_right_executor->stream);
-
-    if (copy_out_status != cudaSuccess ||
-        !record_cutensor_executor_completion(*norm_right_executor) ||
+    if (!record_cutensor_executor_completion(*norm_right_executor) ||
         !wait_for_executor_event(*norm_right_executor, consumer_stream)) {
         return PETSC_ERR_LIB;
     }
