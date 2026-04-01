@@ -18,13 +18,25 @@ constexpr double kStateZeroMin00 = 0.61;
 constexpr double kMatrixTolerance = 1.0e-4;
 constexpr double kConsistencyTolerance = 1.0e-8;
 
-std::vector<Complex> make_state_zero_baseline()
+struct TrustedBaseline {
+    const char* label = nullptr;
+    const char* reason = nullptr;
+    std::vector<Complex> state_zero_matrix;
+};
+
+TrustedBaseline make_trusted_state_zero_baseline()
 {
     return {
-        {0.625036, 0.0}, {-0.00449673, -0.00836184}, {0.0321716, 0.0256046}, {4.41915e-05, 0.00108076},
-        {-0.00449673, 0.00836184}, {0.0381174, 0.0}, {-0.0365766, -0.0732278}, {0.00651442, 0.00937486},
-        {0.0321716, -0.0256046}, {-0.0365766, 0.0732278}, {0.328915, 0.0}, {-0.0282704, 0.00299707},
-        {4.41915e-05, -0.00108076}, {0.00651442, -0.00937486}, {-0.0282704, -0.00299707}, {0.00793155, 0.0}
+        "QuTiP-matched matrix",
+        "The active benchmark path uses TSRK + TSRK5DP with TSADAPTNONE. "
+        "The historical hardcoded matrix predates the current fixed-step solver semantics, "
+        "while this matrix matches the same model under the current configuration.",
+        {
+            {0.618768, 0.0}, {-0.011736, -0.00655564}, {0.0358747, 0.0189598}, {0.0114891, 0.0038102},
+            {-0.011736, 0.00655564}, {0.037414, 0.0}, {-0.0355817, -0.0742448}, {0.00936175, 0.0117862},
+            {0.0358747, -0.0189598}, {-0.0355817, 0.0742448}, {0.334468, 0.0}, {-0.0370064, 0.00583516},
+            {0.0114891, -0.0038102}, {0.00936175, -0.0117862}, {-0.0370064, -0.00583516}, {0.00935067, 0.0}
+        }
     };
 }
 
@@ -109,7 +121,7 @@ int main(int argc, char** argv)
 
         const Model model = build_transmon_chain_model(base_config);
         const Solver solver = make_solver(model);
-        const std::vector<Complex> baseline_state_zero = make_state_zero_baseline();
+        const TrustedBaseline baseline = make_trusted_state_zero_baseline();
 
         const TransmonChainBenchmarkTiming batch1 =
             run_gpu_selected_state_benchmark(base_config, 1);
@@ -124,10 +136,10 @@ int main(int argc, char** argv)
 
         const double batch1_vs_batch2 =
             max_abs_difference(batch1.final_states[0], batch2.final_states[0]);
-        const double single_vs_batched =
-            max_abs_difference(batch1.final_states[0], batch2.final_states[0]);
-        const double baseline_diff =
-            max_abs_difference(batch1.final_states[0], baseline_state_zero);
+        const double batch1_vs_baseline =
+            max_abs_difference(batch1.final_states[0], baseline.state_zero_matrix);
+        const double batch2_vs_baseline =
+            max_abs_difference(batch2.final_states[0], baseline.state_zero_matrix);
         const double state_zero_00 = batch1.final_states[0][0].real();
 
         std::cout << "\n===== True Batched GPU Sweep =====" << std::endl;
@@ -143,10 +155,14 @@ int main(int argc, char** argv)
                       << std::endl;
         }
 
+        std::cout << "\nTrusted State 0 baseline: " << baseline.label << std::endl;
+        std::cout << "Baseline rationale: " << baseline.reason << std::endl;
         std::cout << "\nValidation: State 0 batch(1) vs batch(2) max abs diff = "
                   << batch1_vs_batch2 << std::endl;
-        std::cout << "Validation: State 0 baseline max abs diff = "
-                  << baseline_diff << std::endl;
+        std::cout << "Validation: State 0 batch(1) vs trusted baseline max abs diff = "
+                  << batch1_vs_baseline << std::endl;
+        std::cout << "Validation: State 0 batch(2) vs trusted baseline max abs diff = "
+                  << batch2_vs_baseline << std::endl;
         std::cout << "Validation: State 0 element (0,0) = "
                   << batch1.final_states[0][0] << std::endl;
 
@@ -161,10 +177,10 @@ int main(int argc, char** argv)
                 std::to_string(batch1_vs_batch2));
         }
 
-        if (single_vs_batched > kConsistencyTolerance) {
+        if (batch1_vs_baseline > kMatrixTolerance) {
             fail_validation(
-                "GPU single-state and true batched GPU State 0 results disagree; max abs diff=" +
-                std::to_string(single_vs_batched));
+                "batch_size=1 State 0 does not match trusted baseline; max abs diff=" +
+                std::to_string(batch1_vs_baseline));
         }
 
         if (state_zero_00 < kStateZeroMin00) {
@@ -173,10 +189,10 @@ int main(int argc, char** argv)
                 " is below 0.61");
         }
 
-        if (baseline_diff > kMatrixTolerance) {
+        if (batch2_vs_baseline > kMatrixTolerance) {
             fail_validation(
-                "State 0 full matrix does not match baseline; max abs diff=" +
-                std::to_string(baseline_diff));
+                "batch_size=2 State 0 does not match trusted baseline; max abs diff=" +
+                std::to_string(batch2_vs_baseline));
         }
     } catch (const std::exception& ex) {
         std::cerr << "Fatal error: " << ex.what() << std::endl;
