@@ -31,7 +31,6 @@ struct CachedGroupedLayoutEntry {
     void* d_grouped_term;
     void* d_grouped_accum;
     std::size_t grouped_bytes;
-    cudaEvent_t grouped_input_ready_event;
 };
 
 struct PetscCudaTsRhsContext {
