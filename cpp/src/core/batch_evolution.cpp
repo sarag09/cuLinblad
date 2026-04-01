@@ -103,6 +103,7 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
             static_cast<std::size_t>(batch_size) *
             static_cast<std::size_t>(entry.grouped_layout.grouped_size) *
             sizeof(Complex);
+        entry.grouped_input_ready_event = nullptr;
 
         if (!create_cuda_grouped_state_layout(
                 entry.grouped_layout,
@@ -129,6 +130,20 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
             (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
             throw std::runtime_error(
                 "build_cached_grouped_layouts: failed to allocate grouped RHS buffers");
+        }
+
+        if (cudaEventCreateWithFlags(
+                &entry.grouped_input_ready_event,
+                cudaEventDisableTiming) != cudaSuccess) {
+            cudaFree(entry.d_grouped_accum);
+            cudaFree(entry.d_grouped_term);
+            cudaFree(entry.d_grouped_input);
+            entry.d_grouped_accum = nullptr;
+            entry.d_grouped_term = nullptr;
+            entry.d_grouped_input = nullptr;
+            (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
+            throw std::runtime_error(
+                "build_cached_grouped_layouts: failed to create grouped input event");
         }
 
         cached.push_back(std::move(entry));
@@ -164,6 +179,10 @@ void destroy_cached_grouped_layouts(
         if (entry.d_grouped_input != nullptr) {
             cudaFree(entry.d_grouped_input);
             entry.d_grouped_input = nullptr;
+        }
+        if (entry.grouped_input_ready_event != nullptr) {
+            cudaEventDestroy(entry.grouped_input_ready_event);
+            entry.grouped_input_ready_event = nullptr;
         }
         entry.grouped_bytes = 0;
         (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);

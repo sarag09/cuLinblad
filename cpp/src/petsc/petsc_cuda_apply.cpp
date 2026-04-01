@@ -133,34 +133,15 @@ bool wait_for_executor_event(
     return wait_for_cutensor_executor_completion(producer, consumer_stream);
 }
 
-bool wait_for_stream_event(
-    cudaStream_t producer_stream,
+bool wait_for_cuda_event(
+    cudaEvent_t completion_event,
     cudaStream_t consumer_stream)
 {
-    if (producer_stream == nullptr || consumer_stream == nullptr) {
+    if (completion_event == nullptr || consumer_stream == nullptr) {
         return false;
     }
 
-    if (producer_stream == consumer_stream) {
-        return true;
-    }
-
-    cudaEvent_t completion_event = nullptr;
-    if (cudaEventCreateWithFlags(&completion_event, cudaEventDisableTiming) != cudaSuccess) {
-        return false;
-    }
-
-    const cudaError_t record_status =
-        cudaEventRecord(completion_event, producer_stream);
-    const cudaError_t wait_status =
-        record_status == cudaSuccess
-            ? cudaStreamWaitEvent(consumer_stream, completion_event, 0)
-            : cudaErrorUnknown;
-    const cudaError_t destroy_status = cudaEventDestroy(completion_event);
-
-    return record_status == cudaSuccess &&
-           wait_status == cudaSuccess &&
-           destroy_status == cudaSuccess;
+    return cudaStreamWaitEvent(consumer_stream, completion_event, 0) == cudaSuccess;
 }
 
 bool copy_executor_input_from_executor(
@@ -339,7 +320,8 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
     void* d_grouped_output,
     Index batch_size,
     cudaStream_t consumer_stream,
-    const std::string& cache_prefix)
+    const std::string& cache_prefix,
+    cudaEvent_t input_ready_event)
 {
     const std::size_t grouped_bytes =
         batch_size * grouped_layout.grouped_size * sizeof(Complex);
@@ -396,8 +378,8 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
     }
 
     const cudaError_t copy_left_status =
-        (consumer_stream != nullptr &&
-         !wait_for_stream_event(consumer_stream, left_executor->stream))
+        (input_ready_event != nullptr &&
+         !wait_for_cuda_event(input_ready_event, left_executor->stream))
             ? cudaErrorUnknown
             :
         cudaMemcpyAsync(
@@ -468,7 +450,8 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
     void* d_grouped_output,
     Index batch_size,
     cudaStream_t consumer_stream,
-    const std::string& cache_prefix)
+    const std::string& cache_prefix,
+    cudaEvent_t input_ready_event)
 {
     const std::size_t grouped_bytes =
         batch_size * grouped_layout.grouped_size * sizeof(Complex);
@@ -538,8 +521,8 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
     }
 
     const cudaError_t copy_jump_left_status =
-        (consumer_stream != nullptr &&
-         !wait_for_stream_event(consumer_stream, jump_left_executor->stream))
+        (input_ready_event != nullptr &&
+         !wait_for_cuda_event(input_ready_event, jump_left_executor->stream))
             ? cudaErrorUnknown
             :
         cudaMemcpyAsync(
@@ -749,7 +732,8 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
         regroup_executor->d_output,
         batch_size,
         consumer_stream,
-        "petsc_grouped");
+        "petsc_grouped",
+        nullptr);
     if (ierr != 0) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
@@ -845,7 +829,8 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
         regroup_executor->d_output,
         batch_size,
         consumer_stream,
-        "petsc_grouped");
+        "petsc_grouped",
+        nullptr);
     if (ierr != 0) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
@@ -923,7 +908,8 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer(
     const void* d_grouped_input,
     void* d_grouped_output,
     Index batch_size,
-    cudaStream_t consumer_stream)
+    cudaStream_t consumer_stream,
+    cudaEvent_t input_ready_event)
 {
     return apply_grouped_commutator_cuda_buffer_impl(
         solver,
@@ -936,7 +922,8 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer(
         d_grouped_output,
         batch_size,
         consumer_stream,
-        "petsc_grouped_buffer");
+        "petsc_grouped_buffer",
+        input_ready_event);
 }
 
 PetscErrorCode apply_grouped_dissipator_cuda_buffer(
@@ -951,7 +938,8 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer(
     const void* d_grouped_input,
     void* d_grouped_output,
     Index batch_size,
-    cudaStream_t consumer_stream)
+    cudaStream_t consumer_stream,
+    cudaEvent_t input_ready_event)
 {
     return apply_grouped_dissipator_cuda_buffer_impl(
         solver,
@@ -966,7 +954,8 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer(
         d_grouped_output,
         batch_size,
         consumer_stream,
-        "petsc_grouped_buffer");
+        "petsc_grouped_buffer",
+        input_ready_event);
 }
 
 } // namespace culindblad

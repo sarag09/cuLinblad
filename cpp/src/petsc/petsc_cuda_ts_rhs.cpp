@@ -258,6 +258,10 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
         rhs_ctx.batch_size,
         s));
 
+    if (cudaEventRecord(layout_entry.grouped_input_ready_event, s) != cudaSuccess) {
+        return PETSC_ERR_LIB;
+    }
+
     PetscCall(zero_grouped_layout_accumulator(
         layout_entry,
         rhs_ctx.batch_size,
@@ -280,7 +284,8 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             layout_entry.d_grouped_input,
             layout_entry.d_grouped_term,
             rhs_ctx.batch_size,
-            s));
+            s,
+            layout_entry.grouped_input_ready_event));
 
         PetscCall(accumulate_grouped_layout_term(
             layout_entry,
@@ -307,7 +312,8 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             layout_entry.d_grouped_input,
             layout_entry.d_grouped_term,
             rhs_ctx.batch_size,
-            s));
+            s,
+            layout_entry.grouped_input_ready_event));
 
         PetscCall(accumulate_grouped_layout_term(
             layout_entry,
@@ -335,7 +341,8 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             layout_entry.d_grouped_input,
             layout_entry.d_grouped_term,
             rhs_ctx.batch_size,
-            s));
+            s,
+            layout_entry.grouped_input_ready_event));
 
         PetscCall(accumulate_grouped_layout_term(
             layout_entry,
