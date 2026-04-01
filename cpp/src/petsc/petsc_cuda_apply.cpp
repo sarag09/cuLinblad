@@ -133,6 +133,36 @@ bool wait_for_executor_event(
     return wait_for_cutensor_executor_completion(producer, consumer_stream);
 }
 
+bool wait_for_stream_event(
+    cudaStream_t producer_stream,
+    cudaStream_t consumer_stream)
+{
+    if (producer_stream == nullptr || consumer_stream == nullptr) {
+        return false;
+    }
+
+    if (producer_stream == consumer_stream) {
+        return true;
+    }
+
+    cudaEvent_t completion_event = nullptr;
+    if (cudaEventCreateWithFlags(&completion_event, cudaEventDisableTiming) != cudaSuccess) {
+        return false;
+    }
+
+    const cudaError_t record_status =
+        cudaEventRecord(completion_event, producer_stream);
+    const cudaError_t wait_status =
+        record_status == cudaSuccess
+            ? cudaStreamWaitEvent(consumer_stream, completion_event, 0)
+            : cudaErrorUnknown;
+    const cudaError_t destroy_status = cudaEventDestroy(completion_event);
+
+    return record_status == cudaSuccess &&
+           wait_status == cudaSuccess &&
+           destroy_status == cudaSuccess;
+}
+
 bool copy_executor_input_from_executor(
     CuTensorExecutor& src_executor,
     CuTensorExecutor& dst_executor)
@@ -366,6 +396,10 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
     }
 
     const cudaError_t copy_left_status =
+        (consumer_stream != nullptr &&
+         !wait_for_stream_event(consumer_stream, left_executor->stream))
+            ? cudaErrorUnknown
+            :
         cudaMemcpyAsync(
             left_executor->d_input,
             d_grouped_input,
@@ -504,6 +538,10 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
     }
 
     const cudaError_t copy_jump_left_status =
+        (consumer_stream != nullptr &&
+         !wait_for_stream_event(consumer_stream, jump_left_executor->stream))
+            ? cudaErrorUnknown
+            :
         cudaMemcpyAsync(
             jump_left_executor->d_input,
             d_grouped_input,
