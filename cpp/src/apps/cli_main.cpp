@@ -17,11 +17,22 @@ using Complex = std::complex<double>;
 constexpr double kStateZeroMin00 = 0.61;
 constexpr double kMatrixTolerance = 1.0e-4;
 constexpr double kConsistencyTolerance = 1.0e-8;
+constexpr culindblad::Index kValidationBatchSteps = 1000;
+constexpr culindblad::Index kDefaultProfileNumTransmons = 6;
+constexpr culindblad::Index kDefaultProfileCutoffDim = 2;
+constexpr culindblad::Index kDefaultProfileBatchSteps = 250;
 
 struct TrustedBaseline {
     const char* label = nullptr;
     const char* reason = nullptr;
     std::vector<Complex> state_zero_matrix;
+};
+
+struct LargeTargetOptions {
+    bool enabled = false;
+    culindblad::Index num_transmons = kDefaultProfileNumTransmons;
+    culindblad::Index cutoff_dim = kDefaultProfileCutoffDim;
+    culindblad::Index batched_num_steps = kDefaultProfileBatchSteps;
 };
 
 TrustedBaseline make_trusted_state_zero_baseline()
@@ -83,6 +94,133 @@ culindblad::TransmonChainBenchmarkTiming run_gpu_selected_state_benchmark(
     return culindblad::run_transmon_chain_cuda_benchmark(config);
 }
 
+culindblad::TransmonChainBenchmarkConfig make_transmon_chain_benchmark_config(
+    culindblad::Index num_transmons,
+    culindblad::Index cutoff_dim,
+    culindblad::Index batched_num_steps)
+{
+    if ((num_transmons % 2) != 0) {
+        throw std::invalid_argument(
+            "benchmark configuration requires an even number of transmons so exactly half can be driven");
+    }
+
+    culindblad::TransmonChainBenchmarkConfig config{};
+    config.num_transmons = num_transmons;
+    config.cutoff_dim = cutoff_dim;
+
+    config.omega.resize(num_transmons, 0.0);
+    config.alpha.assign(num_transmons, -0.3);
+    config.t1.assign(num_transmons, 20.0);
+    config.tphi.assign(num_transmons, 30.0);
+    config.drive_frequency.resize(num_transmons, 0.0);
+    config.g.assign(num_transmons > 0 ? num_transmons - 1 : 0, 0.02);
+
+    for (culindblad::Index i = 0; i < num_transmons; ++i) {
+        const double omega = 5.0 + 0.05 * static_cast<double>(i);
+        config.omega[i] = omega;
+        config.drive_frequency[i] = omega;
+    }
+
+    config.drive_amplitude = 0.1;
+    config.drive_sigma = 10.0;
+    config.drive_center = 20.0;
+    config.driven_sites.reserve(num_transmons / 2);
+    for (culindblad::Index site = 0; site < num_transmons / 2; ++site) {
+        config.driven_sites.push_back(site);
+    }
+
+    config.t0 = 0.0;
+    config.tfinal = 40.0;
+    config.use_batched_gpu_specific_state_path = true;
+    config.batched_num_steps = batched_num_steps;
+    return config;
+}
+
+LargeTargetOptions parse_large_target_options()
+{
+    LargeTargetOptions options{};
+
+    PetscBool enabled = PETSC_FALSE;
+    PetscCallAbort(
+        PETSC_COMM_SELF,
+        PetscOptionsGetBool(
+            nullptr,
+            nullptr,
+            "-profile_large_target",
+            &enabled,
+            nullptr));
+    options.enabled = (enabled == PETSC_TRUE);
+
+    PetscBool set = PETSC_FALSE;
+    PetscInt value = 0;
+    PetscCallAbort(
+        PETSC_COMM_SELF,
+        PetscOptionsGetInt(
+            nullptr,
+            nullptr,
+            "-profile_num_transmons",
+            &value,
+            &set));
+    if (set == PETSC_TRUE) {
+        options.num_transmons = static_cast<culindblad::Index>(value);
+    }
+
+    PetscCallAbort(
+        PETSC_COMM_SELF,
+        PetscOptionsGetInt(
+            nullptr,
+            nullptr,
+            "-profile_cutoff_dim",
+            &value,
+            &set));
+    if (set == PETSC_TRUE) {
+        options.cutoff_dim = static_cast<culindblad::Index>(value);
+    }
+
+    PetscCallAbort(
+        PETSC_COMM_SELF,
+        PetscOptionsGetInt(
+            nullptr,
+            nullptr,
+            "-profile_batched_num_steps",
+            &value,
+            &set));
+    if (set == PETSC_TRUE) {
+        options.batched_num_steps = static_cast<culindblad::Index>(value);
+    }
+
+    return options;
+}
+
+void print_gpu_sweep(
+    const std::string& heading,
+    const culindblad::TransmonChainBenchmarkConfig& config,
+    const std::vector<culindblad::TransmonChainBenchmarkTiming>& timings)
+{
+    const culindblad::Model model = culindblad::build_transmon_chain_model(config);
+    const culindblad::Solver solver = culindblad::make_solver(model);
+
+    std::cout << "\n===== " << heading << " =====" << std::endl;
+    std::cout << "Transmons: " << config.num_transmons
+              << ", cutoff dim: " << config.cutoff_dim
+              << ", Hilbert dimension: " << solver.layout.hilbert_dim
+              << ", density dimension: " << solver.layout.density_dim
+              << ", batched TS steps: " << config.batched_num_steps
+              << std::endl;
+
+    for (const culindblad::Index first_n : std::vector<culindblad::Index>{1, 2, 4}) {
+        const culindblad::TransmonChainBenchmarkTiming& timing =
+            timings.at(static_cast<std::size_t>(first_n == 1 ? 0 : first_n == 2 ? 1 : 2));
+
+        std::cout << "\nBatch size " << first_n << std::endl;
+        std::cout << "GPU selected-state time (s): "
+                  << timing.wall_seconds << std::endl;
+        std::cout << "GPU selected states/s: "
+                  << static_cast<double>(timing.num_evolved_states) / timing.wall_seconds
+                  << std::endl;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -98,26 +236,9 @@ int main(int argc, char** argv)
     try {
         std::cout << "===== cuLindblad transmon-chain benchmark =====" << std::endl;
 
-        TransmonChainBenchmarkConfig base_config{};
-        base_config.num_transmons = 2;
-        base_config.cutoff_dim = 2;
-
-        base_config.omega = {5.0, 5.05};
-        base_config.alpha = {-0.3, -0.3};
-        base_config.g = {0.02};
-        base_config.t1 = {20.0, 20.0};
-        base_config.tphi = {30.0, 30.0};
-
-        base_config.drive_amplitude = 0.1;
-        base_config.drive_sigma = 10.0;
-        base_config.drive_center = 20.0;
-        base_config.drive_frequency = {5.0, 5.05};
-        base_config.driven_sites = {0};
-
-        base_config.t0 = 0.0;
-        base_config.tfinal = 40.0;
-        base_config.use_batched_gpu_specific_state_path = true;
-        base_config.batched_num_steps = 1000;
+        const LargeTargetOptions profile_options = parse_large_target_options();
+        const TransmonChainBenchmarkConfig base_config =
+            make_transmon_chain_benchmark_config(2, 2, kValidationBatchSteps);
 
         const Model model = build_transmon_chain_model(base_config);
         const Solver solver = make_solver(model);
@@ -142,18 +263,10 @@ int main(int argc, char** argv)
             max_abs_difference(batch2.final_states[0], baseline.state_zero_matrix);
         const double state_zero_00 = batch1.final_states[0][0].real();
 
-        std::cout << "\n===== True Batched GPU Sweep =====" << std::endl;
-        for (const Index first_n : std::vector<Index>{1, 2, 4}) {
-            const TransmonChainBenchmarkTiming timing =
-                (first_n == 1) ? batch1 : (first_n == 2) ? batch2 : batch4;
-
-            std::cout << "\nBatch size " << first_n << std::endl;
-            std::cout << "GPU selected-state time (s): "
-                      << timing.wall_seconds << std::endl;
-            std::cout << "GPU selected states/s: "
-                      << static_cast<double>(timing.num_evolved_states) / timing.wall_seconds
-                      << std::endl;
-        }
+        print_gpu_sweep(
+            "True Batched GPU Sweep",
+            base_config,
+            {batch1, batch2, batch4});
 
         std::cout << "\nTrusted State 0 baseline: " << baseline.label << std::endl;
         std::cout << "Baseline rationale: " << baseline.reason << std::endl;
@@ -193,6 +306,26 @@ int main(int argc, char** argv)
             fail_validation(
                 "batch_size=2 State 0 does not match trusted baseline; max abs diff=" +
                 std::to_string(batch2_vs_baseline));
+        }
+
+        if (profile_options.enabled) {
+            const TransmonChainBenchmarkConfig profile_config =
+                make_transmon_chain_benchmark_config(
+                    profile_options.num_transmons,
+                    profile_options.cutoff_dim,
+                    profile_options.batched_num_steps);
+
+            const TransmonChainBenchmarkTiming profile_batch1 =
+                run_gpu_selected_state_benchmark(profile_config, 1);
+            const TransmonChainBenchmarkTiming profile_batch2 =
+                run_gpu_selected_state_benchmark(profile_config, 2);
+            const TransmonChainBenchmarkTiming profile_batch4 =
+                run_gpu_selected_state_benchmark(profile_config, 4);
+
+            print_gpu_sweep(
+                "Larger Profiling Target",
+                profile_config,
+                {profile_batch1, profile_batch2, profile_batch4});
         }
     } catch (const std::exception& ex) {
         std::cerr << "Fatal error: " << ex.what() << std::endl;
