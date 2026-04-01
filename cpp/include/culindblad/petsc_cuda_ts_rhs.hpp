@@ -31,6 +31,7 @@ struct CachedGroupedLayoutEntry {
     void* d_grouped_term = nullptr;
     void* d_grouped_accum = nullptr;
     cudaEvent_t grouped_input_ready_event = nullptr;
+    cudaEvent_t grouped_term_ready_event = nullptr;
     std::size_t grouped_bytes = 0;
 };
 

@@ -115,6 +115,15 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
             throw std::runtime_error(
                 "build_cached_grouped_layouts: failed to create grouped input event");
         }
+        if (cudaEventCreateWithFlags(
+                &entry.grouped_term_ready_event,
+                cudaEventDisableTiming) != cudaSuccess) {
+            cudaEventDestroy(entry.grouped_input_ready_event);
+            entry.grouped_input_ready_event = nullptr;
+            (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
+            throw std::runtime_error(
+                "build_cached_grouped_layouts: failed to create grouped term event");
+        }
 
         if (cudaMalloc(&entry.d_grouped_input, entry.grouped_bytes) != cudaSuccess ||
             cudaMalloc(&entry.d_grouped_term, entry.grouped_bytes) != cudaSuccess ||
@@ -134,6 +143,10 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
             if (entry.grouped_input_ready_event != nullptr) {
                 cudaEventDestroy(entry.grouped_input_ready_event);
                 entry.grouped_input_ready_event = nullptr;
+            }
+            if (entry.grouped_term_ready_event != nullptr) {
+                cudaEventDestroy(entry.grouped_term_ready_event);
+                entry.grouped_term_ready_event = nullptr;
             }
             (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
             throw std::runtime_error(
@@ -177,6 +190,10 @@ void destroy_cached_grouped_layouts(
         if (entry.grouped_input_ready_event != nullptr) {
             cudaEventDestroy(entry.grouped_input_ready_event);
             entry.grouped_input_ready_event = nullptr;
+        }
+        if (entry.grouped_term_ready_event != nullptr) {
+            cudaEventDestroy(entry.grouped_term_ready_event);
+            entry.grouped_term_ready_event = nullptr;
         }
         entry.grouped_bytes = 0;
         (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
