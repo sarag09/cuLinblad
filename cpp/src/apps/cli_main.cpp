@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <complex>
 #include <cstdlib>
+#include <sstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -18,9 +19,9 @@ constexpr double kStateZeroMin00 = 0.61;
 constexpr double kMatrixTolerance = 1.0e-4;
 constexpr double kConsistencyTolerance = 1.0e-8;
 constexpr culindblad::Index kValidationBatchSteps = 1000;
-constexpr culindblad::Index kDefaultProfileNumTransmons = 6;
-constexpr culindblad::Index kDefaultProfileCutoffDim = 2;
-constexpr culindblad::Index kDefaultProfileBatchSteps = 250;
+constexpr culindblad::Index kDefaultStressNumTransmons = 6;
+constexpr culindblad::Index kDefaultStressCutoffDim = 2;
+constexpr culindblad::Index kDefaultStressBatchSteps = 250;
 
 struct TrustedBaseline {
     const char* label = nullptr;
@@ -28,11 +29,12 @@ struct TrustedBaseline {
     std::vector<Complex> state_zero_matrix;
 };
 
-struct LargeTargetOptions {
+struct StressTestOptions {
     bool enabled = false;
-    culindblad::Index num_transmons = kDefaultProfileNumTransmons;
-    culindblad::Index cutoff_dim = kDefaultProfileCutoffDim;
-    culindblad::Index batched_num_steps = kDefaultProfileBatchSteps;
+    culindblad::Index num_transmons = kDefaultStressNumTransmons;
+    culindblad::Index cutoff_dim = kDefaultStressCutoffDim;
+    culindblad::Index batched_num_steps = kDefaultStressBatchSteps;
+    std::vector<culindblad::Index> batch_sizes{1, 2, 4};
 };
 
 TrustedBaseline make_trusted_state_zero_baseline()
@@ -136,9 +138,40 @@ culindblad::TransmonChainBenchmarkConfig make_transmon_chain_benchmark_config(
     return config;
 }
 
-LargeTargetOptions parse_large_target_options()
+std::vector<culindblad::Index> parse_batch_sizes_csv(
+    const std::string& csv)
 {
-    LargeTargetOptions options{};
+    std::vector<culindblad::Index> batch_sizes;
+    std::stringstream stream(csv);
+    std::string token;
+
+    while (std::getline(stream, token, ',')) {
+        const std::size_t first = token.find_first_not_of(" \t");
+        if (first == std::string::npos) {
+            continue;
+        }
+
+        const std::size_t last = token.find_last_not_of(" \t");
+        const std::string trimmed = token.substr(first, last - first + 1);
+        const int value = std::stoi(trimmed);
+        if (value <= 0) {
+            throw std::invalid_argument(
+                "stress batch sizes must be positive integers");
+        }
+        batch_sizes.push_back(static_cast<culindblad::Index>(value));
+    }
+
+    if (batch_sizes.empty()) {
+        throw std::invalid_argument(
+            "stress batch sizes list must contain at least one value");
+    }
+
+    return batch_sizes;
+}
+
+StressTestOptions parse_stress_test_options()
+{
+    StressTestOptions options{};
 
     PetscBool enabled = PETSC_FALSE;
     PetscCallAbort(
@@ -146,7 +179,7 @@ LargeTargetOptions parse_large_target_options()
         PetscOptionsGetBool(
             nullptr,
             nullptr,
-            "-profile_large_target",
+            "-stress_test",
             &enabled,
             nullptr));
     options.enabled = (enabled == PETSC_TRUE);
@@ -158,7 +191,7 @@ LargeTargetOptions parse_large_target_options()
         PetscOptionsGetInt(
             nullptr,
             nullptr,
-            "-profile_num_transmons",
+            "-stress_num_transmons",
             &value,
             &set));
     if (set == PETSC_TRUE) {
@@ -170,7 +203,7 @@ LargeTargetOptions parse_large_target_options()
         PetscOptionsGetInt(
             nullptr,
             nullptr,
-            "-profile_cutoff_dim",
+            "-stress_cutoff_dim",
             &value,
             &set));
     if (set == PETSC_TRUE) {
@@ -182,11 +215,25 @@ LargeTargetOptions parse_large_target_options()
         PetscOptionsGetInt(
             nullptr,
             nullptr,
-            "-profile_batched_num_steps",
+            "-stress_batched_num_steps",
             &value,
             &set));
     if (set == PETSC_TRUE) {
         options.batched_num_steps = static_cast<culindblad::Index>(value);
+    }
+
+    char batch_sizes_buffer[256] = {};
+    PetscCallAbort(
+        PETSC_COMM_SELF,
+        PetscOptionsGetString(
+            nullptr,
+            nullptr,
+            "-stress_batch_sizes",
+            batch_sizes_buffer,
+            sizeof(batch_sizes_buffer),
+            &set));
+    if (set == PETSC_TRUE) {
+        options.batch_sizes = parse_batch_sizes_csv(batch_sizes_buffer);
     }
 
     return options;
@@ -195,6 +242,7 @@ LargeTargetOptions parse_large_target_options()
 void print_gpu_sweep(
     const std::string& heading,
     const culindblad::TransmonChainBenchmarkConfig& config,
+    const std::vector<culindblad::Index>& batch_sizes,
     const std::vector<culindblad::TransmonChainBenchmarkTiming>& timings)
 {
     const culindblad::Model model = culindblad::build_transmon_chain_model(config);
@@ -208,15 +256,58 @@ void print_gpu_sweep(
               << ", batched TS steps: " << config.batched_num_steps
               << std::endl;
 
-    for (const culindblad::Index first_n : std::vector<culindblad::Index>{1, 2, 4}) {
-        const culindblad::TransmonChainBenchmarkTiming& timing =
-            timings.at(static_cast<std::size_t>(first_n == 1 ? 0 : first_n == 2 ? 1 : 2));
+    for (std::size_t i = 0; i < batch_sizes.size(); ++i) {
+        const culindblad::Index first_n = batch_sizes[i];
+        const culindblad::TransmonChainBenchmarkTiming& timing = timings.at(i);
 
         std::cout << "\nBatch size " << first_n << std::endl;
         std::cout << "GPU selected-state time (s): "
                   << timing.wall_seconds << std::endl;
         std::cout << "GPU selected states/s: "
                   << static_cast<double>(timing.num_evolved_states) / timing.wall_seconds
+                  << std::endl;
+    }
+}
+
+void print_stress_test_results(
+    const culindblad::TransmonChainBenchmarkConfig& config,
+    const std::vector<culindblad::Index>& batch_sizes)
+{
+    const culindblad::Model model = culindblad::build_transmon_chain_model(config);
+    const culindblad::Solver solver = culindblad::make_solver(model);
+
+    std::cout << "\n===== CPU vs GPU Stress Test =====" << std::endl;
+    std::cout << "Transmons: " << config.num_transmons
+              << ", cutoff dim: " << config.cutoff_dim
+              << ", Hilbert dimension: " << solver.layout.hilbert_dim
+              << ", density dimension: " << solver.layout.density_dim
+              << ", batched TS steps: " << config.batched_num_steps
+              << std::endl;
+
+    for (const culindblad::Index batch_size : batch_sizes) {
+        culindblad::TransmonChainBenchmarkConfig run_config = config;
+        run_config.state_selection.evolve_all_states = false;
+        run_config.state_selection.selected_state_indices =
+            culindblad::make_first_n_state_indices(batch_size);
+
+        const culindblad::TransmonChainBenchmarkTiming cpu_timing =
+            culindblad::run_transmon_chain_cpu_benchmark(run_config);
+        const culindblad::TransmonChainBenchmarkTiming gpu_timing =
+            culindblad::run_transmon_chain_cuda_benchmark(run_config);
+
+        std::cout << "\nBatch size " << batch_size << std::endl;
+        std::cout << "CPU selected-state time (s): "
+                  << cpu_timing.wall_seconds << std::endl;
+        std::cout << "GPU selected-state time (s): "
+                  << gpu_timing.wall_seconds << std::endl;
+        std::cout << "CPU selected states/s: "
+                  << static_cast<double>(cpu_timing.num_evolved_states) / cpu_timing.wall_seconds
+                  << std::endl;
+        std::cout << "GPU selected states/s: "
+                  << static_cast<double>(gpu_timing.num_evolved_states) / gpu_timing.wall_seconds
+                  << std::endl;
+        std::cout << "CPU/GPU speedup: "
+                  << cpu_timing.wall_seconds / gpu_timing.wall_seconds
                   << std::endl;
     }
 }
@@ -236,7 +327,19 @@ int main(int argc, char** argv)
     try {
         std::cout << "===== cuLindblad transmon-chain benchmark =====" << std::endl;
 
-        const LargeTargetOptions profile_options = parse_large_target_options();
+        const StressTestOptions stress_options = parse_stress_test_options();
+
+        if (stress_options.enabled) {
+            const TransmonChainBenchmarkConfig stress_config =
+                make_transmon_chain_benchmark_config(
+                    stress_options.num_transmons,
+                    stress_options.cutoff_dim,
+                    stress_options.batched_num_steps);
+            print_stress_test_results(stress_config, stress_options.batch_sizes);
+            PetscFinalize();
+            return 0;
+        }
+
         const TransmonChainBenchmarkConfig base_config =
             make_transmon_chain_benchmark_config(2, 2, kValidationBatchSteps);
 
@@ -266,6 +369,7 @@ int main(int argc, char** argv)
         print_gpu_sweep(
             "True Batched GPU Sweep",
             base_config,
+            {1, 2, 4},
             {batch1, batch2, batch4});
 
         std::cout << "\nTrusted State 0 baseline: " << baseline.label << std::endl;
@@ -306,26 +410,6 @@ int main(int argc, char** argv)
             fail_validation(
                 "batch_size=2 State 0 does not match trusted baseline; max abs diff=" +
                 std::to_string(batch2_vs_baseline));
-        }
-
-        if (profile_options.enabled) {
-            const TransmonChainBenchmarkConfig profile_config =
-                make_transmon_chain_benchmark_config(
-                    profile_options.num_transmons,
-                    profile_options.cutoff_dim,
-                    profile_options.batched_num_steps);
-
-            const TransmonChainBenchmarkTiming profile_batch1 =
-                run_gpu_selected_state_benchmark(profile_config, 1);
-            const TransmonChainBenchmarkTiming profile_batch2 =
-                run_gpu_selected_state_benchmark(profile_config, 2);
-            const TransmonChainBenchmarkTiming profile_batch4 =
-                run_gpu_selected_state_benchmark(profile_config, 4);
-
-            print_gpu_sweep(
-                "Larger Profiling Target",
-                profile_config,
-                {profile_batch1, profile_batch2, profile_batch4});
         }
     } catch (const std::exception& ex) {
         std::cerr << "Fatal error: " << ex.what() << std::endl;
