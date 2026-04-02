@@ -13,28 +13,11 @@ bool launch_commutator_combine_kernel(
     std::size_t num_elements,
     cudaStream_t stream);
 
-bool launch_commutator_scaled_accumulate_kernel(
-    const void* d_left,
-    const void* d_right,
-    double scale,
-    void* d_accum,
-    std::size_t num_elements,
-    cudaStream_t stream);
-
 bool launch_dissipator_combine_kernel(
     const void* d_jump,
     const void* d_left,
     const void* d_right,
     void* d_out,
-    std::size_t num_elements,
-    cudaStream_t stream);
-
-bool launch_dissipator_scaled_accumulate_kernel(
-    const void* d_jump,
-    const void* d_left,
-    const void* d_right,
-    double scale,
-    void* d_accum,
     std::size_t num_elements,
     cudaStream_t stream);
 

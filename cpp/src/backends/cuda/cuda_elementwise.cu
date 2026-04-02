@@ -50,52 +50,6 @@ __global__ void dissipator_combine_kernel(
         cuCmul(half, cuCadd(left[idx], right[idx])));
 }
 
-__global__ void commutator_scaled_accumulate_kernel(
-    const cuDoubleComplex* left,
-    const cuDoubleComplex* right,
-    double scale,
-    cuDoubleComplex* accum,
-    std::size_t n)
-{
-    const std::size_t idx =
-        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-
-    if (idx >= n) {
-        return;
-    }
-
-    const cuDoubleComplex combined =
-        cuCmul(make_cuDoubleComplex(0.0, -1.0), cuCsub(left[idx], right[idx]));
-
-    accum[idx] = cuCadd(
-        accum[idx],
-        cuCmul(make_cuDoubleComplex(scale, 0.0), combined));
-}
-
-__global__ void dissipator_scaled_accumulate_kernel(
-    const cuDoubleComplex* jump,
-    const cuDoubleComplex* left,
-    const cuDoubleComplex* right,
-    double scale,
-    cuDoubleComplex* accum,
-    std::size_t n)
-{
-    const std::size_t idx =
-        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-
-    if (idx >= n) {
-        return;
-    }
-
-    const cuDoubleComplex half = make_cuDoubleComplex(0.5, 0.0);
-    const cuDoubleComplex s = make_cuDoubleComplex(scale, 0.0);
-    const cuDoubleComplex combined = cuCsub(
-        jump[idx],
-        cuCmul(half, cuCadd(left[idx], right[idx])));
-
-    accum[idx] = cuCadd(accum[idx], cuCmul(s, combined));
-}
-
 } // namespace
 
 bool launch_commutator_combine_kernel(
@@ -118,28 +72,6 @@ bool launch_commutator_combine_kernel(
     return cudaGetLastError() == cudaSuccess;
 }
 
-bool launch_commutator_scaled_accumulate_kernel(
-    const void* d_left,
-    const void* d_right,
-    double scale,
-    void* d_accum,
-    std::size_t num_elements,
-    cudaStream_t stream)
-{
-    const int block_size = 256;
-    const int grid_size =
-        static_cast<int>((num_elements + block_size - 1) / block_size);
-
-    commutator_scaled_accumulate_kernel<<<grid_size, block_size, 0, stream>>>(
-        reinterpret_cast<const cuDoubleComplex*>(d_left),
-        reinterpret_cast<const cuDoubleComplex*>(d_right),
-        scale,
-        reinterpret_cast<cuDoubleComplex*>(d_accum),
-        num_elements);
-
-    return cudaGetLastError() == cudaSuccess;
-}
-
 bool launch_dissipator_combine_kernel(
     const void* d_jump,
     const void* d_left,
@@ -157,30 +89,6 @@ bool launch_dissipator_combine_kernel(
         reinterpret_cast<const cuDoubleComplex*>(d_left),
         reinterpret_cast<const cuDoubleComplex*>(d_right),
         reinterpret_cast<cuDoubleComplex*>(d_out),
-        num_elements);
-
-    return cudaGetLastError() == cudaSuccess;
-}
-
-bool launch_dissipator_scaled_accumulate_kernel(
-    const void* d_jump,
-    const void* d_left,
-    const void* d_right,
-    double scale,
-    void* d_accum,
-    std::size_t num_elements,
-    cudaStream_t stream)
-{
-    const int block_size = 256;
-    const int grid_size =
-        static_cast<int>((num_elements + block_size - 1) / block_size);
-
-    dissipator_scaled_accumulate_kernel<<<grid_size, block_size, 0, stream>>>(
-        reinterpret_cast<const cuDoubleComplex*>(d_jump),
-        reinterpret_cast<const cuDoubleComplex*>(d_left),
-        reinterpret_cast<const cuDoubleComplex*>(d_right),
-        scale,
-        reinterpret_cast<cuDoubleComplex*>(d_accum),
         num_elements);
 
     return cudaGetLastError() == cudaSuccess;

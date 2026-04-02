@@ -487,8 +487,6 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
     cudaStream_t consumer_stream,
     cudaEvent_t input_ready_event,
     cudaEvent_t output_ready_event,
-    bool accumulate_output,
-    double output_scale,
     const std::string& cache_prefix)
 {
     const std::size_t grouped_bytes =
@@ -581,22 +579,12 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
         return PETSC_ERR_LIB;
     }
 
-    const bool combine_ok =
-        accumulate_output
-            ? launch_commutator_scaled_accumulate_kernel(
-                  left_executor->d_output,
-                  right_executor->d_output,
-                  output_scale,
-                  d_grouped_output,
-                  batch_size * grouped_layout.grouped_size,
-                  execution_stream)
-            : launch_commutator_combine_kernel(
-                  left_executor->d_output,
-                  right_executor->d_output,
-                  d_grouped_output,
-                  batch_size * grouped_layout.grouped_size,
-                  execution_stream);
-    if (!combine_ok) {
+    if (!launch_commutator_combine_kernel(
+            left_executor->d_output,
+            right_executor->d_output,
+            d_grouped_output,
+            batch_size * grouped_layout.grouped_size,
+            execution_stream)) {
         restore_executor_input_binding(right_input_binding);
         restore_executor_input_binding(left_input_binding);
         return PETSC_ERR_LIB;
@@ -628,8 +616,6 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
     cudaStream_t consumer_stream,
     cudaEvent_t input_ready_event,
     cudaEvent_t output_ready_event,
-    bool accumulate_output,
-    double output_scale,
     const std::string& cache_prefix)
 {
     const std::size_t grouped_bytes =
@@ -788,24 +774,13 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
         return PETSC_ERR_LIB;
     }
 
-    const bool combine_ok =
-        accumulate_output
-            ? launch_dissipator_scaled_accumulate_kernel(
-                  jump_right_executor->d_output,
-                  norm_left_executor->d_output,
-                  norm_right_executor->d_output,
-                  output_scale,
-                  d_grouped_output,
-                  batch_size * grouped_layout.grouped_size,
-                  execution_stream)
-            : launch_dissipator_combine_kernel(
-                  jump_right_executor->d_output,
-                  norm_left_executor->d_output,
-                  norm_right_executor->d_output,
-                  d_grouped_output,
-                  batch_size * grouped_layout.grouped_size,
-                  execution_stream);
-    if (!combine_ok) {
+    if (!launch_dissipator_combine_kernel(
+            jump_right_executor->d_output,
+            norm_left_executor->d_output,
+            norm_right_executor->d_output,
+            d_grouped_output,
+            batch_size * grouped_layout.grouped_size,
+            execution_stream)) {
         restore_executor_input_binding(norm_right_input_binding);
         restore_executor_input_binding(norm_left_input_binding);
         restore_executor_input_binding(jump_right_input_binding);
@@ -977,8 +952,6 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
         consumer_stream,
         regroup_executor->completion_event,
         nullptr,
-        false,
-        1.0,
         "petsc_grouped");
     if (ierr != 0) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
@@ -1091,8 +1064,6 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
         consumer_stream,
         regroup_executor->completion_event,
         nullptr,
-        false,
-        1.0,
         "petsc_grouped");
     if (ierr != 0) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
@@ -1179,9 +1150,7 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer(
     Index batch_size,
     cudaStream_t consumer_stream,
     cudaEvent_t input_ready_event,
-    cudaEvent_t output_ready_event,
-    bool accumulate_output,
-    double output_scale)
+    cudaEvent_t output_ready_event)
 {
     return apply_grouped_commutator_cuda_buffer_impl(
         solver,
@@ -1196,8 +1165,6 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer(
         consumer_stream,
         input_ready_event,
         output_ready_event,
-        accumulate_output,
-        output_scale,
         "petsc_grouped_buffer");
 }
 
@@ -1215,9 +1182,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer(
     Index batch_size,
     cudaStream_t consumer_stream,
     cudaEvent_t input_ready_event,
-    cudaEvent_t output_ready_event,
-    bool accumulate_output,
-    double output_scale)
+    cudaEvent_t output_ready_event)
 {
     return apply_grouped_dissipator_cuda_buffer_impl(
         solver,
@@ -1234,8 +1199,6 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer(
         consumer_stream,
         input_ready_event,
         output_ready_event,
-        accumulate_output,
-        output_scale,
         "petsc_grouped_buffer");
 }
 
