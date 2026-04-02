@@ -93,7 +93,9 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer(
     Index batch_size,
     cudaStream_t consumer_stream,
     cudaEvent_t input_ready_event = nullptr,
-    cudaEvent_t output_ready_event = nullptr);
+    cudaEvent_t output_ready_event = nullptr,
+    bool accumulate_output = false,
+    double output_scale = 1.0);
 
 PetscErrorCode apply_grouped_dissipator_cuda_buffer(
     const Solver& solver,
@@ -109,6 +111,8 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer(
     Index batch_size,
     cudaStream_t consumer_stream,
     cudaEvent_t input_ready_event = nullptr,
-    cudaEvent_t output_ready_event = nullptr);
+    cudaEvent_t output_ready_event = nullptr,
+    bool accumulate_output = false,
+    double output_scale = 1.0);
 
 } // namespace culindblad

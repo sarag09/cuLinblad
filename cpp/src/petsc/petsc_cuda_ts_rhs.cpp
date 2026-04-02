@@ -216,32 +216,6 @@ PetscErrorCode zero_grouped_layout_accumulator(
     return zero_ok ? 0 : PETSC_ERR_LIB;
 }
 
-PetscErrorCode accumulate_grouped_layout_term(
-    CachedGroupedLayoutEntry& layout_entry,
-    double scale,
-    Index batch_size,
-    cudaStream_t stream)
-{
-    const Index grouped_elements =
-        batch_size * layout_entry.grouped_layout.grouped_size;
-
-    const bool accum_ok =
-        scale == 1.0
-            ? launch_vector_accumulate_kernel(
-                  layout_entry.d_grouped_term,
-                  layout_entry.d_grouped_accum,
-                  grouped_elements,
-                  stream)
-            : launch_vector_scaled_accumulate_kernel(
-                  layout_entry.d_grouped_term,
-                  scale,
-                  layout_entry.d_grouped_accum,
-                  grouped_elements,
-                  stream);
-
-    return accum_ok ? 0 : PETSC_ERR_LIB;
-}
-
 PetscErrorCode apply_grouped_layout_terms_to_rhs(
     const Solver& solver,
     PetscCudaTsRhsContext& rhs_ctx,
@@ -278,17 +252,13 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             layout_entry.grouped_layout,
             rhs_ctx.executor_cache,
             layout_entry.d_grouped_input,
-            layout_entry.d_grouped_term,
+            layout_entry.d_grouped_accum,
             rhs_ctx.batch_size,
             s,
             nullptr,
-            nullptr));
-
-        PetscCall(accumulate_grouped_layout_term(
-            layout_entry,
-            1.0,
-            rhs_ctx.batch_size,
-            s));
+            nullptr,
+            true,
+            1.0));
         has_contribution = true;
     }
 
@@ -307,17 +277,13 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             layout_entry.grouped_layout,
             rhs_ctx.executor_cache,
             layout_entry.d_grouped_input,
-            layout_entry.d_grouped_term,
+            layout_entry.d_grouped_accum,
             rhs_ctx.batch_size,
             s,
             nullptr,
-            nullptr));
-
-        PetscCall(accumulate_grouped_layout_term(
-            layout_entry,
-            1.0,
-            rhs_ctx.batch_size,
-            s));
+            nullptr,
+            true,
+            1.0));
         has_contribution = true;
     }
 
@@ -337,17 +303,13 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             layout_entry.grouped_layout,
             rhs_ctx.executor_cache,
             layout_entry.d_grouped_input,
-            layout_entry.d_grouped_term,
+            layout_entry.d_grouped_accum,
             rhs_ctx.batch_size,
             s,
             nullptr,
-            nullptr));
-
-        PetscCall(accumulate_grouped_layout_term(
-            layout_entry,
-            coeff,
-            rhs_ctx.batch_size,
-            s));
+            nullptr,
+            true,
+            coeff));
         has_contribution = true;
     }
 
