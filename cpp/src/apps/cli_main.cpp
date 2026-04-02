@@ -31,6 +31,7 @@ struct TrustedBaseline {
 
 struct StressTestOptions {
     bool enabled = false;
+    bool run_cpu = true;
     culindblad::Index num_transmons = kDefaultStressNumTransmons;
     culindblad::Index cutoff_dim = kDefaultStressCutoffDim;
     culindblad::Index batched_num_steps = kDefaultStressBatchSteps;
@@ -184,6 +185,17 @@ StressTestOptions parse_stress_test_options()
             nullptr));
     options.enabled = (enabled == PETSC_TRUE);
 
+    PetscBool run_cpu = PETSC_TRUE;
+    PetscCallAbort(
+        PETSC_COMM_SELF,
+        PetscOptionsGetBool(
+            nullptr,
+            nullptr,
+            "-stress_run_cpu",
+            &run_cpu,
+            nullptr));
+    options.run_cpu = (run_cpu == PETSC_TRUE);
+
     PetscBool set = PETSC_FALSE;
     PetscInt value = 0;
     PetscCallAbort(
@@ -270,6 +282,7 @@ void print_gpu_sweep(
 }
 
 void print_stress_test_results(
+    const StressTestOptions& options,
     const culindblad::TransmonChainBenchmarkConfig& config,
     const std::vector<culindblad::Index>& batch_sizes)
 {
@@ -282,6 +295,7 @@ void print_stress_test_results(
               << ", Hilbert dimension: " << solver.layout.hilbert_dim
               << ", density dimension: " << solver.layout.density_dim
               << ", batched TS steps: " << config.batched_num_steps
+              << ", run CPU benchmark: " << (options.run_cpu ? "yes" : "no")
               << std::endl;
 
     for (const culindblad::Index batch_size : batch_sizes) {
@@ -290,25 +304,29 @@ void print_stress_test_results(
         run_config.state_selection.selected_state_indices =
             culindblad::make_first_n_state_indices(batch_size);
 
-        const culindblad::TransmonChainBenchmarkTiming cpu_timing =
-            culindblad::run_transmon_chain_cpu_benchmark(run_config);
         const culindblad::TransmonChainBenchmarkTiming gpu_timing =
             culindblad::run_transmon_chain_cuda_benchmark(run_config);
+        culindblad::TransmonChainBenchmarkTiming cpu_timing{};
+        if (options.run_cpu) {
+            cpu_timing = culindblad::run_transmon_chain_cpu_benchmark(run_config);
+        }
 
         std::cout << "\nBatch size " << batch_size << std::endl;
-        std::cout << "CPU selected-state time (s): "
-                  << cpu_timing.wall_seconds << std::endl;
         std::cout << "GPU selected-state time (s): "
                   << gpu_timing.wall_seconds << std::endl;
-        std::cout << "CPU selected states/s: "
-                  << static_cast<double>(cpu_timing.num_evolved_states) / cpu_timing.wall_seconds
-                  << std::endl;
         std::cout << "GPU selected states/s: "
                   << static_cast<double>(gpu_timing.num_evolved_states) / gpu_timing.wall_seconds
                   << std::endl;
-        std::cout << "CPU/GPU speedup: "
-                  << cpu_timing.wall_seconds / gpu_timing.wall_seconds
-                  << std::endl;
+        if (options.run_cpu) {
+            std::cout << "CPU selected-state time (s): "
+                      << cpu_timing.wall_seconds << std::endl;
+            std::cout << "CPU selected states/s: "
+                      << static_cast<double>(cpu_timing.num_evolved_states) / cpu_timing.wall_seconds
+                      << std::endl;
+            std::cout << "CPU/GPU speedup: "
+                      << cpu_timing.wall_seconds / gpu_timing.wall_seconds
+                      << std::endl;
+        }
     }
 }
 
@@ -335,7 +353,10 @@ int main(int argc, char** argv)
                     stress_options.num_transmons,
                     stress_options.cutoff_dim,
                     stress_options.batched_num_steps);
-            print_stress_test_results(stress_config, stress_options.batch_sizes);
+            print_stress_test_results(
+                stress_options,
+                stress_config,
+                stress_options.batch_sizes);
             PetscFinalize();
             return 0;
         }
