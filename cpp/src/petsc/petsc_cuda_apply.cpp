@@ -225,6 +225,34 @@ struct ExecutorInputBinding {
     void* original_d_input = nullptr;
 };
 
+struct ExecutorBufferReleaseGuard {
+    std::vector<CuTensorExecutor*> executors;
+
+    ~ExecutorBufferReleaseGuard()
+    {
+        for (CuTensorExecutor* executor : executors) {
+            if (executor != nullptr) {
+                (void)release_cutensor_executor_device_buffers(*executor);
+            }
+        }
+    }
+
+    void track(CuTensorExecutor* executor)
+    {
+        if (executor == nullptr) {
+            return;
+        }
+
+        for (CuTensorExecutor* tracked : executors) {
+            if (tracked == executor) {
+                return;
+            }
+        }
+
+        executors.push_back(executor);
+    }
+};
+
 bool execute_executor_for_stream_mode(
     CuTensorExecutor& executor,
     cudaStream_t execution_stream,
@@ -350,6 +378,7 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
     PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
 
     CuTensorExecutor* executor = nullptr;
+    ExecutorBufferReleaseGuard release_guard{};
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
         cache_key + "_batch_" + std::to_string(batch_size),
@@ -364,6 +393,7 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return ierr;
     }
+    release_guard.track(executor);
 
     execution_stream =
         use_direct_consumer_stream ? consumer_stream : executor->stream;
@@ -507,6 +537,7 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
     CuTensorExecutor* right_executor = nullptr;
     ExecutorInputBinding left_input_binding{};
     ExecutorInputBinding right_input_binding{};
+    ExecutorBufferReleaseGuard release_guard{};
     const bool use_direct_consumer_stream = consumer_stream != nullptr;
     cudaStream_t execution_stream =
         use_direct_consumer_stream ? consumer_stream : nullptr;
@@ -523,6 +554,7 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
     if (ierr != 0) {
         return ierr;
     }
+    release_guard.track(left_executor);
 
     ierr = get_or_prepare_executor(
         executor_cache,
@@ -536,6 +568,7 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
     if (ierr != 0) {
         return ierr;
     }
+    release_guard.track(right_executor);
 
     execution_stream =
         use_direct_consumer_stream ? consumer_stream : left_executor->stream;
@@ -640,6 +673,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
     ExecutorInputBinding jump_right_input_binding{};
     ExecutorInputBinding norm_left_input_binding{};
     ExecutorInputBinding norm_right_input_binding{};
+    ExecutorBufferReleaseGuard release_guard{};
     const bool use_direct_consumer_stream = consumer_stream != nullptr;
     cudaStream_t execution_stream =
         use_direct_consumer_stream ? consumer_stream : nullptr;
@@ -656,6 +690,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
     if (ierr != 0) {
         return ierr;
     }
+    release_guard.track(jump_left_executor);
 
     ierr = get_or_prepare_executor(
         executor_cache,
@@ -669,6 +704,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
     if (ierr != 0) {
         return ierr;
     }
+    release_guard.track(jump_right_executor);
 
     ierr = get_or_prepare_executor(
         executor_cache,
@@ -682,6 +718,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
     if (ierr != 0) {
         return ierr;
     }
+    release_guard.track(norm_left_executor);
 
     ierr = get_or_prepare_executor(
         executor_cache,
@@ -695,6 +732,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
     if (ierr != 0) {
         return ierr;
     }
+    release_guard.track(norm_right_executor);
 
     execution_stream =
         use_direct_consumer_stream ? consumer_stream : norm_right_executor->stream;
@@ -895,6 +933,7 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
     PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
 
     CuTensorExecutor* regroup_executor = nullptr;
+    ExecutorBufferReleaseGuard release_guard{};
     const CuTensorContractionDesc left_desc =
         make_cutensor_left_contraction_desc(
             target_sites,
@@ -917,6 +956,7 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return ierr;
     }
+    release_guard.track(regroup_executor);
 
     const bool regroup_ok =
         wait_for_cutensor_executor_completion(*regroup_executor, regroup_executor->stream) &&
@@ -1005,6 +1045,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
     PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
 
     CuTensorExecutor* regroup_executor = nullptr;
+    ExecutorBufferReleaseGuard release_guard{};
     const CuTensorContractionDesc left_desc =
         make_cutensor_left_contraction_desc(
             target_sites,
@@ -1027,6 +1068,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return ierr;
     }
+    release_guard.track(regroup_executor);
 
     const bool regroup_ok =
         wait_for_cutensor_executor_completion(*regroup_executor, regroup_executor->stream) &&

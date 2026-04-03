@@ -203,13 +203,14 @@ PetscErrorCode scale_petsc_cuda_vec(
 }
 
 PetscErrorCode zero_grouped_layout_accumulator(
+    const PetscCudaTsRhsContext& rhs_ctx,
     CachedGroupedLayoutEntry& layout_entry,
     Index batch_size,
     cudaStream_t stream)
 {
     const bool zero_ok =
         launch_zero_batched_buffer_kernel(
-            layout_entry.d_grouped_accum,
+            rhs_ctx.grouped_scratch.d_grouped_accum,
             batch_size * layout_entry.grouped_layout.grouped_size,
             stream);
 
@@ -217,6 +218,7 @@ PetscErrorCode zero_grouped_layout_accumulator(
 }
 
 PetscErrorCode accumulate_grouped_layout_term(
+    const PetscCudaTsRhsContext& rhs_ctx,
     CachedGroupedLayoutEntry& layout_entry,
     double scale,
     Index batch_size,
@@ -228,14 +230,14 @@ PetscErrorCode accumulate_grouped_layout_term(
     const bool accum_ok =
         scale == 1.0
             ? launch_vector_accumulate_kernel(
-                  layout_entry.d_grouped_term,
-                  layout_entry.d_grouped_accum,
+                  rhs_ctx.grouped_scratch.d_grouped_term,
+                  rhs_ctx.grouped_scratch.d_grouped_accum,
                   grouped_elements,
                   stream)
             : launch_vector_scaled_accumulate_kernel(
-                  layout_entry.d_grouped_term,
+                  rhs_ctx.grouped_scratch.d_grouped_term,
                   scale,
-                  layout_entry.d_grouped_accum,
+                  rhs_ctx.grouped_scratch.d_grouped_accum,
                   grouped_elements,
                   stream);
 
@@ -251,14 +253,19 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
     PetscReal t)
 {
     cudaStream_t s = rhs_ctx.elementwise_stream;
+    if (layout_entry.grouped_bytes > rhs_ctx.grouped_scratch.grouped_bytes) {
+        return PETSC_ERR_ARG_SIZ;
+    }
+
     PetscCall(regroup_petsc_cuda_vec_to_grouped_buffer(
         layout_entry.cuda_grouped_layout,
         x,
-        layout_entry.d_grouped_input,
+        rhs_ctx.grouped_scratch.d_grouped_input,
         rhs_ctx.batch_size,
         s));
 
     PetscCall(zero_grouped_layout_accumulator(
+        rhs_ctx,
         layout_entry,
         rhs_ctx.batch_size,
         s));
@@ -277,14 +284,15 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             h_term.sites,
             layout_entry.grouped_layout,
             rhs_ctx.executor_cache,
-            layout_entry.d_grouped_input,
-            layout_entry.d_grouped_term,
+            rhs_ctx.grouped_scratch.d_grouped_input,
+            rhs_ctx.grouped_scratch.d_grouped_term,
             rhs_ctx.batch_size,
             s,
             nullptr,
             nullptr));
 
         PetscCall(accumulate_grouped_layout_term(
+            rhs_ctx,
             layout_entry,
             1.0,
             rhs_ctx.batch_size,
@@ -306,14 +314,15 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             d_aux.sites,
             layout_entry.grouped_layout,
             rhs_ctx.executor_cache,
-            layout_entry.d_grouped_input,
-            layout_entry.d_grouped_term,
+            rhs_ctx.grouped_scratch.d_grouped_input,
+            rhs_ctx.grouped_scratch.d_grouped_term,
             rhs_ctx.batch_size,
             s,
             nullptr,
             nullptr));
 
         PetscCall(accumulate_grouped_layout_term(
+            rhs_ctx,
             layout_entry,
             1.0,
             rhs_ctx.batch_size,
@@ -336,14 +345,15 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             td_term.sites,
             layout_entry.grouped_layout,
             rhs_ctx.executor_cache,
-            layout_entry.d_grouped_input,
-            layout_entry.d_grouped_term,
+            rhs_ctx.grouped_scratch.d_grouped_input,
+            rhs_ctx.grouped_scratch.d_grouped_term,
             rhs_ctx.batch_size,
             s,
             nullptr,
             nullptr));
 
         PetscCall(accumulate_grouped_layout_term(
+            rhs_ctx,
             layout_entry,
             coeff,
             rhs_ctx.batch_size,
@@ -357,7 +367,7 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
 
     PetscCall(flatten_grouped_buffer_to_petsc_cuda_vec(
         layout_entry.cuda_grouped_layout,
-        layout_entry.d_grouped_accum,
+        rhs_ctx.grouped_scratch.d_grouped_accum,
         rhs_ctx.work_vec_a,
         rhs_ctx.batch_size,
         s,

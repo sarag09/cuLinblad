@@ -45,6 +45,9 @@ bool create_cutensor_executor(
 bool destroy_cutensor_executor(
     CuTensorExecutor& executor);
 
+bool release_cutensor_executor_device_buffers(
+    CuTensorExecutor& executor);
+
 bool upload_cutensor_executor_operator(
     CuTensorExecutor& executor,
     const std::vector<Complex>& local_op);

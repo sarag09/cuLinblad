@@ -27,11 +27,13 @@ struct CachedGroupedLayoutEntry {
     std::vector<Index> sites;
     GroupedStateLayout grouped_layout;
     CudaGroupedStateLayout cuda_grouped_layout;
+    std::size_t grouped_bytes = 0;
+};
+
+struct GroupedRhsScratchBuffers {
     void* d_grouped_input = nullptr;
     void* d_grouped_term = nullptr;
     void* d_grouped_accum = nullptr;
-    cudaEvent_t grouped_input_ready_event = nullptr;
-    cudaEvent_t grouped_term_ready_event = nullptr;
     std::size_t grouped_bytes = 0;
 };
 
@@ -48,6 +50,7 @@ struct PetscCudaTsRhsContext {
     CuTensorExecutorCache executor_cache;
     std::vector<CachedDissipatorAuxiliaries> cached_static_dissipators;
     std::vector<CachedGroupedLayoutEntry> cached_grouped_layouts;
+    GroupedRhsScratchBuffers grouped_scratch;
     cudaStream_t elementwise_stream;
 
     Vec work_vec_a;

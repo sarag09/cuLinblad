@@ -50,6 +50,20 @@ bool cuda_malloc_bytes(void** ptr, size_t bytes)
     return cudaMalloc(ptr, bytes) == cudaSuccess;
 }
 
+bool ensure_cuda_buffer(void** ptr, size_t bytes)
+{
+    if (bytes == 0) {
+        *ptr = nullptr;
+        return true;
+    }
+
+    if (*ptr != nullptr) {
+        return true;
+    }
+
+    return cuda_malloc_bytes(ptr, bytes);
+}
+
 bool cuda_copy_h2d_async(void* dst, const void* src, size_t bytes, cudaStream_t stream)
 {
     return cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, stream) == cudaSuccess;
@@ -72,6 +86,17 @@ bool execute_cutensor_executor_device_impl(
 {
     cudaStream_t execution_stream = resolve_execution_stream(executor, stream);
     if (!prepare_cutensor_executor_stream(executor, execution_stream)) {
+        return false;
+    }
+
+    if (executor.d_input == nullptr) {
+        return false;
+    }
+
+    if (!ensure_cuda_buffer(&executor.d_output, executor.output_bytes) ||
+        !ensure_cuda_buffer(
+            &executor.d_workspace,
+            static_cast<size_t>(executor.plan_bundle.workspace_size))) {
         return false;
     }
 
@@ -148,40 +173,12 @@ bool create_cutensor_executor(
         cudaStreamDestroy(executor.stream);
         destroy_cutensor_plan(executor.plan_bundle);
         return false;
-    }    
+    }
 
     if (!cuda_malloc_bytes(&executor.d_op, op_bytes)) {
         cudaStreamDestroy(executor.stream);
         destroy_cutensor_plan(executor.plan_bundle);
         return false;
-    }
-
-    if (!cuda_malloc_bytes(&executor.d_input, input_bytes)) {
-        cudaFree(executor.d_op);
-        cudaStreamDestroy(executor.stream);
-        destroy_cutensor_plan(executor.plan_bundle);
-        return false;
-    }
-
-    if (!cuda_malloc_bytes(&executor.d_output, output_bytes)) {
-        cudaFree(executor.d_input);
-        cudaFree(executor.d_op);
-        cudaStreamDestroy(executor.stream);
-        destroy_cutensor_plan(executor.plan_bundle);
-        return false;
-    }
-
-    if (executor.plan_bundle.workspace_size > 0) {
-        if (!cuda_malloc_bytes(
-                &executor.d_workspace,
-                static_cast<size_t>(executor.plan_bundle.workspace_size))) {
-            cudaFree(executor.d_output);
-            cudaFree(executor.d_input);
-            cudaFree(executor.d_op);
-            cudaStreamDestroy(executor.stream);
-            destroy_cutensor_plan(executor.plan_bundle);
-            return false;
-        }
     }
 
     return true;
@@ -211,7 +208,7 @@ bool destroy_cutensor_executor(
     if (executor.completion_event != nullptr &&
         cudaEventDestroy(executor.completion_event) != cudaSuccess) {
         ok = false;
-    }    
+    }
 
     if (executor.stream != nullptr && cudaStreamDestroy(executor.stream) != cudaSuccess) {
         ok = false;
@@ -226,6 +223,31 @@ bool destroy_cutensor_executor(
     executor.completion_stream = nullptr;
     executor.completion_recorded = false;
 
+    return ok;
+}
+
+bool release_cutensor_executor_device_buffers(
+    CuTensorExecutor& executor)
+{
+    bool ok = true;
+
+    if (executor.d_workspace != nullptr && cudaFree(executor.d_workspace) != cudaSuccess) {
+        ok = false;
+    }
+
+    if (executor.d_output != nullptr && cudaFree(executor.d_output) != cudaSuccess) {
+        ok = false;
+    }
+
+    if (executor.d_input != nullptr && cudaFree(executor.d_input) != cudaSuccess) {
+        ok = false;
+    }
+
+    executor.d_workspace = nullptr;
+    executor.d_output = nullptr;
+    executor.d_input = nullptr;
+    executor.completion_stream = nullptr;
+    executor.completion_recorded = false;
     return ok;
 }
 
@@ -318,6 +340,11 @@ bool upload_cutensor_executor_input_on_stream(
         return false;
     }
 
+    if (!ensure_cuda_buffer(&executor.d_input, executor.input_bytes) ||
+        !ensure_cuda_buffer(&executor.d_output, executor.output_bytes)) {
+        return false;
+    }
+
     if (!cuda_copy_h2d_async(executor.d_input, input_tensor.data(), executor.input_bytes, execution_stream)) {
         return false;
     }
@@ -354,6 +381,11 @@ bool copy_cutensor_executor_output_to_input(
     }
 
     if (!prepare_cutensor_executor_stream(dst_executor, dst_executor.stream)) {
+        return false;
+    }
+
+    if (!ensure_cuda_buffer(&dst_executor.d_input, dst_executor.input_bytes) ||
+        !ensure_cuda_buffer(&dst_executor.d_output, dst_executor.output_bytes)) {
         return false;
     }
 
@@ -493,6 +525,14 @@ bool execute_cutensor_executor_with_resident_operator_pinned(
     }
 
     if (!prepare_cutensor_executor_stream(executor, executor.stream)) {
+        return false;
+    }
+
+    if (!ensure_cuda_buffer(&executor.d_input, executor.input_bytes) ||
+        !ensure_cuda_buffer(&executor.d_output, executor.output_bytes) ||
+        !ensure_cuda_buffer(
+            &executor.d_workspace,
+            static_cast<size_t>(executor.plan_bundle.workspace_size))) {
         return false;
     }
 

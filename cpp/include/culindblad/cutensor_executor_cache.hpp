@@ -10,10 +10,12 @@ namespace culindblad {
 
 struct CuTensorExecutorCacheEntry {
     std::unique_ptr<CuTensorExecutor> executor;
+    std::size_t last_use_generation = 0;
 };
 
 struct CuTensorExecutorCache {
     std::unordered_map<std::string, CuTensorExecutorCacheEntry> entries;
+    std::size_t generation = 0;
 };
 
 bool get_or_create_cutensor_executor(

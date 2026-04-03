@@ -108,51 +108,6 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
                 "build_cached_grouped_layouts: failed to create CUDA grouped layout");
         }
 
-        if (cudaEventCreateWithFlags(
-                &entry.grouped_input_ready_event,
-                cudaEventDisableTiming) != cudaSuccess) {
-            (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
-            throw std::runtime_error(
-                "build_cached_grouped_layouts: failed to create grouped input event");
-        }
-        if (cudaEventCreateWithFlags(
-                &entry.grouped_term_ready_event,
-                cudaEventDisableTiming) != cudaSuccess) {
-            cudaEventDestroy(entry.grouped_input_ready_event);
-            entry.grouped_input_ready_event = nullptr;
-            (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
-            throw std::runtime_error(
-                "build_cached_grouped_layouts: failed to create grouped term event");
-        }
-
-        if (cudaMalloc(&entry.d_grouped_input, entry.grouped_bytes) != cudaSuccess ||
-            cudaMalloc(&entry.d_grouped_term, entry.grouped_bytes) != cudaSuccess ||
-            cudaMalloc(&entry.d_grouped_accum, entry.grouped_bytes) != cudaSuccess) {
-            if (entry.d_grouped_accum != nullptr) {
-                cudaFree(entry.d_grouped_accum);
-                entry.d_grouped_accum = nullptr;
-            }
-            if (entry.d_grouped_term != nullptr) {
-                cudaFree(entry.d_grouped_term);
-                entry.d_grouped_term = nullptr;
-            }
-            if (entry.d_grouped_input != nullptr) {
-                cudaFree(entry.d_grouped_input);
-                entry.d_grouped_input = nullptr;
-            }
-            if (entry.grouped_input_ready_event != nullptr) {
-                cudaEventDestroy(entry.grouped_input_ready_event);
-                entry.grouped_input_ready_event = nullptr;
-            }
-            if (entry.grouped_term_ready_event != nullptr) {
-                cudaEventDestroy(entry.grouped_term_ready_event);
-                entry.grouped_term_ready_event = nullptr;
-            }
-            (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
-            throw std::runtime_error(
-                "build_cached_grouped_layouts: failed to allocate grouped RHS buffers");
-        }
-
         cached.push_back(std::move(entry));
     };
 
@@ -175,30 +130,66 @@ void destroy_cached_grouped_layouts(
     std::vector<CachedGroupedLayoutEntry>& cached)
 {
     for (CachedGroupedLayoutEntry& entry : cached) {
-        if (entry.d_grouped_accum != nullptr) {
-            cudaFree(entry.d_grouped_accum);
-            entry.d_grouped_accum = nullptr;
-        }
-        if (entry.d_grouped_term != nullptr) {
-            cudaFree(entry.d_grouped_term);
-            entry.d_grouped_term = nullptr;
-        }
-        if (entry.d_grouped_input != nullptr) {
-            cudaFree(entry.d_grouped_input);
-            entry.d_grouped_input = nullptr;
-        }
-        if (entry.grouped_input_ready_event != nullptr) {
-            cudaEventDestroy(entry.grouped_input_ready_event);
-            entry.grouped_input_ready_event = nullptr;
-        }
-        if (entry.grouped_term_ready_event != nullptr) {
-            cudaEventDestroy(entry.grouped_term_ready_event);
-            entry.grouped_term_ready_event = nullptr;
-        }
         entry.grouped_bytes = 0;
         (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
     }
     cached.clear();
+}
+
+PetscErrorCode create_grouped_rhs_scratch_buffers(
+    const std::vector<CachedGroupedLayoutEntry>& cached_layouts,
+    PetscCudaTsRhsContext& rhs_ctx)
+{
+    rhs_ctx.grouped_scratch = GroupedRhsScratchBuffers{};
+
+    std::size_t max_grouped_bytes = 0;
+    for (const CachedGroupedLayoutEntry& entry : cached_layouts) {
+        max_grouped_bytes = std::max(max_grouped_bytes, entry.grouped_bytes);
+    }
+
+    rhs_ctx.grouped_scratch.grouped_bytes = max_grouped_bytes;
+    if (max_grouped_bytes == 0) {
+        return 0;
+    }
+
+    if (cudaMalloc(&rhs_ctx.grouped_scratch.d_grouped_input, max_grouped_bytes) != cudaSuccess ||
+        cudaMalloc(&rhs_ctx.grouped_scratch.d_grouped_term, max_grouped_bytes) != cudaSuccess ||
+        cudaMalloc(&rhs_ctx.grouped_scratch.d_grouped_accum, max_grouped_bytes) != cudaSuccess) {
+        if (rhs_ctx.grouped_scratch.d_grouped_accum != nullptr) {
+            cudaFree(rhs_ctx.grouped_scratch.d_grouped_accum);
+            rhs_ctx.grouped_scratch.d_grouped_accum = nullptr;
+        }
+        if (rhs_ctx.grouped_scratch.d_grouped_term != nullptr) {
+            cudaFree(rhs_ctx.grouped_scratch.d_grouped_term);
+            rhs_ctx.grouped_scratch.d_grouped_term = nullptr;
+        }
+        if (rhs_ctx.grouped_scratch.d_grouped_input != nullptr) {
+            cudaFree(rhs_ctx.grouped_scratch.d_grouped_input);
+            rhs_ctx.grouped_scratch.d_grouped_input = nullptr;
+        }
+        rhs_ctx.grouped_scratch.grouped_bytes = 0;
+        return PETSC_ERR_MEM;
+    }
+
+    return 0;
+}
+
+void destroy_grouped_rhs_scratch_buffers(
+    PetscCudaTsRhsContext& rhs_ctx)
+{
+    if (rhs_ctx.grouped_scratch.d_grouped_accum != nullptr) {
+        cudaFree(rhs_ctx.grouped_scratch.d_grouped_accum);
+        rhs_ctx.grouped_scratch.d_grouped_accum = nullptr;
+    }
+    if (rhs_ctx.grouped_scratch.d_grouped_term != nullptr) {
+        cudaFree(rhs_ctx.grouped_scratch.d_grouped_term);
+        rhs_ctx.grouped_scratch.d_grouped_term = nullptr;
+    }
+    if (rhs_ctx.grouped_scratch.d_grouped_input != nullptr) {
+        cudaFree(rhs_ctx.grouped_scratch.d_grouped_input);
+        rhs_ctx.grouped_scratch.d_grouped_input = nullptr;
+    }
+    rhs_ctx.grouped_scratch.grouped_bytes = 0;
 }
 
 PetscErrorCode create_rhs_work_vectors(
@@ -283,6 +274,7 @@ PetscErrorCode create_cuda_batch_execution_context(
         CuTensorExecutorCache{},
         build_cached_static_dissipators(solver),
         build_cached_grouped_layouts(solver, batch_size),
+        GroupedRhsScratchBuffers{},
         nullptr,
         nullptr,
         nullptr,
@@ -297,6 +289,23 @@ PetscErrorCode create_cuda_batch_execution_context(
         return PETSC_ERR_LIB;
     }
 
+    {
+        const PetscErrorCode scratch_ierr =
+            create_grouped_rhs_scratch_buffers(
+                ctx.rhs_ctx.cached_grouped_layouts,
+                ctx.rhs_ctx);
+        if (scratch_ierr != 0) {
+            destroy_cached_grouped_layouts(ctx.rhs_ctx.cached_grouped_layouts);
+            (void)destroy_cuda_grouped_state_layout(ctx.rhs_ctx.cuda_grouped_layout);
+            if (ctx.rhs_ctx.elementwise_stream != nullptr) {
+                cudaStreamDestroy(ctx.rhs_ctx.elementwise_stream);
+                ctx.rhs_ctx.elementwise_stream = nullptr;
+            }
+            PetscCall(VecDestroy(&ctx.x));
+            PetscCall(TSDestroy(&ctx.ts));
+            return scratch_ierr;
+        }
+    }
     PetscCall(create_rhs_work_vectors(ctx.x, ctx.rhs_ctx));
 
     PetscCall(TSSetRHSFunction(
@@ -318,6 +327,7 @@ PetscErrorCode destroy_cuda_batch_execution_context(
 
     PetscCall(destroy_rhs_work_vectors(ctx.rhs_ctx));
     (void)destroy_cutensor_executor_cache(ctx.rhs_ctx.executor_cache);
+    destroy_grouped_rhs_scratch_buffers(ctx.rhs_ctx);
     destroy_cached_grouped_layouts(ctx.rhs_ctx.cached_grouped_layouts);
     (void)destroy_cuda_grouped_state_layout(ctx.rhs_ctx.cuda_grouped_layout);
 
