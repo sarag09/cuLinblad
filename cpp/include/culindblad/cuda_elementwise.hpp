@@ -69,4 +69,13 @@ bool launch_batched_grouped_left_diagonal_kernel(
     Index batch_size,
     cudaStream_t stream);
 
+bool launch_batched_grouped_diagonal_dissipator_jump_kernel(
+    const void* diagonal_op,
+    const void* grouped_input,
+    void* grouped_output,
+    Index target_hilbert_dim,
+    Index complement_dim,
+    Index batch_size,
+    cudaStream_t stream);
+
 } // namespace culindblad

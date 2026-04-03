@@ -54,4 +54,34 @@ std::vector<Complex> local_multiply_square(
     return C;
 }
 
+bool try_extract_local_diagonal(
+    const std::vector<Complex>& op,
+    Index dim,
+    std::vector<Complex>& diagonal_out)
+{
+    if (op.size() != dim * dim) {
+        throw std::runtime_error("try_extract_local_diagonal: op has wrong size");
+    }
+
+    constexpr double kDiagonalTolerance = 1.0e-14;
+    diagonal_out.assign(dim, Complex{0.0, 0.0});
+
+    for (Index i = 0; i < dim; ++i) {
+        diagonal_out[i] = op[i * dim + i];
+
+        for (Index j = 0; j < dim; ++j) {
+            if (i == j) {
+                continue;
+            }
+
+            if (std::abs(op[i * dim + j]) > kDiagonalTolerance) {
+                diagonal_out.clear();
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 } // namespace culindblad

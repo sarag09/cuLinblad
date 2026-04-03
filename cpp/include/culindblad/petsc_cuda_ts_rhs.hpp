@@ -21,6 +21,8 @@ struct CachedDissipatorAuxiliaries {
     std::vector<Complex> l_op;
     std::vector<Complex> l_dag;
     std::vector<Complex> l_dag_l;
+    std::vector<Complex> jump_diagonal;
+    void* d_jump_diagonal = nullptr;
 };
 
 struct CachedGroupedLayoutEntry {

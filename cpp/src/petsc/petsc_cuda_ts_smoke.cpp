@@ -117,10 +117,41 @@ std::vector<CachedDissipatorAuxiliaries> build_cached_static_dissipators(
         aux.l_op = d_term.matrix;
         aux.l_dag = local_conjugate_transpose(d_term.matrix, d_term.row_dim);
         aux.l_dag_l = local_multiply_square(aux.l_dag, d_term.matrix, d_term.row_dim);
+        if (try_extract_local_diagonal(d_term.matrix, d_term.row_dim, aux.jump_diagonal)) {
+            const std::size_t diagonal_bytes =
+                aux.jump_diagonal.size() * sizeof(Complex);
+            if (cudaMalloc(&aux.d_jump_diagonal, diagonal_bytes) != cudaSuccess ||
+                cudaMemcpy(
+                    aux.d_jump_diagonal,
+                    aux.jump_diagonal.data(),
+                    diagonal_bytes,
+                    cudaMemcpyHostToDevice) != cudaSuccess) {
+                if (aux.d_jump_diagonal != nullptr) {
+                    cudaFree(aux.d_jump_diagonal);
+                    aux.d_jump_diagonal = nullptr;
+                }
+                throw std::runtime_error(
+                    "build_cached_static_dissipators: failed to upload diagonal dissipator jump");
+            }
+        }
         cached.push_back(std::move(aux));
     }
 
     return cached;
+}
+
+void destroy_cached_static_dissipators(
+    std::vector<CachedDissipatorAuxiliaries>& cached)
+{
+    for (CachedDissipatorAuxiliaries& aux : cached) {
+        if (aux.d_jump_diagonal != nullptr) {
+            cudaFree(aux.d_jump_diagonal);
+            aux.d_jump_diagonal = nullptr;
+        }
+        aux.jump_diagonal.clear();
+    }
+
+    cached.clear();
 }
 
 std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
@@ -528,6 +559,7 @@ PetscErrorCode run_ts_cuda_static_model_liouvillian_smoke_test(
         estimate_executor_cache_entries(solver);
 
     if (cudaStreamCreate(&rhs_ctx.elementwise_stream) != cudaSuccess) {
+        destroy_cached_static_dissipators(rhs_ctx.cached_static_dissipators);
         destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
         (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
         PetscCall(VecDestroy(&x));
@@ -539,6 +571,7 @@ PetscErrorCode run_ts_cuda_static_model_liouvillian_smoke_test(
         const PetscErrorCode scratch_ierr =
             create_grouped_rhs_scratch_buffers(rhs_ctx);
         if (scratch_ierr != 0) {
+            destroy_cached_static_dissipators(rhs_ctx.cached_static_dissipators);
             destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
             (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
             if (rhs_ctx.elementwise_stream != nullptr) {
@@ -568,6 +601,7 @@ PetscErrorCode run_ts_cuda_static_model_liouvillian_smoke_test(
     PetscCall(destroy_rhs_work_vectors(rhs_ctx));
     (void)destroy_cutensor_executor_cache(rhs_ctx.executor_cache);
     destroy_grouped_rhs_scratch_buffers(rhs_ctx);
+    destroy_cached_static_dissipators(rhs_ctx.cached_static_dissipators);
     destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
     (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
 
@@ -638,6 +672,7 @@ PetscErrorCode run_ts_cuda_full_model_liouvillian_smoke_test(
         estimate_executor_cache_entries(solver);
 
     if (cudaStreamCreate(&rhs_ctx.elementwise_stream) != cudaSuccess) {
+        destroy_cached_static_dissipators(rhs_ctx.cached_static_dissipators);
         destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
         (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
         PetscCall(VecDestroy(&x));
@@ -649,6 +684,7 @@ PetscErrorCode run_ts_cuda_full_model_liouvillian_smoke_test(
         const PetscErrorCode scratch_ierr =
             create_grouped_rhs_scratch_buffers(rhs_ctx);
         if (scratch_ierr != 0) {
+            destroy_cached_static_dissipators(rhs_ctx.cached_static_dissipators);
             destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
             (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
             if (rhs_ctx.elementwise_stream != nullptr) {
@@ -678,6 +714,7 @@ PetscErrorCode run_ts_cuda_full_model_liouvillian_smoke_test(
     PetscCall(destroy_rhs_work_vectors(rhs_ctx));
     (void)destroy_cutensor_executor_cache(rhs_ctx.executor_cache);
     destroy_grouped_rhs_scratch_buffers(rhs_ctx);
+    destroy_cached_static_dissipators(rhs_ctx.cached_static_dissipators);
     destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
     (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
 

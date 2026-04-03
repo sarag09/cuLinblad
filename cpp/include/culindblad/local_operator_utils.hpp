@@ -15,4 +15,9 @@ std::vector<Complex> local_multiply_square(
     const std::vector<Complex>& B,
     Index dim);
 
+bool try_extract_local_diagonal(
+    const std::vector<Complex>& op,
+    Index dim,
+    std::vector<Complex>& diagonal_out);
+
 } // namespace culindblad

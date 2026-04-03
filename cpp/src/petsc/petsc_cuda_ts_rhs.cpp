@@ -360,20 +360,38 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             continue;
         }
 
-        PetscCall(apply_grouped_dissipator_jump_cuda_buffer(
-            solver,
-            d_aux.name,
-            d_aux.l_op,
-            d_aux.l_dag,
-            d_aux.sites,
-            layout_entry.grouped_layout,
-            rhs_ctx.executor_cache,
-            rhs_ctx.grouped_scratch.d_grouped_input,
-            rhs_ctx.grouped_scratch.d_grouped_term,
-            rhs_ctx.batch_size,
-            s,
-            nullptr,
-            nullptr));
+        if (!d_aux.jump_diagonal.empty()) {
+            const Index target_hilbert_dim =
+                static_cast<Index>(d_aux.jump_diagonal.size());
+            const Index complement_dim =
+                layout_entry.grouped_layout.hilbert_dim / target_hilbert_dim;
+
+            if (!launch_batched_grouped_diagonal_dissipator_jump_kernel(
+                    d_aux.d_jump_diagonal,
+                    rhs_ctx.grouped_scratch.d_grouped_input,
+                    rhs_ctx.grouped_scratch.d_grouped_term,
+                    target_hilbert_dim,
+                    complement_dim,
+                    rhs_ctx.batch_size,
+                    s)) {
+                return PETSC_ERR_LIB;
+            }
+        } else {
+            PetscCall(apply_grouped_dissipator_jump_cuda_buffer(
+                solver,
+                d_aux.name,
+                d_aux.l_op,
+                d_aux.l_dag,
+                d_aux.sites,
+                layout_entry.grouped_layout,
+                rhs_ctx.executor_cache,
+                rhs_ctx.grouped_scratch.d_grouped_input,
+                rhs_ctx.grouped_scratch.d_grouped_term,
+                rhs_ctx.batch_size,
+                s,
+                nullptr,
+                nullptr));
+        }
 
         PetscCall(accumulate_grouped_layout_term(
             rhs_ctx,
