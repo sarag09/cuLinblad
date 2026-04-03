@@ -18,22 +18,6 @@ namespace culindblad {
 
 namespace {
 
-std::size_t estimate_executor_cache_entries(
-    const Solver& solver)
-{
-    constexpr std::size_t kMinimumCacheEntries = 6;
-    constexpr std::size_t kCacheSlackEntries = 4;
-
-    const std::size_t required_entries =
-        2 * solver.model.hamiltonian_terms.size() +
-        4 * solver.model.dissipator_terms.size() +
-        2 * solver.model.time_dependent_hamiltonian_terms.size();
-
-    return std::max(
-        kMinimumCacheEntries,
-        required_entries + kCacheSlackEntries);
-}
-
 bool same_sites(
     const std::vector<Index>& a,
     const std::vector<Index>& b)
@@ -49,6 +33,55 @@ bool same_sites(
     }
 
     return true;
+}
+
+bool contains_sites(
+    const std::vector<std::vector<Index>>& site_sets,
+    const std::vector<Index>& sites)
+{
+    for (const std::vector<Index>& existing_sites : site_sets) {
+        if (same_sites(existing_sites, sites)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::size_t estimate_executor_cache_entries(
+    const Solver& solver)
+{
+    constexpr std::size_t kMinimumCacheEntries = 6;
+    constexpr std::size_t kCacheSlackEntries = 4;
+
+    std::vector<std::vector<Index>> commutator_site_sets;
+    std::vector<std::vector<Index>> dissipator_site_sets;
+
+    for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
+        if (!contains_sites(commutator_site_sets, h_term.sites)) {
+            commutator_site_sets.push_back(h_term.sites);
+        }
+    }
+
+    for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
+        if (!contains_sites(commutator_site_sets, td_term.sites)) {
+            commutator_site_sets.push_back(td_term.sites);
+        }
+    }
+
+    for (const OperatorTerm& d_term : solver.model.dissipator_terms) {
+        if (!contains_sites(dissipator_site_sets, d_term.sites)) {
+            dissipator_site_sets.push_back(d_term.sites);
+        }
+    }
+
+    const std::size_t required_entries =
+        2 * commutator_site_sets.size() +
+        4 * dissipator_site_sets.size();
+
+    return std::max(
+        kMinimumCacheEntries,
+        required_entries + kCacheSlackEntries);
 }
 
 std::vector<CachedDissipatorAuxiliaries> build_cached_static_dissipators(

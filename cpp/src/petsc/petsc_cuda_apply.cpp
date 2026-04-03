@@ -19,6 +19,18 @@ namespace culindblad {
 
 namespace {
 
+std::string make_sites_cache_suffix(
+    const std::vector<Index>& target_sites)
+{
+    std::string suffix = "sites";
+
+    for (Index site : target_sites) {
+        suffix += "_" + std::to_string(site);
+    }
+
+    return suffix;
+}
+
 PetscErrorCode get_petsc_vec_device_read_ptr(
     Vec x,
     const void*& d_ptr_out)
@@ -336,7 +348,6 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
     cudaStream_t consumer_stream)
 {
     (void)solver;
-    (void)target_sites;
 
     const std::size_t grouped_bytes =
         batch_size * grouped_layout.grouped_size * sizeof(Complex);
@@ -350,9 +361,11 @@ PetscErrorCode apply_grouped_cuda_vec_impl(
     PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
 
     CuTensorExecutor* executor = nullptr;
+    const std::string sites_cache_suffix =
+        make_sites_cache_suffix(target_sites);
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
-        cache_key + "_batch_" + std::to_string(batch_size),
+        cache_key + "_" + sites_cache_suffix + "_batch_" + std::to_string(batch_size),
         contraction_desc,
         operator_tag + "_batch_" + std::to_string(batch_size),
         local_op,
@@ -490,6 +503,8 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
 {
     const std::size_t grouped_bytes =
         batch_size * grouped_layout.grouped_size * sizeof(Complex);
+    const std::string sites_cache_suffix =
+        make_sites_cache_suffix(target_sites);
 
     const CuTensorContractionDesc left_desc =
         make_cutensor_left_contraction_desc(
@@ -512,7 +527,7 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
-        cache_prefix + "_comm_left_apply_" + term_label + "_batch_" + std::to_string(batch_size),
+        cache_prefix + "_comm_left_apply_" + sites_cache_suffix + "_batch_" + std::to_string(batch_size),
         left_desc,
         cache_prefix + "_comm_left_operator_" + term_label,
         local_op,
@@ -524,7 +539,7 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
     }
     ierr = get_or_prepare_executor(
         executor_cache,
-        cache_prefix + "_comm_right_apply_" + term_label + "_batch_" + std::to_string(batch_size),
+        cache_prefix + "_comm_right_apply_" + sites_cache_suffix + "_batch_" + std::to_string(batch_size),
         right_desc,
         cache_prefix + "_comm_right_operator_" + term_label,
         local_op,
@@ -617,6 +632,8 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
 {
     const std::size_t grouped_bytes =
         batch_size * grouped_layout.grouped_size * sizeof(Complex);
+    const std::string sites_cache_suffix =
+        make_sites_cache_suffix(target_sites);
 
     const CuTensorContractionDesc left_desc =
         make_cutensor_left_contraction_desc(
@@ -643,7 +660,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
-        cache_prefix + "_diss_jump_left_" + term_label + "_batch_" + std::to_string(batch_size),
+        cache_prefix + "_diss_jump_left_" + sites_cache_suffix + "_batch_" + std::to_string(batch_size),
         left_desc,
         cache_prefix + "_diss_L_" + term_label,
         local_op,
@@ -655,7 +672,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
     }
     ierr = get_or_prepare_executor(
         executor_cache,
-        cache_prefix + "_diss_jump_right_" + term_label + "_batch_" + std::to_string(batch_size),
+        cache_prefix + "_diss_jump_right_" + sites_cache_suffix + "_batch_" + std::to_string(batch_size),
         right_desc,
         cache_prefix + "_diss_Ldag_" + term_label,
         local_op_dag,
@@ -667,7 +684,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
     }
     ierr = get_or_prepare_executor(
         executor_cache,
-        cache_prefix + "_diss_norm_left_" + term_label + "_batch_" + std::to_string(batch_size),
+        cache_prefix + "_diss_norm_left_" + sites_cache_suffix + "_batch_" + std::to_string(batch_size),
         left_desc,
         cache_prefix + "_diss_LdagL_" + term_label,
         local_op_dag_op,
@@ -679,7 +696,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
     }
     ierr = get_or_prepare_executor(
         executor_cache,
-        cache_prefix + "_diss_norm_right_" + term_label + "_batch_" + std::to_string(batch_size),
+        cache_prefix + "_diss_norm_right_" + sites_cache_suffix + "_batch_" + std::to_string(batch_size),
         right_desc,
         cache_prefix + "_diss_LdagL_" + term_label,
         local_op_dag_op,
@@ -895,10 +912,12 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
             batch_size);
     const std::size_t grouped_bytes =
         batch_size * grouped_layout.grouped_size * sizeof(Complex);
+    const std::string sites_cache_suffix =
+        make_sites_cache_suffix(target_sites);
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_regroup_buffer_" + term_label + "_batch_" + std::to_string(batch_size),
+        "petsc_grouped_regroup_buffer_" + sites_cache_suffix + "_batch_" + std::to_string(batch_size),
         left_desc,
         "petsc_grouped_regroup_operator_" + term_label,
         local_op,
@@ -1004,10 +1023,12 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
             batch_size);
     const std::size_t grouped_bytes =
         batch_size * grouped_layout.grouped_size * sizeof(Complex);
+    const std::string sites_cache_suffix =
+        make_sites_cache_suffix(target_sites);
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
-        "petsc_grouped_diss_regroup_buffer_" + term_label + "_batch_" + std::to_string(batch_size),
+        "petsc_grouped_diss_regroup_buffer_" + sites_cache_suffix + "_batch_" + std::to_string(batch_size),
         left_desc,
         "petsc_grouped_diss_regroup_operator_" + term_label,
         local_op,
