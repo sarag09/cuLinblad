@@ -613,6 +613,263 @@ PetscErrorCode apply_grouped_commutator_cuda_buffer_impl(
     return 0;
 }
 
+PetscErrorCode apply_grouped_anti_commutator_cuda_buffer_impl(
+    const Solver& solver,
+    const std::string& term_label,
+    const std::vector<Complex>& local_op,
+    const std::vector<Index>& target_sites,
+    const GroupedStateLayout& grouped_layout,
+    CuTensorExecutorCache& executor_cache,
+    const void* d_grouped_input,
+    void* d_grouped_output,
+    Index batch_size,
+    cudaStream_t consumer_stream,
+    cudaEvent_t input_ready_event,
+    cudaEvent_t output_ready_event,
+    const std::string& cache_prefix)
+{
+    const std::size_t grouped_bytes =
+        batch_size * grouped_layout.grouped_size * sizeof(Complex);
+    const std::string sites_cache_suffix =
+        make_sites_cache_suffix(target_sites);
+
+    const CuTensorContractionDesc left_desc =
+        make_cutensor_left_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batch_size);
+    const CuTensorContractionDesc right_desc =
+        make_cutensor_right_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batch_size);
+
+    CuTensorExecutor* left_executor = nullptr;
+    CuTensorExecutor* right_executor = nullptr;
+    ExecutorInputBinding left_input_binding{};
+    ExecutorInputBinding right_input_binding{};
+    const bool use_direct_consumer_stream = consumer_stream != nullptr;
+    cudaStream_t execution_stream =
+        use_direct_consumer_stream ? consumer_stream : nullptr;
+
+    PetscErrorCode ierr = get_or_prepare_executor(
+        executor_cache,
+        cache_prefix + "_anti_left_apply_" + sites_cache_suffix + "_batch_" + std::to_string(batch_size),
+        left_desc,
+        cache_prefix + "_anti_left_operator_" + term_label,
+        local_op,
+        grouped_bytes,
+        execution_stream,
+        left_executor);
+    if (ierr != 0) {
+        return ierr;
+    }
+    ierr = get_or_prepare_executor(
+        executor_cache,
+        cache_prefix + "_anti_right_apply_" + sites_cache_suffix + "_batch_" + std::to_string(batch_size),
+        right_desc,
+        cache_prefix + "_anti_right_operator_" + term_label,
+        local_op,
+        grouped_bytes,
+        execution_stream,
+        right_executor);
+    if (ierr != 0) {
+        return ierr;
+    }
+    execution_stream =
+        use_direct_consumer_stream ? consumer_stream : left_executor->stream;
+
+    if (!bind_device_buffer_as_executor_input(
+            d_grouped_input,
+            grouped_bytes,
+            input_ready_event,
+            consumer_stream,
+            *left_executor,
+            execution_stream,
+            left_input_binding) ||
+        !bind_device_buffer_as_executor_input(
+            d_grouped_input,
+            grouped_bytes,
+            input_ready_event,
+            consumer_stream,
+            *right_executor,
+            execution_stream,
+            right_input_binding)) {
+        restore_executor_input_binding(right_input_binding);
+        restore_executor_input_binding(left_input_binding);
+        return PETSC_ERR_LIB;
+    }
+
+    if (!execute_executor_for_stream_mode(*left_executor, execution_stream, use_direct_consumer_stream) ||
+        !execute_executor_for_stream_mode(*right_executor, execution_stream, use_direct_consumer_stream)) {
+        restore_executor_input_binding(right_input_binding);
+        restore_executor_input_binding(left_input_binding);
+        return PETSC_ERR_LIB;
+    }
+
+    const bool output_wait_ok =
+        output_ready_event == nullptr ||
+        consumer_stream == execution_stream ||
+        wait_for_cuda_event(output_ready_event, execution_stream);
+    if (!output_wait_ok ||
+        !wait_for_cutensor_executor_completion(*right_executor, execution_stream)) {
+        restore_executor_input_binding(right_input_binding);
+        restore_executor_input_binding(left_input_binding);
+        return PETSC_ERR_LIB;
+    }
+
+    if (!launch_anti_commutator_combine_kernel(
+            left_executor->d_output,
+            right_executor->d_output,
+            d_grouped_output,
+            batch_size * grouped_layout.grouped_size,
+            execution_stream)) {
+        restore_executor_input_binding(right_input_binding);
+        restore_executor_input_binding(left_input_binding);
+        return PETSC_ERR_LIB;
+    }
+
+    if (!finalize_executor_stream_work(*left_executor, execution_stream, consumer_stream)) {
+        restore_executor_input_binding(right_input_binding);
+        restore_executor_input_binding(left_input_binding);
+        return PETSC_ERR_LIB;
+    }
+
+    restore_executor_input_binding(right_input_binding);
+    restore_executor_input_binding(left_input_binding);
+    return 0;
+}
+
+PetscErrorCode apply_grouped_dissipator_jump_cuda_buffer_impl(
+    const Solver& solver,
+    const std::string& term_label,
+    const std::vector<Complex>& local_op,
+    const std::vector<Complex>& local_op_dag,
+    const std::vector<Index>& target_sites,
+    const GroupedStateLayout& grouped_layout,
+    CuTensorExecutorCache& executor_cache,
+    const void* d_grouped_input,
+    void* d_grouped_output,
+    Index batch_size,
+    cudaStream_t consumer_stream,
+    cudaEvent_t input_ready_event,
+    cudaEvent_t output_ready_event,
+    const std::string& cache_prefix)
+{
+    const std::size_t grouped_bytes =
+        batch_size * grouped_layout.grouped_size * sizeof(Complex);
+    const std::string sites_cache_suffix =
+        make_sites_cache_suffix(target_sites);
+
+    const CuTensorContractionDesc left_desc =
+        make_cutensor_left_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batch_size);
+    const CuTensorContractionDesc right_desc =
+        make_cutensor_right_contraction_desc(
+            target_sites,
+            solver.model.local_dims,
+            batch_size);
+
+    CuTensorExecutor* jump_left_executor = nullptr;
+    CuTensorExecutor* jump_right_executor = nullptr;
+    ExecutorInputBinding jump_left_input_binding{};
+    ExecutorInputBinding jump_right_input_binding{};
+    const bool use_direct_consumer_stream = consumer_stream != nullptr;
+    cudaStream_t execution_stream =
+        use_direct_consumer_stream ? consumer_stream : nullptr;
+
+    PetscErrorCode ierr = get_or_prepare_executor(
+        executor_cache,
+        cache_prefix + "_diss_jump_left_" + sites_cache_suffix + "_batch_" + std::to_string(batch_size),
+        left_desc,
+        cache_prefix + "_diss_jump_L_" + term_label,
+        local_op,
+        grouped_bytes,
+        execution_stream,
+        jump_left_executor);
+    if (ierr != 0) {
+        return ierr;
+    }
+    ierr = get_or_prepare_executor(
+        executor_cache,
+        cache_prefix + "_diss_jump_right_" + sites_cache_suffix + "_batch_" + std::to_string(batch_size),
+        right_desc,
+        cache_prefix + "_diss_jump_Ldag_" + term_label,
+        local_op_dag,
+        grouped_bytes,
+        execution_stream,
+        jump_right_executor);
+    if (ierr != 0) {
+        return ierr;
+    }
+    execution_stream =
+        use_direct_consumer_stream ? consumer_stream : jump_right_executor->stream;
+
+    if (!bind_device_buffer_as_executor_input(
+            d_grouped_input,
+            grouped_bytes,
+            input_ready_event,
+            consumer_stream,
+            *jump_left_executor,
+            execution_stream,
+            jump_left_input_binding)) {
+        restore_executor_input_binding(jump_right_input_binding);
+        restore_executor_input_binding(jump_left_input_binding);
+        return PETSC_ERR_LIB;
+    }
+
+    if (!execute_executor_for_stream_mode(*jump_left_executor, execution_stream, use_direct_consumer_stream)) {
+        restore_executor_input_binding(jump_right_input_binding);
+        restore_executor_input_binding(jump_left_input_binding);
+        return PETSC_ERR_LIB;
+    }
+
+    if (!bind_executor_output_as_executor_input(
+            *jump_left_executor,
+            *jump_right_executor,
+            execution_stream,
+            jump_right_input_binding) ||
+        !execute_executor_for_stream_mode(*jump_right_executor, execution_stream, use_direct_consumer_stream)) {
+        restore_executor_input_binding(jump_right_input_binding);
+        restore_executor_input_binding(jump_left_input_binding);
+        return PETSC_ERR_LIB;
+    }
+
+    const bool output_wait_ok =
+        output_ready_event == nullptr ||
+        consumer_stream == execution_stream ||
+        wait_for_cuda_event(output_ready_event, execution_stream);
+    if (!output_wait_ok ||
+        !wait_for_cutensor_executor_completion(*jump_right_executor, execution_stream)) {
+        restore_executor_input_binding(jump_right_input_binding);
+        restore_executor_input_binding(jump_left_input_binding);
+        return PETSC_ERR_LIB;
+    }
+
+    if (cudaMemcpyAsync(
+            d_grouped_output,
+            jump_right_executor->d_output,
+            grouped_bytes,
+            cudaMemcpyDeviceToDevice,
+            execution_stream) != cudaSuccess) {
+        restore_executor_input_binding(jump_right_input_binding);
+        restore_executor_input_binding(jump_left_input_binding);
+        return PETSC_ERR_LIB;
+    }
+
+    if (!finalize_executor_stream_work(*jump_right_executor, execution_stream, consumer_stream)) {
+        restore_executor_input_binding(jump_right_input_binding);
+        restore_executor_input_binding(jump_left_input_binding);
+        return PETSC_ERR_LIB;
+    }
+
+    restore_executor_input_binding(jump_right_input_binding);
+    restore_executor_input_binding(jump_left_input_binding);
+    return 0;
+}
+
 PetscErrorCode apply_grouped_dissipator_cuda_buffer_impl(
     const Solver& solver,
     const std::string& term_label,
@@ -1214,6 +1471,68 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer(
         local_op,
         local_op_dag,
         local_op_dag_op,
+        target_sites,
+        grouped_layout,
+        executor_cache,
+        d_grouped_input,
+        d_grouped_output,
+        batch_size,
+        consumer_stream,
+        input_ready_event,
+        output_ready_event,
+        "petsc_grouped_buffer");
+}
+
+PetscErrorCode apply_grouped_anti_commutator_cuda_buffer(
+    const Solver& solver,
+    const std::string& term_label,
+    const std::vector<Complex>& local_op,
+    const std::vector<Index>& target_sites,
+    const GroupedStateLayout& grouped_layout,
+    CuTensorExecutorCache& executor_cache,
+    const void* d_grouped_input,
+    void* d_grouped_output,
+    Index batch_size,
+    cudaStream_t consumer_stream,
+    cudaEvent_t input_ready_event,
+    cudaEvent_t output_ready_event)
+{
+    return apply_grouped_anti_commutator_cuda_buffer_impl(
+        solver,
+        term_label,
+        local_op,
+        target_sites,
+        grouped_layout,
+        executor_cache,
+        d_grouped_input,
+        d_grouped_output,
+        batch_size,
+        consumer_stream,
+        input_ready_event,
+        output_ready_event,
+        "petsc_grouped_buffer");
+}
+
+PetscErrorCode apply_grouped_dissipator_jump_cuda_buffer(
+    const Solver& solver,
+    const std::string& term_label,
+    const std::vector<Complex>& local_op,
+    const std::vector<Complex>& local_op_dag,
+    const std::vector<Index>& target_sites,
+    const GroupedStateLayout& grouped_layout,
+    CuTensorExecutorCache& executor_cache,
+    const void* d_grouped_input,
+    void* d_grouped_output,
+    Index batch_size,
+    cudaStream_t consumer_stream,
+    cudaEvent_t input_ready_event,
+    cudaEvent_t output_ready_event)
+{
+    return apply_grouped_dissipator_jump_cuda_buffer_impl(
+        solver,
+        term_label,
+        local_op,
+        local_op_dag,
         target_sites,
         grouped_layout,
         executor_cache,

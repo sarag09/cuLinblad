@@ -360,13 +360,39 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             continue;
         }
 
-        PetscCall(apply_grouped_dissipator_cuda_buffer(
+        PetscCall(apply_grouped_dissipator_jump_cuda_buffer(
             solver,
             d_aux.name,
             d_aux.l_op,
             d_aux.l_dag,
-            d_aux.l_dag_l,
             d_aux.sites,
+            layout_entry.grouped_layout,
+            rhs_ctx.executor_cache,
+            rhs_ctx.grouped_scratch.d_grouped_input,
+            rhs_ctx.grouped_scratch.d_grouped_term,
+            rhs_ctx.batch_size,
+            s,
+            nullptr,
+            nullptr));
+
+        PetscCall(accumulate_grouped_layout_term(
+            rhs_ctx,
+            layout_entry,
+            1.0,
+            rhs_ctx.batch_size,
+            s));
+        has_contribution = true;
+    }
+
+    if (!layout_entry.static_dissipator_norm_sum.empty()) {
+        const std::string dissipator_norm_label =
+            "layout_diss_norm_" + make_sites_cache_suffix(layout_entry.sites);
+
+        PetscCall(apply_grouped_anti_commutator_cuda_buffer(
+            solver,
+            dissipator_norm_label,
+            layout_entry.static_dissipator_norm_sum,
+            layout_entry.sites,
             layout_entry.grouped_layout,
             rhs_ctx.executor_cache,
             rhs_ctx.grouped_scratch.d_grouped_input,

@@ -111,4 +111,33 @@ PetscErrorCode apply_grouped_dissipator_cuda_buffer(
     cudaEvent_t input_ready_event = nullptr,
     cudaEvent_t output_ready_event = nullptr);
 
+PetscErrorCode apply_grouped_dissipator_jump_cuda_buffer(
+    const Solver& solver,
+    const std::string& term_label,
+    const std::vector<Complex>& local_op,
+    const std::vector<Complex>& local_op_dag,
+    const std::vector<Index>& target_sites,
+    const GroupedStateLayout& grouped_layout,
+    CuTensorExecutorCache& executor_cache,
+    const void* d_grouped_input,
+    void* d_grouped_output,
+    Index batch_size,
+    cudaStream_t consumer_stream,
+    cudaEvent_t input_ready_event = nullptr,
+    cudaEvent_t output_ready_event = nullptr);
+
+PetscErrorCode apply_grouped_anti_commutator_cuda_buffer(
+    const Solver& solver,
+    const std::string& term_label,
+    const std::vector<Complex>& local_op,
+    const std::vector<Index>& target_sites,
+    const GroupedStateLayout& grouped_layout,
+    CuTensorExecutorCache& executor_cache,
+    const void* d_grouped_input,
+    void* d_grouped_output,
+    Index batch_size,
+    cudaStream_t consumer_stream,
+    cudaEvent_t input_ready_event = nullptr,
+    cudaEvent_t output_ready_event = nullptr);
+
 } // namespace culindblad

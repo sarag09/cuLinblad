@@ -50,6 +50,23 @@ __global__ void dissipator_combine_kernel(
         cuCmul(half, cuCadd(left[idx], right[idx])));
 }
 
+__global__ void anti_commutator_combine_kernel(
+    const cuDoubleComplex* left,
+    const cuDoubleComplex* right,
+    cuDoubleComplex* out,
+    std::size_t n)
+{
+    const std::size_t idx =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+    if (idx >= n) {
+        return;
+    }
+
+    const cuDoubleComplex minus_half = make_cuDoubleComplex(-0.5, 0.0);
+    out[idx] = cuCmul(minus_half, cuCadd(left[idx], right[idx]));
+}
+
 } // namespace
 
 bool launch_commutator_combine_kernel(
@@ -86,6 +103,26 @@ bool launch_dissipator_combine_kernel(
 
     dissipator_combine_kernel<<<grid_size, block_size, 0, stream>>>(
         reinterpret_cast<const cuDoubleComplex*>(d_jump),
+        reinterpret_cast<const cuDoubleComplex*>(d_left),
+        reinterpret_cast<const cuDoubleComplex*>(d_right),
+        reinterpret_cast<cuDoubleComplex*>(d_out),
+        num_elements);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_anti_commutator_combine_kernel(
+    const void* d_left,
+    const void* d_right,
+    void* d_out,
+    std::size_t num_elements,
+    cudaStream_t stream)
+{
+    const int block_size = 256;
+    const int grid_size =
+        static_cast<int>((num_elements + block_size - 1) / block_size);
+
+    anti_commutator_combine_kernel<<<grid_size, block_size, 0, stream>>>(
         reinterpret_cast<const cuDoubleComplex*>(d_left),
         reinterpret_cast<const cuDoubleComplex*>(d_right),
         reinterpret_cast<cuDoubleComplex*>(d_out),

@@ -180,6 +180,19 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
             }
         }
 
+        for (const OperatorTerm& d_term : solver.model.dissipator_terms) {
+            if (same_sites(d_term.sites, sites)) {
+                const std::vector<Complex> l_dag =
+                    local_conjugate_transpose(d_term.matrix, d_term.row_dim);
+                const std::vector<Complex> l_dag_l =
+                    local_multiply_square(l_dag, d_term.matrix, d_term.row_dim);
+                accumulate_operator_scaled(
+                    l_dag_l,
+                    1.0,
+                    entry.static_dissipator_norm_sum);
+            }
+        }
+
         if (!create_cuda_grouped_state_layout(
                 entry.grouped_layout,
                 entry.cuda_grouped_layout)) {
