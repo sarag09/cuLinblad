@@ -914,6 +914,7 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
         batch_size * grouped_layout.grouped_size * sizeof(Complex);
     const std::string sites_cache_suffix =
         make_sites_cache_suffix(target_sites);
+    cudaEvent_t regroup_ready_event = nullptr;
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
@@ -929,14 +930,16 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return ierr;
     }
+    cudaStream_t regroup_stream =
+        consumer_stream != nullptr ? consumer_stream : regroup_executor->stream;
     const bool regroup_ok =
-        wait_for_cutensor_executor_completion(*regroup_executor, regroup_executor->stream) &&
+        wait_for_cutensor_executor_completion(*regroup_executor, regroup_stream) &&
         launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
             batch_size,
             d_flat_input,
             regroup_executor->d_input,
-            regroup_executor->stream);
+            regroup_stream);
 
     if (!regroup_ok) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
@@ -944,11 +947,14 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
         return PETSC_ERR_LIB;
     }
 
-    if (!record_cutensor_executor_completion(*regroup_executor)) {
+    if (consumer_stream == nullptr &&
+        !record_cutensor_executor_completion_on_stream(*regroup_executor, regroup_stream)) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
+    regroup_ready_event =
+        consumer_stream == nullptr ? regroup_executor->completion_event : nullptr;
 
     ierr = apply_grouped_commutator_cuda_buffer_impl(
         solver,
@@ -961,7 +967,7 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
         regroup_executor->d_output,
         batch_size,
         consumer_stream,
-        regroup_executor->completion_event,
+        regroup_ready_event,
         nullptr,
         "petsc_grouped");
     if (ierr != 0) {
@@ -975,15 +981,15 @@ PetscErrorCode apply_grouped_commutator_cuda_vec(
         regroup_executor->d_output,
         d_flat_output,
         batch_size,
-        consumer_stream,
-        regroup_executor->stream);
+        regroup_stream,
+        regroup_stream);
     if (ierr != 0) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return ierr;
     }
 
-    if (!record_cutensor_executor_completion_on_stream(*regroup_executor, regroup_executor->stream)) {
+    if (!record_cutensor_executor_completion_on_stream(*regroup_executor, regroup_stream)) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
@@ -1025,6 +1031,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
         batch_size * grouped_layout.grouped_size * sizeof(Complex);
     const std::string sites_cache_suffix =
         make_sites_cache_suffix(target_sites);
+    cudaEvent_t regroup_ready_event = nullptr;
 
     PetscErrorCode ierr = get_or_prepare_executor(
         executor_cache,
@@ -1040,14 +1047,16 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return ierr;
     }
+    cudaStream_t regroup_stream =
+        consumer_stream != nullptr ? consumer_stream : regroup_executor->stream;
     const bool regroup_ok =
-        wait_for_cutensor_executor_completion(*regroup_executor, regroup_executor->stream) &&
+        wait_for_cutensor_executor_completion(*regroup_executor, regroup_stream) &&
         launch_flat_to_grouped_batched_kernel(
             cuda_grouped_layout,
             batch_size,
             d_flat_input,
             regroup_executor->d_input,
-            regroup_executor->stream);
+            regroup_stream);
 
     if (!regroup_ok) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
@@ -1055,11 +1064,14 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
         return PETSC_ERR_LIB;
     }
 
-    if (!record_cutensor_executor_completion(*regroup_executor)) {
+    if (consumer_stream == nullptr &&
+        !record_cutensor_executor_completion_on_stream(*regroup_executor, regroup_stream)) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
     }
+    regroup_ready_event =
+        consumer_stream == nullptr ? regroup_executor->completion_event : nullptr;
 
     ierr = apply_grouped_dissipator_cuda_buffer_impl(
         solver,
@@ -1074,7 +1086,7 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
         regroup_executor->d_output,
         batch_size,
         consumer_stream,
-        regroup_executor->completion_event,
+        regroup_ready_event,
         nullptr,
         "petsc_grouped");
     if (ierr != 0) {
@@ -1088,15 +1100,15 @@ PetscErrorCode apply_grouped_dissipator_cuda_vec(
         regroup_executor->d_output,
         d_flat_output,
         batch_size,
-        consumer_stream,
-        regroup_executor->stream);
+        regroup_stream,
+        regroup_stream);
     if (ierr != 0) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return ierr;
     }
 
-    if (!record_cutensor_executor_completion_on_stream(*regroup_executor, regroup_executor->stream)) {
+    if (!record_cutensor_executor_completion_on_stream(*regroup_executor, regroup_stream)) {
         PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
         PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
         return PETSC_ERR_LIB;
