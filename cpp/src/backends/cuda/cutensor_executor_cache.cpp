@@ -10,8 +10,6 @@ namespace culindblad {
 
 namespace {
 
-constexpr std::size_t kMaxCachedExecutors = 6;
-
 void touch_cache_entry(
     CuTensorExecutorCache& cache,
     CuTensorExecutorCacheEntry& entry)
@@ -24,8 +22,13 @@ bool trim_cutensor_executor_cache(
     CuTensorExecutorCache& cache)
 {
     bool ok = true;
+    const std::size_t max_cached_executors = cache.max_entries;
 
-    while (cache.entries.size() > kMaxCachedExecutors) {
+    if (max_cached_executors == 0) {
+        return true;
+    }
+
+    while (cache.entries.size() > max_cached_executors) {
         auto evict_it = cache.entries.end();
 
         for (auto it = cache.entries.begin(); it != cache.entries.end(); ++it) {

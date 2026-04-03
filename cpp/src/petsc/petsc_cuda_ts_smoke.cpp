@@ -3,6 +3,7 @@
 #include <petscts.h>
 #include <petscvec.h>
 
+#include <algorithm>
 #include <stdexcept>
 
 #include "culindblad/cuda_grouped_layout.hpp"
@@ -16,6 +17,22 @@
 namespace culindblad {
 
 namespace {
+
+std::size_t estimate_executor_cache_entries(
+    const Solver& solver)
+{
+    constexpr std::size_t kMinimumCacheEntries = 6;
+    constexpr std::size_t kCacheSlackEntries = 4;
+
+    const std::size_t required_entries =
+        2 * solver.model.hamiltonian_terms.size() +
+        4 * solver.model.dissipator_terms.size() +
+        2 * solver.model.time_dependent_hamiltonian_terms.size();
+
+    return std::max(
+        kMinimumCacheEntries,
+        required_entries + kCacheSlackEntries);
+}
 
 bool same_sites(
     const std::vector<Index>& a,
@@ -248,6 +265,8 @@ PetscErrorCode run_ts_cuda_grouped_left_smoke_test(
         nullptr,
         nullptr
     };
+    rhs_ctx.executor_cache.max_entries =
+        estimate_executor_cache_entries(solver);
 
     if (cudaStreamCreate(&rhs_ctx.elementwise_stream) != cudaSuccess) {
         (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
@@ -339,6 +358,8 @@ PetscErrorCode run_ts_cuda_grouped_liouvillian_smoke_test(
         nullptr,
         nullptr
     };
+    rhs_ctx.executor_cache.max_entries =
+        estimate_executor_cache_entries(solver);
 
     if (cudaStreamCreate(&rhs_ctx.elementwise_stream) != cudaSuccess) {
         (void)destroy_cuda_grouped_state_layout(rhs_ctx.cuda_grouped_layout);
@@ -427,6 +448,8 @@ PetscErrorCode run_ts_cuda_static_model_liouvillian_smoke_test(
         nullptr,
         nullptr
     };
+    rhs_ctx.executor_cache.max_entries =
+        estimate_executor_cache_entries(solver);
 
     if (cudaStreamCreate(&rhs_ctx.elementwise_stream) != cudaSuccess) {
         destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);
@@ -535,6 +558,8 @@ PetscErrorCode run_ts_cuda_full_model_liouvillian_smoke_test(
         nullptr,
         nullptr
     };
+    rhs_ctx.executor_cache.max_entries =
+        estimate_executor_cache_entries(solver);
 
     if (cudaStreamCreate(&rhs_ctx.elementwise_stream) != cudaSuccess) {
         destroy_cached_grouped_layouts(rhs_ctx.cached_grouped_layouts);

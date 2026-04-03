@@ -16,6 +16,7 @@ struct CuTensorExecutorCacheEntry {
 struct CuTensorExecutorCache {
     std::unordered_map<std::string, CuTensorExecutorCacheEntry> entries;
     std::size_t generation = 0;
+    std::size_t max_entries = 6;
 };
 
 bool get_or_create_cutensor_executor(

@@ -18,6 +18,22 @@ namespace culindblad {
 
 namespace {
 
+std::size_t estimate_executor_cache_entries(
+    const Solver& solver)
+{
+    constexpr std::size_t kMinimumCacheEntries = 6;
+    constexpr std::size_t kCacheSlackEntries = 4;
+
+    const std::size_t required_entries =
+        2 * solver.model.hamiltonian_terms.size() +
+        4 * solver.model.dissipator_terms.size() +
+        2 * solver.model.time_dependent_hamiltonian_terms.size();
+
+    return std::max(
+        kMinimumCacheEntries,
+        required_entries + kCacheSlackEntries);
+}
+
 bool same_sites(
     const std::vector<Index>& a,
     const std::vector<Index>& b)
@@ -280,6 +296,8 @@ PetscErrorCode create_cuda_batch_execution_context(
         nullptr,
         nullptr
     };
+    ctx.rhs_ctx.executor_cache.max_entries =
+        estimate_executor_cache_entries(solver);
 
     if (cudaStreamCreate(&ctx.rhs_ctx.elementwise_stream) != cudaSuccess) {
         destroy_cached_grouped_layouts(ctx.rhs_ctx.cached_grouped_layouts);

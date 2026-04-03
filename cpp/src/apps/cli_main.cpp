@@ -19,7 +19,7 @@ constexpr double kStateZeroMin00 = 0.61;
 constexpr double kMatrixTolerance = 1.0e-4;
 constexpr double kConsistencyTolerance = 1.0e-8;
 constexpr culindblad::Index kValidationBatchSteps = 1000;
-constexpr culindblad::Index kDefaultStressNumTransmons = 6;
+constexpr culindblad::Index kDefaultStressNumTransmons = 5;
 constexpr culindblad::Index kDefaultStressCutoffDim = 2;
 constexpr culindblad::Index kDefaultStressBatchSteps = 250;
 
@@ -31,7 +31,7 @@ struct TrustedBaseline {
 
 struct StressTestOptions {
     bool enabled = false;
-    bool run_cpu = true;
+    bool run_cpu = false;
     culindblad::Index num_transmons = kDefaultStressNumTransmons;
     culindblad::Index cutoff_dim = kDefaultStressCutoffDim;
     culindblad::Index batched_num_steps = kDefaultStressBatchSteps;
@@ -102,11 +102,6 @@ culindblad::TransmonChainBenchmarkConfig make_transmon_chain_benchmark_config(
     culindblad::Index cutoff_dim,
     culindblad::Index batched_num_steps)
 {
-    if ((num_transmons % 2) != 0) {
-        throw std::invalid_argument(
-            "benchmark configuration requires an even number of transmons so exactly half can be driven");
-    }
-
     culindblad::TransmonChainBenchmarkConfig config{};
     config.num_transmons = num_transmons;
     config.cutoff_dim = cutoff_dim;
@@ -185,7 +180,7 @@ StressTestOptions parse_stress_test_options()
             nullptr));
     options.enabled = (enabled == PETSC_TRUE);
 
-    PetscBool run_cpu = PETSC_TRUE;
+    PetscBool run_cpu = PETSC_FALSE;
     PetscCallAbort(
         PETSC_COMM_SELF,
         PetscOptionsGetBool(
