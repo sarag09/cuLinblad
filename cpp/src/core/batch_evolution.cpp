@@ -131,36 +131,44 @@ std::vector<Index> choose_seed_target_sites(
     return {0};
 }
 
+void destroy_cached_static_dissipators(
+    std::vector<CachedDissipatorAuxiliaries>& cached);
+
 std::vector<CachedDissipatorAuxiliaries> build_cached_static_dissipators(
     const Solver& solver)
 {
     std::vector<CachedDissipatorAuxiliaries> cached;
 
-    for (const OperatorTerm& d_term : solver.model.dissipator_terms) {
-        CachedDissipatorAuxiliaries aux;
-        aux.name = d_term.name;
-        aux.sites = d_term.sites;
-        aux.l_op = d_term.matrix;
-        aux.l_dag = local_conjugate_transpose(d_term.matrix, d_term.row_dim);
-        aux.l_dag_l = local_multiply_square(aux.l_dag, d_term.matrix, d_term.row_dim);
-        if (try_extract_local_diagonal(d_term.matrix, d_term.row_dim, aux.jump_diagonal)) {
-            const std::size_t diagonal_bytes =
-                aux.jump_diagonal.size() * sizeof(Complex);
-            if (cudaMalloc(&aux.d_jump_diagonal, diagonal_bytes) != cudaSuccess ||
-                cudaMemcpy(
-                    aux.d_jump_diagonal,
-                    aux.jump_diagonal.data(),
-                    diagonal_bytes,
-                    cudaMemcpyHostToDevice) != cudaSuccess) {
-                if (aux.d_jump_diagonal != nullptr) {
-                    cudaFree(aux.d_jump_diagonal);
-                    aux.d_jump_diagonal = nullptr;
+    try {
+        for (const OperatorTerm& d_term : solver.model.dissipator_terms) {
+            CachedDissipatorAuxiliaries aux;
+            aux.name = d_term.name;
+            aux.sites = d_term.sites;
+            aux.l_op = d_term.matrix;
+            aux.l_dag = local_conjugate_transpose(d_term.matrix, d_term.row_dim);
+            aux.l_dag_l = local_multiply_square(aux.l_dag, d_term.matrix, d_term.row_dim);
+            if (try_extract_local_diagonal(d_term.matrix, d_term.row_dim, aux.jump_diagonal)) {
+                const std::size_t diagonal_bytes =
+                    aux.jump_diagonal.size() * sizeof(Complex);
+                if (cudaMalloc(&aux.d_jump_diagonal, diagonal_bytes) != cudaSuccess ||
+                    cudaMemcpy(
+                        aux.d_jump_diagonal,
+                        aux.jump_diagonal.data(),
+                        diagonal_bytes,
+                        cudaMemcpyHostToDevice) != cudaSuccess) {
+                    if (aux.d_jump_diagonal != nullptr) {
+                        cudaFree(aux.d_jump_diagonal);
+                        aux.d_jump_diagonal = nullptr;
+                    }
+                    throw std::runtime_error(
+                        "build_cached_static_dissipators: failed to upload diagonal dissipator jump");
                 }
-                throw std::runtime_error(
-                    "build_cached_static_dissipators: failed to upload diagonal dissipator jump");
             }
+            cached.push_back(std::move(aux));
         }
-        cached.push_back(std::move(aux));
+    } catch (...) {
+        destroy_cached_static_dissipators(cached);
+        throw;
     }
 
     return cached;
