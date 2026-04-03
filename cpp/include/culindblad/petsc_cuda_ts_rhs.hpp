@@ -28,6 +28,7 @@ struct CachedGroupedLayoutEntry {
     GroupedStateLayout grouped_layout;
     CudaGroupedStateLayout cuda_grouped_layout;
     std::size_t grouped_bytes = 0;
+    std::vector<Complex> static_hamiltonian_sum;
 };
 
 struct GroupedRhsScratchBuffers {

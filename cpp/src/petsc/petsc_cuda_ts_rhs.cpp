@@ -5,6 +5,9 @@
 
 #include <cuda_runtime.h>
 
+#include <stdexcept>
+#include <string>
+
 #include "culindblad/cuda_elementwise.hpp"
 #include "culindblad/petsc_cuda_apply.hpp"
 #include "culindblad/time_dependent_term.hpp"
@@ -46,6 +49,37 @@ const CachedGroupedLayoutEntry* find_cached_grouped_layout(
     }
 
     return nullptr;
+}
+
+std::string make_sites_cache_suffix(
+    const std::vector<Index>& sites)
+{
+    std::string suffix = "sites";
+    for (Index site : sites) {
+        suffix += "_" + std::to_string(site);
+    }
+    return suffix;
+}
+
+void accumulate_operator_scaled(
+    const std::vector<Complex>& term,
+    double scale,
+    std::vector<Complex>& accum)
+{
+    if (scale == 0.0) {
+        return;
+    }
+
+    if (accum.empty()) {
+        accum.assign(term.size(), Complex{0.0, 0.0});
+    } else if (accum.size() != term.size()) {
+        throw std::runtime_error(
+            "accumulate_operator_scaled: mismatched operator sizes");
+    }
+
+    for (Index i = 0; i < term.size(); ++i) {
+        accum[i] += scale * term[i];
+    }
 }
 
 CachedGroupedLayoutEntry* find_cached_grouped_layout_mutable(
@@ -271,17 +305,38 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
         s));
 
     bool has_contribution = false;
+    std::vector<Complex> effective_hamiltonian =
+        layout_entry.static_hamiltonian_sum;
+    bool has_effective_hamiltonian = !effective_hamiltonian.empty();
+    bool has_dynamic_hamiltonian = false;
 
-    for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
-        if (!same_sites(layout_entry.sites, h_term.sites)) {
+    for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
+        if (!same_sites(layout_entry.sites, td_term.sites)) {
             continue;
         }
 
+        accumulate_operator_scaled(
+            td_term.matrix,
+            evaluate_time_dependent_coefficient(td_term, static_cast<double>(t)),
+            effective_hamiltonian);
+        has_effective_hamiltonian = true;
+        has_dynamic_hamiltonian = true;
+    }
+
+    if (has_effective_hamiltonian) {
+        const std::string effective_term_label =
+            has_dynamic_hamiltonian
+                ? "layout_effective_dynamic_" +
+                      make_sites_cache_suffix(layout_entry.sites) +
+                      "_t_" + std::to_string(static_cast<double>(t))
+                : "layout_effective_static_" +
+                      make_sites_cache_suffix(layout_entry.sites);
+
         PetscCall(apply_grouped_commutator_cuda_buffer(
             solver,
-            h_term.name,
-            h_term.matrix,
-            h_term.sites,
+            effective_term_label,
+            effective_hamiltonian,
+            layout_entry.sites,
             layout_entry.grouped_layout,
             rhs_ctx.executor_cache,
             rhs_ctx.grouped_scratch.d_grouped_input,
@@ -325,37 +380,6 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             rhs_ctx,
             layout_entry,
             1.0,
-            rhs_ctx.batch_size,
-            s));
-        has_contribution = true;
-    }
-
-    for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
-        if (!same_sites(layout_entry.sites, td_term.sites)) {
-            continue;
-        }
-
-        const double coeff =
-            evaluate_time_dependent_coefficient(td_term, static_cast<double>(t));
-
-        PetscCall(apply_grouped_commutator_cuda_buffer(
-            solver,
-            td_term.name,
-            td_term.matrix,
-            td_term.sites,
-            layout_entry.grouped_layout,
-            rhs_ctx.executor_cache,
-            rhs_ctx.grouped_scratch.d_grouped_input,
-            rhs_ctx.grouped_scratch.d_grouped_term,
-            rhs_ctx.batch_size,
-            s,
-            nullptr,
-            nullptr));
-
-        PetscCall(accumulate_grouped_layout_term(
-            rhs_ctx,
-            layout_entry,
-            coeff,
             rhs_ctx.batch_size,
             s));
         has_contribution = true;

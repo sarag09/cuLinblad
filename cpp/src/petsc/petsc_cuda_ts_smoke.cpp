@@ -48,6 +48,27 @@ bool contains_sites(
     return false;
 }
 
+void accumulate_operator_scaled(
+    const std::vector<Complex>& term,
+    double scale,
+    std::vector<Complex>& accum)
+{
+    if (scale == 0.0) {
+        return;
+    }
+
+    if (accum.empty()) {
+        accum.assign(term.size(), Complex{0.0, 0.0});
+    } else if (accum.size() != term.size()) {
+        throw std::runtime_error(
+            "accumulate_operator_scaled: mismatched operator sizes");
+    }
+
+    for (Index i = 0; i < term.size(); ++i) {
+        accum[i] += scale * term[i];
+    }
+}
+
 std::size_t estimate_executor_cache_entries(
     const Solver& solver)
 {
@@ -123,6 +144,15 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
             static_cast<std::size_t>(batch_size) *
             static_cast<std::size_t>(entry.grouped_layout.grouped_size) *
             sizeof(Complex);
+
+        for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
+            if (same_sites(h_term.sites, sites)) {
+                accumulate_operator_scaled(
+                    h_term.matrix,
+                    1.0,
+                    entry.static_hamiltonian_sum);
+            }
+        }
 
         if (!create_cuda_grouped_state_layout(
                 entry.grouped_layout,
