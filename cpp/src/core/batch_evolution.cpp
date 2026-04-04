@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <stdexcept>
 #include <vector>
 
@@ -66,6 +67,88 @@ void accumulate_operator_scaled(
 
     for (Index i = 0; i < term.size(); ++i) {
         accum[i] += scale * term[i];
+    }
+}
+
+void destroy_cached_sparse_static_hamiltonian(
+    CachedGroupedLayoutEntry& entry)
+{
+    if (entry.d_static_sparse_hamiltonian_cols != nullptr) {
+        cudaFree(entry.d_static_sparse_hamiltonian_cols);
+        entry.d_static_sparse_hamiltonian_cols = nullptr;
+    }
+    if (entry.d_static_sparse_hamiltonian_rows != nullptr) {
+        cudaFree(entry.d_static_sparse_hamiltonian_rows);
+        entry.d_static_sparse_hamiltonian_rows = nullptr;
+    }
+    if (entry.d_static_sparse_hamiltonian_values != nullptr) {
+        cudaFree(entry.d_static_sparse_hamiltonian_values);
+        entry.d_static_sparse_hamiltonian_values = nullptr;
+    }
+
+    entry.static_sparse_hamiltonian_values.clear();
+    entry.static_sparse_hamiltonian_rows.clear();
+    entry.static_sparse_hamiltonian_cols.clear();
+}
+
+void cache_sparse_static_hamiltonian(
+    CachedGroupedLayoutEntry& entry)
+{
+    destroy_cached_sparse_static_hamiltonian(entry);
+
+    if (entry.sites.size() != 2 || entry.static_hamiltonian_sum.empty()) {
+        return;
+    }
+
+    const Index matrix_dim =
+        static_cast<Index>(std::llround(std::sqrt(
+            static_cast<double>(entry.static_hamiltonian_sum.size()))));
+    if (static_cast<std::size_t>(matrix_dim) * static_cast<std::size_t>(matrix_dim) !=
+        entry.static_hamiltonian_sum.size()) {
+        return;
+    }
+
+    for (Index row = 0; row < matrix_dim; ++row) {
+        for (Index col = 0; col < matrix_dim; ++col) {
+            const Complex value = entry.static_hamiltonian_sum[row * matrix_dim + col];
+            if (std::abs(value) == 0.0) {
+                continue;
+            }
+
+            entry.static_sparse_hamiltonian_rows.push_back(row);
+            entry.static_sparse_hamiltonian_cols.push_back(col);
+            entry.static_sparse_hamiltonian_values.push_back(value);
+        }
+    }
+
+    if (entry.static_sparse_hamiltonian_values.empty()) {
+        return;
+    }
+
+    const std::size_t nnz = entry.static_sparse_hamiltonian_values.size();
+    const std::size_t values_bytes = nnz * sizeof(Complex);
+    const std::size_t index_bytes = nnz * sizeof(Index);
+    if (cudaMalloc(&entry.d_static_sparse_hamiltonian_values, values_bytes) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&entry.d_static_sparse_hamiltonian_rows), index_bytes) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&entry.d_static_sparse_hamiltonian_cols), index_bytes) != cudaSuccess ||
+        cudaMemcpy(
+            entry.d_static_sparse_hamiltonian_values,
+            entry.static_sparse_hamiltonian_values.data(),
+            values_bytes,
+            cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(
+            entry.d_static_sparse_hamiltonian_rows,
+            entry.static_sparse_hamiltonian_rows.data(),
+            index_bytes,
+            cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(
+            entry.d_static_sparse_hamiltonian_cols,
+            entry.static_sparse_hamiltonian_cols.data(),
+            index_bytes,
+            cudaMemcpyHostToDevice) != cudaSuccess) {
+        destroy_cached_sparse_static_hamiltonian(entry);
+        throw std::runtime_error(
+            "cache_sparse_static_hamiltonian: failed to upload sparse static Hamiltonian");
     }
 }
 
@@ -232,6 +315,8 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
             }
         }
 
+        cache_sparse_static_hamiltonian(entry);
+
         if (!create_cuda_grouped_state_layout(
                 entry.grouped_layout,
                 entry.cuda_grouped_layout)) {
@@ -262,6 +347,7 @@ void destroy_cached_grouped_layouts(
 {
     for (CachedGroupedLayoutEntry& entry : cached) {
         entry.grouped_bytes = 0;
+        destroy_cached_sparse_static_hamiltonian(entry);
         (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
     }
     cached.clear();

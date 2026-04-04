@@ -4,7 +4,9 @@
 #include <petscvec.h>
 
 #include <cuda_runtime.h>
+#include <nvtx3/nvToolsExt.h>
 
+#include <cmath>
 #include <stdexcept>
 #include <string>
 
@@ -59,6 +61,39 @@ std::string make_sites_cache_suffix(
         suffix += "_" + std::to_string(site);
     }
     return suffix;
+}
+
+class ScopedNvtxRange {
+public:
+    explicit ScopedNvtxRange(
+        const std::string& label)
+    {
+        nvtxRangePushA(label.c_str());
+    }
+
+    ~ScopedNvtxRange()
+    {
+        nvtxRangePop();
+    }
+};
+
+std::string make_nvtx_label(
+    const char* family,
+    const std::string& term_label)
+{
+    return std::string(family) + ":" + term_label;
+}
+
+bool can_use_static_sparse_commutator(
+    const CachedGroupedLayoutEntry& layout_entry,
+    bool has_dynamic_hamiltonian)
+{
+    return !has_dynamic_hamiltonian &&
+           layout_entry.sites.size() == 2 &&
+           !layout_entry.static_sparse_hamiltonian_values.empty() &&
+           layout_entry.d_static_sparse_hamiltonian_values != nullptr &&
+           layout_entry.d_static_sparse_hamiltonian_rows != nullptr &&
+           layout_entry.d_static_sparse_hamiltonian_cols != nullptr;
 }
 
 void accumulate_operator_scaled(
@@ -332,19 +367,42 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
                 : "layout_effective_static_" +
                       make_sites_cache_suffix(layout_entry.sites);
 
-        PetscCall(apply_grouped_commutator_cuda_buffer(
-            solver,
-            effective_term_label,
-            effective_hamiltonian,
-            layout_entry.sites,
-            layout_entry.grouped_layout,
-            rhs_ctx.executor_cache,
-            rhs_ctx.grouped_scratch.d_grouped_input,
-            rhs_ctx.grouped_scratch.d_grouped_term,
-            rhs_ctx.batch_size,
-            s,
-            nullptr,
-            nullptr));
+        const ScopedNvtxRange commutator_range(
+            make_nvtx_label("rhs_commutator", effective_term_label));
+        if (can_use_static_sparse_commutator(layout_entry, has_dynamic_hamiltonian)) {
+            const Index target_hilbert_dim =
+                static_cast<Index>(std::llround(std::sqrt(
+                    static_cast<double>(layout_entry.static_hamiltonian_sum.size()))));
+            const Index complement_dim =
+                layout_entry.grouped_layout.hilbert_dim / target_hilbert_dim;
+            if (!launch_batched_grouped_sparse_commutator_kernel(
+                    layout_entry.d_static_sparse_hamiltonian_values,
+                    layout_entry.d_static_sparse_hamiltonian_rows,
+                    layout_entry.d_static_sparse_hamiltonian_cols,
+                    static_cast<Index>(layout_entry.static_sparse_hamiltonian_values.size()),
+                    rhs_ctx.grouped_scratch.d_grouped_input,
+                    rhs_ctx.grouped_scratch.d_grouped_term,
+                    target_hilbert_dim,
+                    complement_dim,
+                    rhs_ctx.batch_size,
+                    s)) {
+                return PETSC_ERR_LIB;
+            }
+        } else {
+            PetscCall(apply_grouped_commutator_cuda_buffer(
+                solver,
+                effective_term_label,
+                effective_hamiltonian,
+                layout_entry.sites,
+                layout_entry.grouped_layout,
+                rhs_ctx.executor_cache,
+                rhs_ctx.grouped_scratch.d_grouped_input,
+                rhs_ctx.grouped_scratch.d_grouped_term,
+                rhs_ctx.batch_size,
+                s,
+                nullptr,
+                nullptr));
+        }
 
         PetscCall(accumulate_grouped_layout_term(
             rhs_ctx,
@@ -361,6 +419,8 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
         }
 
         if (!d_aux.jump_diagonal.empty()) {
+            const ScopedNvtxRange diagonal_jump_range(
+                make_nvtx_label("rhs_dissipator_diag_jump", d_aux.name));
             const Index target_hilbert_dim =
                 static_cast<Index>(d_aux.jump_diagonal.size());
             const Index complement_dim =
@@ -377,6 +437,8 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
                 return PETSC_ERR_LIB;
             }
         } else {
+            const ScopedNvtxRange jump_range(
+                make_nvtx_label("rhs_dissipator_jump", d_aux.name));
             PetscCall(apply_grouped_dissipator_jump_cuda_buffer(
                 solver,
                 d_aux.name,
@@ -406,6 +468,8 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
         const std::string dissipator_norm_label =
             "layout_diss_norm_" + make_sites_cache_suffix(layout_entry.sites);
 
+        const ScopedNvtxRange anti_commutator_range(
+            make_nvtx_label("rhs_anti_commutator", dissipator_norm_label));
         PetscCall(apply_grouped_anti_commutator_cuda_buffer(
             solver,
             dissipator_norm_label,

@@ -67,6 +67,91 @@ __global__ void anti_commutator_combine_kernel(
     out[idx] = cuCmul(minus_half, cuCadd(left[idx], right[idx]));
 }
 
+__global__ void batched_grouped_sparse_commutator_kernel(
+    const cuDoubleComplex* sparse_values,
+    const Index* sparse_rows,
+    const Index* sparse_cols,
+    Index sparse_nnz,
+    const cuDoubleComplex* grouped_input,
+    cuDoubleComplex* grouped_output,
+    Index target_hilbert_dim,
+    Index complement_dim,
+    Index batch_size)
+{
+    const std::size_t total_elements =
+        static_cast<std::size_t>(batch_size) *
+        static_cast<std::size_t>(target_hilbert_dim) *
+        static_cast<std::size_t>(complement_dim) *
+        static_cast<std::size_t>(target_hilbert_dim) *
+        static_cast<std::size_t>(complement_dim);
+    const std::size_t idx =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+    if (idx >= total_elements) {
+        return;
+    }
+
+    const std::size_t grouped_size =
+        static_cast<std::size_t>(target_hilbert_dim) *
+        static_cast<std::size_t>(complement_dim) *
+        static_cast<std::size_t>(target_hilbert_dim) *
+        static_cast<std::size_t>(complement_dim);
+    std::size_t local_idx = idx % grouped_size;
+
+    const Index bra_comp = static_cast<Index>(local_idx % complement_dim);
+    local_idx /= complement_dim;
+    const Index bra_target_out = static_cast<Index>(local_idx % target_hilbert_dim);
+    local_idx /= target_hilbert_dim;
+    const Index ket_comp = static_cast<Index>(local_idx % complement_dim);
+    local_idx /= complement_dim;
+    const Index ket_target_out = static_cast<Index>(local_idx);
+
+    cuDoubleComplex left_sum = make_cuDoubleComplex(0.0, 0.0);
+    cuDoubleComplex right_sum = make_cuDoubleComplex(0.0, 0.0);
+
+    const std::size_t batch_offset = (idx / grouped_size) * grouped_size;
+    const std::size_t left_base =
+        batch_offset +
+        (static_cast<std::size_t>(ket_comp) * target_hilbert_dim + bra_target_out) *
+            complement_dim +
+        bra_comp;
+    const std::size_t right_base =
+        batch_offset +
+        (static_cast<std::size_t>(ket_target_out) * complement_dim + ket_comp) *
+            target_hilbert_dim * complement_dim +
+        bra_comp;
+    const std::size_t left_stride =
+        static_cast<std::size_t>(complement_dim) *
+        static_cast<std::size_t>(target_hilbert_dim) *
+        static_cast<std::size_t>(complement_dim);
+    const std::size_t right_stride = complement_dim;
+
+    for (Index nz = 0; nz < sparse_nnz; ++nz) {
+        const Index row = sparse_rows[nz];
+        const Index col = sparse_cols[nz];
+        const cuDoubleComplex value = sparse_values[nz];
+
+        if (row == ket_target_out) {
+            left_sum = cuCadd(
+                left_sum,
+                cuCmul(
+                    value,
+                    grouped_input[left_base + static_cast<std::size_t>(col) * left_stride]));
+        }
+
+        if (col == bra_target_out) {
+            right_sum = cuCadd(
+                right_sum,
+                cuCmul(
+                    grouped_input[right_base + static_cast<std::size_t>(row) * right_stride],
+                    value));
+        }
+    }
+
+    const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
+    grouped_output[idx] = cuCmul(minus_i, cuCsub(left_sum, right_sum));
+}
+
 } // namespace
 
 bool launch_commutator_combine_kernel(
@@ -127,6 +212,48 @@ bool launch_anti_commutator_combine_kernel(
         reinterpret_cast<const cuDoubleComplex*>(d_right),
         reinterpret_cast<cuDoubleComplex*>(d_out),
         num_elements);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_batched_grouped_sparse_commutator_kernel(
+    const void* sparse_values,
+    const Index* sparse_rows,
+    const Index* sparse_cols,
+    Index sparse_nnz,
+    const void* grouped_input,
+    void* grouped_output,
+    Index target_hilbert_dim,
+    Index complement_dim,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    if (sparse_values == nullptr || sparse_rows == nullptr || sparse_cols == nullptr ||
+        grouped_input == nullptr || grouped_output == nullptr ||
+        sparse_nnz <= 0 || target_hilbert_dim <= 0 || complement_dim <= 0 || batch_size <= 0) {
+        return false;
+    }
+
+    constexpr int threads_per_block = 256;
+    const std::size_t total_elements =
+        static_cast<std::size_t>(batch_size) *
+        static_cast<std::size_t>(target_hilbert_dim) *
+        static_cast<std::size_t>(complement_dim) *
+        static_cast<std::size_t>(target_hilbert_dim) *
+        static_cast<std::size_t>(complement_dim);
+    const int blocks =
+        static_cast<int>((total_elements + threads_per_block - 1) / threads_per_block);
+
+    batched_grouped_sparse_commutator_kernel<<<blocks, threads_per_block, 0, stream>>>(
+        static_cast<const cuDoubleComplex*>(sparse_values),
+        sparse_rows,
+        sparse_cols,
+        sparse_nnz,
+        static_cast<const cuDoubleComplex*>(grouped_input),
+        static_cast<cuDoubleComplex*>(grouped_output),
+        target_hilbert_dim,
+        complement_dim,
+        batch_size);
 
     return cudaGetLastError() == cudaSuccess;
 }
