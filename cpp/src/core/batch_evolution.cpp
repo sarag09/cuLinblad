@@ -49,6 +49,9 @@ bool contains_sites(
     return false;
 }
 
+void destroy_cached_grouped_layouts(
+    std::vector<CachedGroupedLayoutEntry>& cached);
+
 void accumulate_operator_scaled(
     const std::vector<Complex>& term,
     double scale,
@@ -322,78 +325,82 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
     Index batch_size)
 {
     std::vector<CachedGroupedLayoutEntry> cached;
-
-    auto add_if_missing = [&](const std::vector<Index>& sites) {
-        for (const CachedGroupedLayoutEntry& entry : cached) {
-            if (same_sites(entry.sites, sites)) {
-                return;
-            }
-        }
-
-        CachedGroupedLayoutEntry entry;
-        try {
-            entry.sites = sites;
-            entry.grouped_layout =
-                make_grouped_state_layout(sites, solver.model.local_dims);
-            entry.grouped_bytes =
-                static_cast<std::size_t>(batch_size) *
-                static_cast<std::size_t>(entry.grouped_layout.grouped_size) *
-                sizeof(Complex);
-
-            for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
-                if (same_sites(h_term.sites, sites)) {
-                    accumulate_operator_scaled(
-                        h_term.matrix,
-                        1.0,
-                        entry.static_hamiltonian_sum);
+    try {
+        auto add_if_missing = [&](const std::vector<Index>& sites) {
+            for (const CachedGroupedLayoutEntry& entry : cached) {
+                if (same_sites(entry.sites, sites)) {
+                    return;
                 }
             }
 
-            for (const OperatorTerm& d_term : solver.model.dissipator_terms) {
-                if (same_sites(d_term.sites, sites)) {
-                    const std::vector<Complex> l_dag =
-                        local_conjugate_transpose(d_term.matrix, d_term.row_dim);
-                    const std::vector<Complex> l_dag_l =
-                        local_multiply_square(l_dag, d_term.matrix, d_term.row_dim);
-                    accumulate_operator_scaled(
-                        l_dag_l,
-                        1.0,
-                        entry.static_dissipator_norm_sum);
+            CachedGroupedLayoutEntry entry;
+            try {
+                entry.sites = sites;
+                entry.grouped_layout =
+                    make_grouped_state_layout(sites, solver.model.local_dims);
+                entry.grouped_bytes =
+                    static_cast<std::size_t>(batch_size) *
+                    static_cast<std::size_t>(entry.grouped_layout.grouped_size) *
+                    sizeof(Complex);
+
+                for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
+                    if (same_sites(h_term.sites, sites)) {
+                        accumulate_operator_scaled(
+                            h_term.matrix,
+                            1.0,
+                            entry.static_hamiltonian_sum);
+                    }
                 }
+
+                for (const OperatorTerm& d_term : solver.model.dissipator_terms) {
+                    if (same_sites(d_term.sites, sites)) {
+                        const std::vector<Complex> l_dag =
+                            local_conjugate_transpose(d_term.matrix, d_term.row_dim);
+                        const std::vector<Complex> l_dag_l =
+                            local_multiply_square(l_dag, d_term.matrix, d_term.row_dim);
+                        accumulate_operator_scaled(
+                            l_dag_l,
+                            1.0,
+                            entry.static_dissipator_norm_sum);
+                    }
+                }
+
+                cache_diagonal_static_hamiltonian(entry);
+                cache_sparse_static_hamiltonian(entry);
+
+                if (!create_cuda_grouped_state_layout(
+                        entry.grouped_layout,
+                        entry.cuda_grouped_layout)) {
+                    throw std::runtime_error(
+                        "build_cached_grouped_layouts: failed to create CUDA grouped layout");
+                }
+
+                cached.push_back(std::move(entry));
+            } catch (...) {
+                destroy_cached_sparse_static_hamiltonian(entry);
+                destroy_cached_diagonal_static_hamiltonian(entry);
+                (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
+                throw;
             }
+        };
 
-            cache_diagonal_static_hamiltonian(entry);
-            cache_sparse_static_hamiltonian(entry);
-
-            if (!create_cuda_grouped_state_layout(
-                    entry.grouped_layout,
-                    entry.cuda_grouped_layout)) {
-                throw std::runtime_error(
-                    "build_cached_grouped_layouts: failed to create CUDA grouped layout");
-            }
-
-            cached.push_back(std::move(entry));
-        } catch (...) {
-            destroy_cached_sparse_static_hamiltonian(entry);
-            destroy_cached_diagonal_static_hamiltonian(entry);
-            (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
-            throw;
+        for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
+            add_if_missing(h_term.sites);
         }
-    };
 
-    for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
-        add_if_missing(h_term.sites);
+        for (const OperatorTerm& d_term : solver.model.dissipator_terms) {
+            add_if_missing(d_term.sites);
+        }
+
+        for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
+            add_if_missing(td_term.sites);
+        }
+
+        return cached;
+    } catch (...) {
+        destroy_cached_grouped_layouts(cached);
+        throw;
     }
-
-    for (const OperatorTerm& d_term : solver.model.dissipator_terms) {
-        add_if_missing(d_term.sites);
-    }
-
-    for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
-        add_if_missing(td_term.sites);
-    }
-
-    return cached;
 }
 
 void destroy_cached_grouped_layouts(
