@@ -96,6 +96,15 @@ bool can_use_static_sparse_commutator(
            layout_entry.d_static_sparse_hamiltonian_cols != nullptr;
 }
 
+bool can_use_static_diagonal_commutator(
+    const CachedGroupedLayoutEntry& layout_entry,
+    bool has_dynamic_hamiltonian)
+{
+    return !has_dynamic_hamiltonian &&
+           !layout_entry.static_hamiltonian_diagonal.empty() &&
+           layout_entry.d_static_hamiltonian_diagonal != nullptr;
+}
+
 void accumulate_operator_scaled(
     const std::vector<Complex>& term,
     double scale,
@@ -380,6 +389,21 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
                     layout_entry.d_static_sparse_hamiltonian_rows,
                     layout_entry.d_static_sparse_hamiltonian_cols,
                     static_cast<Index>(layout_entry.static_sparse_hamiltonian_values.size()),
+                    rhs_ctx.grouped_scratch.d_grouped_input,
+                    rhs_ctx.grouped_scratch.d_grouped_term,
+                    target_hilbert_dim,
+                    complement_dim,
+                    rhs_ctx.batch_size,
+                    s)) {
+                return PETSC_ERR_LIB;
+            }
+        } else if (can_use_static_diagonal_commutator(layout_entry, has_dynamic_hamiltonian)) {
+            const Index target_hilbert_dim =
+                static_cast<Index>(layout_entry.static_hamiltonian_diagonal.size());
+            const Index complement_dim =
+                layout_entry.grouped_layout.hilbert_dim / target_hilbert_dim;
+            if (!launch_batched_grouped_diagonal_commutator_kernel(
+                    layout_entry.d_static_hamiltonian_diagonal,
                     rhs_ctx.grouped_scratch.d_grouped_input,
                     rhs_ctx.grouped_scratch.d_grouped_term,
                     target_hilbert_dim,

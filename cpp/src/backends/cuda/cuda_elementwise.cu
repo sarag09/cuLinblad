@@ -541,6 +541,53 @@ __global__ void batched_grouped_diagonal_dissipator_jump_kernel(
     grouped_output[idx] = cuCmul(cuCmul(ket_factor, rho_val), bra_factor);
 }
 
+__global__ void batched_grouped_diagonal_commutator_kernel(
+    const cuDoubleComplex* diagonal_op,
+    const cuDoubleComplex* grouped_input,
+    cuDoubleComplex* grouped_output,
+    std::size_t target_hilbert_dim,
+    std::size_t complement_dim,
+    std::size_t batch_size)
+{
+    const std::size_t per_state_size =
+        target_hilbert_dim * complement_dim * target_hilbert_dim * complement_dim;
+
+    const std::size_t total_elements =
+        per_state_size * batch_size;
+
+    const std::size_t idx =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+    if (idx >= total_elements) {
+        return;
+    }
+
+    const std::size_t state_offset = idx % per_state_size;
+
+    const std::size_t bra_comp = state_offset % complement_dim;
+    const std::size_t tmp0 = state_offset / complement_dim;
+
+    const std::size_t bra_target = tmp0 % target_hilbert_dim;
+    const std::size_t tmp1 = tmp0 / target_hilbert_dim;
+
+    const std::size_t ket_comp = tmp1 % complement_dim;
+    const std::size_t ket_target = tmp1 / complement_dim;
+
+    (void)bra_comp;
+    (void)ket_comp;
+
+    const cuDoubleComplex ket_factor = diagonal_op[ket_target];
+    const cuDoubleComplex bra_factor = diagonal_op[bra_target];
+    const cuDoubleComplex rho_val = grouped_input[idx];
+    const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
+
+    grouped_output[idx] = cuCmul(
+        minus_i,
+        cuCmul(
+            cuCsub(ket_factor, bra_factor),
+            rho_val));
+}
+
 bool launch_batched_grouped_left_diagonal_kernel(
     const void* diagonal_op,
     const void* grouped_input,
@@ -605,6 +652,43 @@ bool launch_batched_grouped_diagonal_dissipator_jump_kernel(
         static_cast<int>((total_elements + threads_per_block - 1) / threads_per_block);
 
     batched_grouped_diagonal_dissipator_jump_kernel<<<blocks, threads_per_block, 0, stream>>>(
+        static_cast<const cuDoubleComplex*>(diagonal_op),
+        static_cast<const cuDoubleComplex*>(grouped_input),
+        static_cast<cuDoubleComplex*>(grouped_output),
+        static_cast<std::size_t>(target_hilbert_dim),
+        static_cast<std::size_t>(complement_dim),
+        static_cast<std::size_t>(batch_size));
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_batched_grouped_diagonal_commutator_kernel(
+    const void* diagonal_op,
+    const void* grouped_input,
+    void* grouped_output,
+    Index target_hilbert_dim,
+    Index complement_dim,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    if (diagonal_op == nullptr || grouped_input == nullptr || grouped_output == nullptr) {
+        return false;
+    }
+
+    const std::size_t per_state_size =
+        static_cast<std::size_t>(target_hilbert_dim) *
+        static_cast<std::size_t>(complement_dim) *
+        static_cast<std::size_t>(target_hilbert_dim) *
+        static_cast<std::size_t>(complement_dim);
+
+    const std::size_t total_elements =
+        per_state_size * static_cast<std::size_t>(batch_size);
+
+    constexpr int threads_per_block = 256;
+    const int blocks =
+        static_cast<int>((total_elements + threads_per_block - 1) / threads_per_block);
+
+    batched_grouped_diagonal_commutator_kernel<<<blocks, threads_per_block, 0, stream>>>(
         static_cast<const cuDoubleComplex*>(diagonal_op),
         static_cast<const cuDoubleComplex*>(grouped_input),
         static_cast<cuDoubleComplex*>(grouped_output),

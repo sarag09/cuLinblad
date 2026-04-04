@@ -91,6 +91,52 @@ void destroy_cached_sparse_static_hamiltonian(
     entry.static_sparse_hamiltonian_cols.clear();
 }
 
+void destroy_cached_diagonal_static_hamiltonian(
+    CachedGroupedLayoutEntry& entry)
+{
+    if (entry.d_static_hamiltonian_diagonal != nullptr) {
+        cudaFree(entry.d_static_hamiltonian_diagonal);
+        entry.d_static_hamiltonian_diagonal = nullptr;
+    }
+
+    entry.static_hamiltonian_diagonal.clear();
+}
+
+void cache_diagonal_static_hamiltonian(
+    CachedGroupedLayoutEntry& entry)
+{
+    destroy_cached_diagonal_static_hamiltonian(entry);
+
+    if (entry.static_hamiltonian_sum.empty()) {
+        return;
+    }
+
+    const Index matrix_dim =
+        static_cast<Index>(std::llround(std::sqrt(
+            static_cast<double>(entry.static_hamiltonian_sum.size()))));
+    if (static_cast<std::size_t>(matrix_dim) * static_cast<std::size_t>(matrix_dim) !=
+        entry.static_hamiltonian_sum.size() ||
+        !try_extract_local_diagonal(
+            entry.static_hamiltonian_sum,
+            matrix_dim,
+            entry.static_hamiltonian_diagonal)) {
+        return;
+    }
+
+    const std::size_t diagonal_bytes =
+        entry.static_hamiltonian_diagonal.size() * sizeof(Complex);
+    if (cudaMalloc(&entry.d_static_hamiltonian_diagonal, diagonal_bytes) != cudaSuccess ||
+        cudaMemcpy(
+            entry.d_static_hamiltonian_diagonal,
+            entry.static_hamiltonian_diagonal.data(),
+            diagonal_bytes,
+            cudaMemcpyHostToDevice) != cudaSuccess) {
+        destroy_cached_diagonal_static_hamiltonian(entry);
+        throw std::runtime_error(
+            "cache_diagonal_static_hamiltonian: failed to upload diagonal static Hamiltonian");
+    }
+}
+
 void cache_sparse_static_hamiltonian(
     CachedGroupedLayoutEntry& entry)
 {
@@ -285,46 +331,54 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
         }
 
         CachedGroupedLayoutEntry entry;
-        entry.sites = sites;
-        entry.grouped_layout =
-            make_grouped_state_layout(sites, solver.model.local_dims);
-        entry.grouped_bytes =
-            static_cast<std::size_t>(batch_size) *
-            static_cast<std::size_t>(entry.grouped_layout.grouped_size) *
-            sizeof(Complex);
+        try {
+            entry.sites = sites;
+            entry.grouped_layout =
+                make_grouped_state_layout(sites, solver.model.local_dims);
+            entry.grouped_bytes =
+                static_cast<std::size_t>(batch_size) *
+                static_cast<std::size_t>(entry.grouped_layout.grouped_size) *
+                sizeof(Complex);
 
-        for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
-            if (same_sites(h_term.sites, sites)) {
-                accumulate_operator_scaled(
-                    h_term.matrix,
-                    1.0,
-                    entry.static_hamiltonian_sum);
+            for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
+                if (same_sites(h_term.sites, sites)) {
+                    accumulate_operator_scaled(
+                        h_term.matrix,
+                        1.0,
+                        entry.static_hamiltonian_sum);
+                }
             }
-        }
 
-        for (const OperatorTerm& d_term : solver.model.dissipator_terms) {
-            if (same_sites(d_term.sites, sites)) {
-                const std::vector<Complex> l_dag =
-                    local_conjugate_transpose(d_term.matrix, d_term.row_dim);
-                const std::vector<Complex> l_dag_l =
-                    local_multiply_square(l_dag, d_term.matrix, d_term.row_dim);
-                accumulate_operator_scaled(
-                    l_dag_l,
-                    1.0,
-                    entry.static_dissipator_norm_sum);
+            for (const OperatorTerm& d_term : solver.model.dissipator_terms) {
+                if (same_sites(d_term.sites, sites)) {
+                    const std::vector<Complex> l_dag =
+                        local_conjugate_transpose(d_term.matrix, d_term.row_dim);
+                    const std::vector<Complex> l_dag_l =
+                        local_multiply_square(l_dag, d_term.matrix, d_term.row_dim);
+                    accumulate_operator_scaled(
+                        l_dag_l,
+                        1.0,
+                        entry.static_dissipator_norm_sum);
+                }
             }
+
+            cache_diagonal_static_hamiltonian(entry);
+            cache_sparse_static_hamiltonian(entry);
+
+            if (!create_cuda_grouped_state_layout(
+                    entry.grouped_layout,
+                    entry.cuda_grouped_layout)) {
+                throw std::runtime_error(
+                    "build_cached_grouped_layouts: failed to create CUDA grouped layout");
+            }
+
+            cached.push_back(std::move(entry));
+        } catch (...) {
+            destroy_cached_sparse_static_hamiltonian(entry);
+            destroy_cached_diagonal_static_hamiltonian(entry);
+            (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
+            throw;
         }
-
-        cache_sparse_static_hamiltonian(entry);
-
-        if (!create_cuda_grouped_state_layout(
-                entry.grouped_layout,
-                entry.cuda_grouped_layout)) {
-            throw std::runtime_error(
-                "build_cached_grouped_layouts: failed to create CUDA grouped layout");
-        }
-
-        cached.push_back(std::move(entry));
     };
 
     for (const OperatorTerm& h_term : solver.model.hamiltonian_terms) {
@@ -348,6 +402,7 @@ void destroy_cached_grouped_layouts(
     for (CachedGroupedLayoutEntry& entry : cached) {
         entry.grouped_bytes = 0;
         destroy_cached_sparse_static_hamiltonian(entry);
+        destroy_cached_diagonal_static_hamiltonian(entry);
         (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
     }
     cached.clear();

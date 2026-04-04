@@ -78,6 +78,15 @@ bool launch_batched_grouped_diagonal_dissipator_jump_kernel(
     Index batch_size,
     cudaStream_t stream);
 
+bool launch_batched_grouped_diagonal_commutator_kernel(
+    const void* diagonal_op,
+    const void* grouped_input,
+    void* grouped_output,
+    Index target_hilbert_dim,
+    Index complement_dim,
+    Index batch_size,
+    cudaStream_t stream);
+
 bool launch_batched_grouped_sparse_commutator_kernel(
     const void* sparse_values,
     const Index* sparse_rows,
