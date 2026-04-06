@@ -83,7 +83,7 @@ PetscErrorCode create_cpu_benchmark_execution_context(
 
     PetscCall(TSCreate(PETSC_COMM_SELF, &ctx.ts));
     PetscCall(TSSetType(ctx.ts, TSRK));
-    PetscCall(TSRKSetType(ctx.ts, TSRK5DP));
+    PetscCall(TSRKSetType(ctx.ts, TSRK4));
     TSAdapt cpu_adapt = nullptr;
     PetscCall(TSGetAdapt(ctx.ts, &cpu_adapt));
     PetscCall(TSAdaptSetType(cpu_adapt, TSADAPTNONE));
@@ -658,7 +658,7 @@ TransmonChainBenchmarkTiming run_transmon_chain_cuda_benchmark(
             ctx));
 
     PetscCallAbort(PETSC_COMM_SELF, TSSetType(ctx.ts, TSRK));
-    PetscCallAbort(PETSC_COMM_SELF, TSRKSetType(ctx.ts, TSRK5DP));
+    PetscCallAbort(PETSC_COMM_SELF, TSRKSetType(ctx.ts, TSRK4));
     TSAdapt gpu_adapt = nullptr;
     PetscCallAbort(PETSC_COMM_SELF, TSGetAdapt(ctx.ts, &gpu_adapt));
     PetscCallAbort(PETSC_COMM_SELF, TSAdaptSetType(gpu_adapt, TSADAPTNONE));
