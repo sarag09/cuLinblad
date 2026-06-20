@@ -148,6 +148,52 @@ for s in "n2d2 2 2" "n2d3 2 3" "n4d2 4 2"; do set -- $s
 done
 ```
 
+## 9. Adaptive time-stepping and batch-size dependence (expected, not a bug)
+
+**Observation:** with an *adaptive* integrator (e.g. Dormand–Prince `-ts_type rk
+-ts_rk_type 5dp -ts_adapt_type basic`), the same basis state evolved in different
+GPU batch sizes gives slightly different results. **This is expected** — it is a
+property of batched adaptive stepping, not a solver bug.
+
+**Mechanism:** all `B` states are packed into one PETSc `Vec` and integrated by one
+`TS` with one adaptive step-size controller. PETSc forms a *single* weighted error
+norm over the *whole combined vector* and picks *one* Δt for the entire batch. That
+error norm — and therefore the step sequence — depends on the batch contents, so the
+same state follows a different timeline at different batch sizes.
+
+Direct evidence (n2d2, rtol 1e-6, atol 1e-8): the adaptive solver takes **1082
+steps for batch=1** but **1235 steps for batch=8** (the 8-state aggregate error
+forces smaller steps); the chosen Δt already diverges by step 3.
+
+**The cross-batch difference is bounded by, and scales linearly with, the
+tolerance** — every batch's result is correct to within `atol`/`rtol`; the
+discrepancy is tolerance-level truncation, not a physical error. (The RHS correctly
+decouples the states — proven by the fixed-step path being bit-identical across
+batches and matching QuTiP.)
+
+| rtol / atol     | cross-batch max\|diff\| (state 0, B=1..8) | each batch vs QuTiP |
+|-----------------|-------------------------------------------|---------------------|
+| 1e-6  / 1e-8    | 2.5e-07                                   | ~1e-6 … 4e-6        |
+| 1e-10 / 1e-12   | 2.5e-11                                   | ~6e-11 … 4e-10      |
+
+(10⁴ tighter tolerance → 10⁴ smaller cross-batch difference.)
+
+**Rectification — to get batch-independent results:**
+
+1. **Fixed-step (recommended; the validated default):** `TSRK` + `TSRK4` +
+   `TSADAPTNONE`. Identical predetermined steps for every batch ⇒ **bit-identical**
+   results (0–4e-16). This is exactly why the validated batched path uses
+   fixed-step.
+2. **Tighten tolerance:** the cross-batch diff scales with tol, so rtol/atol
+   1e-10/1e-12 drives it to ~1e-11 (negligible, though still not bit-identical).
+3. **Unbatched adaptive:** evolve one state per solve (`-dump_batch_sizes 1`) so each
+   state gets its own controller. A *single batched adaptive* solve cannot produce
+   bit-identical per-state results across batch sizes — sharing one timeline is
+   intrinsic to batching.
+
+There is no way to make one batched adaptive solve reproduce per-state results
+across batch sizes; for reproducible batching use fixed-step (option 1).
+
 ## 8. Files
 
 | file | role |
