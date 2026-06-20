@@ -1,0 +1,30 @@
+################################################################################
+EXHAUSTIVE ENTRY-BY-ENTRY CHECK  n4d2  (N=4 d=2, D=16, density_dim=256)
+QuTiP reference: full propagator, all 256 basis states, mesolve/vern9
+################################################################################
+
+=== batch sweep @ 1000 steps : batch sizes [1, 2, 4, 8] ===
+  cross-batch identity (C++ vs C++): worst |diff| over all shared states/entries = 1.665e-16
+  batch=1 vs QuTiP:  256 entries checked (1 states x 256), max|diff| = 2.929e-04  @state0(0,12)
+  batch=2 vs QuTiP:  512 entries checked (2 states x 256), max|diff| = 5.141e-04  @state1(8,1)
+  batch=4 vs QuTiP: 1024 entries checked (4 states x 256), max|diff| = 1.210e-03  @state3(0,3)
+  batch=8 vs QuTiP: 2048 entries checked (8 states x 256), max|diff| = 1.210e-03  @state3(0,3)
+
+=== batch sweep @ 16000 steps : batch sizes [1, 2, 4, 8] ===
+  cross-batch identity (C++ vs C++): worst |diff| over all shared states/entries = 4.441e-16
+  batch=1 vs QuTiP:  256 entries checked (1 states x 256), max|diff| = 6.479e-09  @state0(0,12)
+  batch=2 vs QuTiP:  512 entries checked (2 states x 256), max|diff| = 8.099e-09  @state1(8,1)
+  batch=4 vs QuTiP: 1024 entries checked (4 states x 256), max|diff| = 1.809e-08  @state3(0,3)
+  batch=8 vs QuTiP: 2048 entries checked (8 states x 256), max|diff| = 1.809e-08  @state3(0,3)
+
+=== FULL propagator (ALL 256 states) vs QuTiP ===
+  @ 1000 steps:  65536 entries checked (256 states x 256), max|diff| = 1.210e-03  @state3(0,3)
+           (batch=8 block == full-dump first 8 states to 0.0e+00)
+  @16000 steps:  65536 entries checked (256 states x 256), max|diff| = 1.809e-08  @state3(0,3)
+           (batch=8 block == full-dump first 8 states to 0.0e+00)
+
+================================================================================
+TOTAL complex entries compared C++ vs QuTiP for n4d2 : 138752
+Converged (16000-step) worst |C++ - QuTiP| over EVERY entry/state/batch = 1.809e-08
+=> SAME PROPAGATOR entry-by-entry to QuTiP's accuracy floor (~1e-7)
+================================================================================

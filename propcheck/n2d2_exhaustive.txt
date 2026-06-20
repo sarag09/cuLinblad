@@ -1,0 +1,30 @@
+################################################################################
+EXHAUSTIVE ENTRY-BY-ENTRY CHECK  n2d2  (N=2 d=2, D=4, density_dim=16)
+QuTiP reference: full propagator, all 16 basis states, mesolve/vern9
+################################################################################
+
+=== batch sweep @ 1000 steps : batch sizes [1, 2, 4, 8] ===
+  cross-batch identity (C++ vs C++): worst |diff| over all shared states/entries = 0.000e+00
+  batch=1 vs QuTiP:   16 entries checked (1 states x 16), max|diff| = 1.888e-04  @state0(2,0)
+  batch=2 vs QuTiP:   32 entries checked (2 states x 16), max|diff| = 6.724e-04  @state1(2,1)
+  batch=4 vs QuTiP:   64 entries checked (4 states x 16), max|diff| = 7.231e-04  @state3(2,1)
+  batch=8 vs QuTiP:  128 entries checked (8 states x 16), max|diff| = 7.231e-04  @state3(2,1)
+
+=== batch sweep @ 16000 steps : batch sizes [1, 2, 4, 8] ===
+  cross-batch identity (C++ vs C++): worst |diff| over all shared states/entries = 0.000e+00
+  batch=1 vs QuTiP:   16 entries checked (1 states x 16), max|diff| = 2.859e-09  @state0(2,0)
+  batch=2 vs QuTiP:   32 entries checked (2 states x 16), max|diff| = 1.027e-08  @state1(2,1)
+  batch=4 vs QuTiP:   64 entries checked (4 states x 16), max|diff| = 1.111e-08  @state3(2,1)
+  batch=8 vs QuTiP:  128 entries checked (8 states x 16), max|diff| = 1.111e-08  @state3(2,1)
+
+=== FULL propagator (ALL 16 states) vs QuTiP ===
+  @ 1000 steps:    256 entries checked (16 states x 16), max|diff| = 9.247e-04  @state14(3,0)
+           (batch=8 block == full-dump first 8 states to 0.0e+00)
+  @16000 steps:    256 entries checked (16 states x 16), max|diff| = 1.418e-08  @state14(3,0)
+           (batch=8 block == full-dump first 8 states to 0.0e+00)
+
+================================================================================
+TOTAL complex entries compared C++ vs QuTiP for n2d2 : 992
+Converged (16000-step) worst |C++ - QuTiP| over EVERY entry/state/batch = 1.418e-08
+=> SAME PROPAGATOR entry-by-entry to QuTiP's accuracy floor (~1e-7)
+================================================================================

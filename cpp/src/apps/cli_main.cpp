@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <complex>
 #include <cstdlib>
+#include <iomanip>
 #include <sstream>
 #include <iostream>
 #include <stdexcept>
@@ -325,6 +326,94 @@ void print_stress_test_results(
     }
 }
 
+void dump_one_propagator(
+    const char* backend,
+    const culindblad::TransmonChainBenchmarkConfig& config,
+    const culindblad::Solver& solver,
+    const culindblad::TransmonChainBenchmarkTiming& timing,
+    culindblad::Index batch_size)
+{
+    std::cout << "PROPAGATOR_DUMP_BEGIN backend=" << backend
+              << " num_transmons=" << config.num_transmons
+              << " cutoff_dim=" << config.cutoff_dim
+              << " hilbert_dim=" << solver.layout.hilbert_dim
+              << " density_dim=" << solver.layout.density_dim
+              << " steps=" << config.batched_num_steps
+              << " batch_size=" << batch_size
+              << " num_states=" << timing.final_states.size() << "\n";
+    const std::streamsize old_prec = std::cout.precision();
+    std::cout << std::setprecision(17);
+    for (std::size_t s = 0; s < timing.final_states.size(); ++s) {
+        std::cout << "STATE " << s << "\n";
+        const std::vector<Complex>& rho = timing.final_states[s];
+        for (std::size_t i = 0; i < rho.size(); ++i) {
+            std::cout << rho[i].real() << " " << rho[i].imag() << "\n";
+        }
+    }
+    std::cout << std::setprecision(old_prec);
+    std::cout << "PROPAGATOR_DUMP_END backend=" << backend
+              << " batch_size=" << batch_size << "\n";
+}
+
+// Evolve ALL density_dim basis density matrices |row><col| (row-major flat index
+// s = row*D + col) so the full Lindblad propagator can be reconstructed and
+// compared entry-by-entry against the QuTiP reference. Non-invasive: gated behind
+// -dump_propagator and never touches the trusted validation path.
+void dump_full_propagator(
+    const culindblad::TransmonChainBenchmarkConfig& base_config,
+    bool run_cpu)
+{
+    using namespace culindblad;
+
+    TransmonChainBenchmarkConfig config = base_config;
+    config.state_selection.evolve_all_states = true;
+    config.state_selection.selected_state_indices.clear();
+
+    const Model model = build_transmon_chain_model(config);
+    const Solver solver = make_solver(model);
+
+    const TransmonChainBenchmarkTiming gpu_timing =
+        run_transmon_chain_cuda_benchmark(config);
+    dump_one_propagator("gpu", config, solver, gpu_timing,
+                        gpu_timing.final_states.size());
+
+    if (run_cpu) {
+        const TransmonChainBenchmarkTiming cpu_timing =
+            run_transmon_chain_cpu_benchmark(config);
+        dump_one_propagator("cpu", config, solver, cpu_timing,
+                            cpu_timing.final_states.size());
+    }
+}
+
+// For each requested batch size B, evolve the FIRST B basis density matrices in a
+// single batched-GPU solve (batch dimension = B) and dump them. This confirms the
+// batched GPU path is independent of batch size (state s must be identical across
+// every B>s) and that each evolved state matches QuTiP.
+void dump_batch_sweep(
+    const culindblad::TransmonChainBenchmarkConfig& base_config,
+    const std::vector<culindblad::Index>& batch_sizes)
+{
+    using namespace culindblad;
+
+    const Model model = build_transmon_chain_model(base_config);
+    const Solver solver = make_solver(model);
+
+    for (const Index batch_size : batch_sizes) {
+        if (batch_size > solver.layout.density_dim) {
+            throw std::invalid_argument(
+                "dump_batch_sweep: batch size exceeds density_dim");
+        }
+        TransmonChainBenchmarkConfig config = base_config;
+        config.state_selection.evolve_all_states = false;
+        config.state_selection.selected_state_indices =
+            make_first_n_state_indices(batch_size);
+
+        const TransmonChainBenchmarkTiming timing =
+            run_transmon_chain_cuda_benchmark(config);
+        dump_one_propagator("gpu", config, solver, timing, batch_size);
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -358,6 +447,65 @@ int main(int argc, char** argv)
 
         const TransmonChainBenchmarkConfig base_config =
             make_transmon_chain_benchmark_config(2, 2, kValidationBatchSteps);
+
+        // Full-propagator dump mode: evolve all 16 basis density matrices and emit
+        // each final state for entry-by-entry comparison with the QuTiP reference.
+        PetscBool dump_prop = PETSC_FALSE;
+        PetscCallAbort(
+            PETSC_COMM_SELF,
+            PetscOptionsGetBool(
+                nullptr, nullptr, "-dump_propagator", &dump_prop, nullptr));
+        if (dump_prop == PETSC_TRUE) {
+            // System size for the dump (defaults to the N=2 d=2 fixture).
+            PetscInt dump_nt = 2;
+            PetscInt dump_cd = 2;
+            PetscCallAbort(
+                PETSC_COMM_SELF,
+                PetscOptionsGetInt(
+                    nullptr, nullptr, "-dump_num_transmons", &dump_nt, nullptr));
+            PetscCallAbort(
+                PETSC_COMM_SELF,
+                PetscOptionsGetInt(
+                    nullptr, nullptr, "-dump_cutoff_dim", &dump_cd, nullptr));
+
+            PetscInt dump_steps = 0;
+            PetscBool steps_set = PETSC_FALSE;
+            PetscCallAbort(
+                PETSC_COMM_SELF,
+                PetscOptionsGetInt(
+                    nullptr, nullptr, "-dump_steps", &dump_steps, &steps_set));
+            const Index steps =
+                (steps_set == PETSC_TRUE && dump_steps > 0)
+                    ? static_cast<Index>(dump_steps)
+                    : kValidationBatchSteps;
+
+            const TransmonChainBenchmarkConfig dump_config =
+                make_transmon_chain_benchmark_config(
+                    static_cast<Index>(dump_nt),
+                    static_cast<Index>(dump_cd),
+                    steps);
+
+            char batch_sizes_buf[256] = {};
+            PetscBool batch_set = PETSC_FALSE;
+            PetscCallAbort(
+                PETSC_COMM_SELF,
+                PetscOptionsGetString(
+                    nullptr, nullptr, "-dump_batch_sizes",
+                    batch_sizes_buf, sizeof(batch_sizes_buf), &batch_set));
+
+            if (batch_set == PETSC_TRUE) {
+                dump_batch_sweep(dump_config, parse_batch_sizes_csv(batch_sizes_buf));
+            } else {
+                PetscBool dump_cpu = PETSC_FALSE;
+                PetscCallAbort(
+                    PETSC_COMM_SELF,
+                    PetscOptionsGetBool(
+                        nullptr, nullptr, "-dump_propagator_cpu", &dump_cpu, nullptr));
+                dump_full_propagator(dump_config, dump_cpu == PETSC_TRUE);
+            }
+            PetscFinalize();
+            return 0;
+        }
 
         const Model model = build_transmon_chain_model(base_config);
         const Solver solver = make_solver(model);
