@@ -1,0 +1,23 @@
+################################################################################
+TUNABLE-COUPLER VERIFY  tc2q1c  (NQ=2 NC=1 d=3 -> N=3, D=27, density_dim=729)
+Model: all-to-all full capacitive coupling, static.  C++ (TSRK4) vs QuTiP (vern9).
+################################################################################
+
+=== FULL propagator @ 1000 steps (dt=0.04) : GPU vs QuTiP ===
+  entries checked = 531441 (729 states x 729), max|C++ - QuTiP| = 3.264e-03  @state13(0,13)
+  GPU vs CPU backend (same C++ model) max|diff| = 4.774e-15
+
+=== FULL propagator @ 16000 steps (dt=0.0025) : GPU vs QuTiP ===
+  entries checked = 531441 (729 states x 729), max|C++ - QuTiP| = 5.869e-08  @state13(0,13)
+
+=== RK4 convergence (1000 -> 16000 steps, 16x refinement) ===
+  worst|diff|: 3.264e-03 -> 5.869e-08   (shrink x55612.6; ideal O(dt^4) = 16^4 = 65536)
+
+=== Physics invariants (no oracle), @ 16000 steps ===
+  trace preservation  worst |Tr(U|j><k|) - delta_jk| = 1.887e-14
+  Hermiticity         worst |U(|j><k|) - U(|k><j|)^dag| = 1.340e-15
+
+================================================================================
+Converged worst |C++ - QuTiP| over EVERY entry/state = 5.869e-08
+=> C++ == QuTiP propagator (same physics; residual is RK4 truncation -> 0)
+================================================================================

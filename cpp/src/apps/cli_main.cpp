@@ -11,6 +11,7 @@
 #include <petscts.h>
 
 #include "culindblad/transmon_chain_benchmark.hpp"
+#include "culindblad/tunable_coupler_benchmark.hpp"
 
 namespace {
 
@@ -414,6 +415,115 @@ void dump_batch_sweep(
     }
 }
 
+// ===== Tunable-coupler (N-qubit / M-coupler) propagator dump =====
+// Same PROPAGATOR_DUMP format as the chain dump, for the all-to-all tunable-coupler
+// model. Used to verify the C++ solver against the QuTiP reference (2Q1C etc).
+
+culindblad::TunableCouplerBenchmarkConfig make_tunable_coupler_benchmark_config(
+    culindblad::Index num_qubits,
+    culindblad::Index num_couplers,
+    culindblad::Index cutoff_dim,
+    culindblad::Index batched_num_steps)
+{
+    culindblad::TunableCouplerBenchmarkConfig config{};
+    config.num_qubits = num_qubits;
+    config.num_couplers = num_couplers;
+    config.cutoff_dim = cutoff_dim;
+    config.square_topology = (num_couplers == num_qubits);  // 4Q4C ring; others linear
+
+    const culindblad::Index n_elem = num_qubits + num_couplers;
+    config.omega.resize(n_elem, 0.0);
+    config.alpha.assign(n_elem, -0.3);
+    config.t1.assign(n_elem, 20.0);
+    config.tphi.assign(n_elem, 30.0);
+    for (culindblad::Index i = 0; i < n_elem; ++i) {
+        config.omega[i] = 5.0 + 0.05 * static_cast<double>(i);
+    }
+    config.g = 0.02;
+    config.t0 = 0.0;
+    config.tfinal = 40.0;
+    config.batched_num_steps = batched_num_steps;
+    return config;
+}
+
+void tc_dump_one_propagator(
+    const char* backend,
+    const culindblad::TunableCouplerBenchmarkConfig& config,
+    const culindblad::Solver& solver,
+    const culindblad::TransmonChainBenchmarkTiming& timing,
+    culindblad::Index batch_size)
+{
+    std::cout << "PROPAGATOR_DUMP_BEGIN backend=" << backend
+              << " num_qubits=" << config.num_qubits
+              << " num_couplers=" << config.num_couplers
+              << " cutoff_dim=" << config.cutoff_dim
+              << " hilbert_dim=" << solver.layout.hilbert_dim
+              << " density_dim=" << solver.layout.density_dim
+              << " steps=" << config.batched_num_steps
+              << " batch_size=" << batch_size
+              << " num_states=" << timing.final_states.size() << "\n";
+    const std::streamsize old_prec = std::cout.precision();
+    std::cout << std::setprecision(17);
+    for (std::size_t s = 0; s < timing.final_states.size(); ++s) {
+        std::cout << "STATE " << s << "\n";
+        const std::vector<Complex>& rho = timing.final_states[s];
+        for (std::size_t i = 0; i < rho.size(); ++i) {
+            std::cout << rho[i].real() << " " << rho[i].imag() << "\n";
+        }
+    }
+    std::cout << std::setprecision(old_prec);
+    std::cout << "PROPAGATOR_DUMP_END backend=" << backend
+              << " batch_size=" << batch_size << "\n";
+}
+
+void tc_dump_full_propagator(
+    const culindblad::TunableCouplerBenchmarkConfig& base_config,
+    bool run_cpu)
+{
+    using namespace culindblad;
+    TunableCouplerBenchmarkConfig config = base_config;
+    config.state_selection.evolve_all_states = true;
+    config.state_selection.selected_state_indices.clear();
+
+    const Model model = build_tunable_coupler_model(config);
+    const Solver solver = make_solver(model);
+
+    const TransmonChainBenchmarkTiming gpu_timing =
+        run_tunable_coupler_cuda_benchmark(config);
+    tc_dump_one_propagator("gpu", config, solver, gpu_timing,
+                           gpu_timing.final_states.size());
+
+    if (run_cpu) {
+        const TransmonChainBenchmarkTiming cpu_timing =
+            run_tunable_coupler_cpu_benchmark(config);
+        tc_dump_one_propagator("cpu", config, solver, cpu_timing,
+                               cpu_timing.final_states.size());
+    }
+}
+
+void tc_dump_batch_sweep(
+    const culindblad::TunableCouplerBenchmarkConfig& base_config,
+    const std::vector<culindblad::Index>& batch_sizes)
+{
+    using namespace culindblad;
+    const Model model = build_tunable_coupler_model(base_config);
+    const Solver solver = make_solver(model);
+
+    for (const Index batch_size : batch_sizes) {
+        if (batch_size > solver.layout.density_dim) {
+            throw std::invalid_argument(
+                "tc_dump_batch_sweep: batch size exceeds density_dim");
+        }
+        TunableCouplerBenchmarkConfig config = base_config;
+        config.state_selection.evolve_all_states = false;
+        config.state_selection.selected_state_indices =
+            make_first_n_state_indices(batch_size);
+        const TransmonChainBenchmarkTiming timing =
+            run_tunable_coupler_cuda_benchmark(config);
+        tc_dump_one_propagator("gpu", config, solver, timing, batch_size);
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -447,6 +557,58 @@ int main(int argc, char** argv)
 
         const TransmonChainBenchmarkConfig base_config =
             make_transmon_chain_benchmark_config(2, 2, kValidationBatchSteps);
+
+        // Tunable-coupler dump mode: build the N-qubit/M-coupler all-to-all model and
+        // dump its propagator for verification against the QuTiP reference. Gated
+        // behind -dump_tc; never touches the trusted chain validation path.
+        PetscBool dump_tc = PETSC_FALSE;
+        PetscCallAbort(
+            PETSC_COMM_SELF,
+            PetscOptionsGetBool(nullptr, nullptr, "-dump_tc", &dump_tc, nullptr));
+        if (dump_tc == PETSC_TRUE) {
+            PetscInt tc_nq = 2;
+            PetscInt tc_nc = 1;
+            PetscInt tc_cd = 3;
+            PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetInt(
+                nullptr, nullptr, "-tc_num_qubits", &tc_nq, nullptr));
+            PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetInt(
+                nullptr, nullptr, "-tc_num_couplers", &tc_nc, nullptr));
+            PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetInt(
+                nullptr, nullptr, "-dump_cutoff_dim", &tc_cd, nullptr));
+
+            PetscInt dump_steps = 0;
+            PetscBool steps_set = PETSC_FALSE;
+            PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetInt(
+                nullptr, nullptr, "-dump_steps", &dump_steps, &steps_set));
+            const Index steps =
+                (steps_set == PETSC_TRUE && dump_steps > 0)
+                    ? static_cast<Index>(dump_steps)
+                    : kValidationBatchSteps;
+
+            const TunableCouplerBenchmarkConfig tc_config =
+                make_tunable_coupler_benchmark_config(
+                    static_cast<Index>(tc_nq),
+                    static_cast<Index>(tc_nc),
+                    static_cast<Index>(tc_cd),
+                    steps);
+
+            char tc_batch_buf[256] = {};
+            PetscBool tc_batch_set = PETSC_FALSE;
+            PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetString(
+                nullptr, nullptr, "-dump_batch_sizes",
+                tc_batch_buf, sizeof(tc_batch_buf), &tc_batch_set));
+
+            if (tc_batch_set == PETSC_TRUE) {
+                tc_dump_batch_sweep(tc_config, parse_batch_sizes_csv(tc_batch_buf));
+            } else {
+                PetscBool dump_cpu = PETSC_FALSE;
+                PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetBool(
+                    nullptr, nullptr, "-dump_propagator_cpu", &dump_cpu, nullptr));
+                tc_dump_full_propagator(tc_config, dump_cpu == PETSC_TRUE);
+            }
+            PetscFinalize();
+            return 0;
+        }
 
         // Full-propagator dump mode: evolve all 16 basis density matrices and emit
         // each final state for entry-by-entry comparison with the QuTiP reference.

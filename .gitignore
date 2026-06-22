@@ -25,6 +25,8 @@ __pycache__/
 /propcheck/*_b8_*.txt
 /propcheck/*_qutip_full.npy
 /propcheck/*_run.log
+/propcheck/*.err
+/propcheck/*_qutip.log
 /cpp_propagator_dump.txt
 /cpp_dump_*.txt
 /cpp_dump.err
