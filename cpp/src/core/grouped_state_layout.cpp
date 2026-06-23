@@ -70,7 +70,8 @@ Index flatten_subset(
 
 GroupedStateLayout make_grouped_state_layout(
     const std::vector<Index>& target_sites,
-    const std::vector<Index>& local_dims)
+    const std::vector<Index>& local_dims,
+    bool build_host_tables)
 {
     GroupedStateLayout layout;
     layout.target_sites = target_sites;
@@ -90,6 +91,12 @@ GroupedStateLayout make_grouped_state_layout(
 
     layout.grouped_size =
         target_dim * complement_dim * target_dim * complement_dim;
+
+    if (!build_host_tables) {
+        // GPU target path: the CUDA descriptor handles the relayout arithmetically;
+        // skip the O(D^2) host permutation tables entirely.
+        return layout;
+    }
 
     layout.flat_density_to_grouped.resize(layout.hilbert_dim * layout.hilbert_dim);
     layout.grouped_to_flat_density.resize(layout.grouped_size);

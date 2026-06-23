@@ -408,8 +408,11 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
             CachedGroupedLayoutEntry entry;
             try {
                 entry.sites = sites;
+                // GPU path: relayout is done via the CUDA descriptor, so skip the
+                // O(D^2) host permutation tables (saves ~25 GB host + startup cost at 4Q4C).
                 entry.grouped_layout =
-                    make_grouped_state_layout(sites, solver.model.local_dims);
+                    make_grouped_state_layout(
+                        sites, solver.model.local_dims, /*build_host_tables=*/false);
                 entry.grouped_bytes =
                     static_cast<std::size_t>(batch_size) *
                     static_cast<std::size_t>(entry.grouped_layout.grouped_size) *
@@ -626,7 +629,8 @@ PetscErrorCode create_cuda_batch_execution_context(
     PetscCall(VecSet(ctx.x, 0.0));
 
     GroupedStateLayout grouped_layout =
-        make_grouped_state_layout(seed_target_sites, solver.model.local_dims);
+        make_grouped_state_layout(
+            seed_target_sites, solver.model.local_dims, /*build_host_tables=*/false);
 
     CudaGroupedStateLayout cuda_grouped_layout{};
     if (!create_cuda_grouped_state_layout(grouped_layout, cuda_grouped_layout)) {
