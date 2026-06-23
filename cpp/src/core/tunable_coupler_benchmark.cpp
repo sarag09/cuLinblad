@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -329,6 +330,102 @@ std::vector<Complex> evolve_single_state_cpu_ts(
 // CUDA batched execution (fixed-step TSRK4, mirrors the validated chain path).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Custom fixed-step integrators that bypass PETSc TS and drive the matrix-free
+// Liouvillian L(t) directly. Selected via -tc_integrator: 0 = PETSc TSRK4
+// (default), 1 = custom classic RK4 (3 extra registers, bit-identical to TSRK4),
+// 2 = Taylor exp-midpoint (exponential integrator, exp(dt L(t+dt/2)) per step).
+// The custom path is the stepping foundation for the multi-GPU work and lets us
+// benchmark memory (register count) + the exponential integrator head-to-head.
+// ---------------------------------------------------------------------------
+enum class CustomIntegrator { TsRk4 = 0, Rk4Custom = 1, ExpmvMidpoint = 2 };
+
+// f = L(t) x via the full-model matrix-free Liouvillian (TS arg unused -> nullptr).
+inline void apply_liouvillian(
+    CudaBatchExecutionContext& ctx, double t, Vec in, Vec out, long& matvecs)
+{
+    PetscCallAbort(
+        PETSC_COMM_SELF,
+        ts_rhs_function_cuda_full_model_liouvillian(
+            nullptr, static_cast<PetscReal>(t), in, out, &ctx.rhs_ctx));
+    ++matvecs;
+}
+
+void evolve_batch_custom(
+    CudaBatchExecutionContext& ctx,
+    double t0,
+    double tfinal,
+    Index num_steps,
+    CustomIntegrator kind,
+    int expmv_order)
+{
+    Vec y = ctx.x;  // evolved in place
+    Vec a = nullptr;
+    Vec b = nullptr;
+    Vec c = nullptr;
+    PetscCallAbort(PETSC_COMM_SELF, VecDuplicate(y, &a));
+    PetscCallAbort(PETSC_COMM_SELF, VecDuplicate(y, &b));
+    PetscCallAbort(PETSC_COMM_SELF, VecDuplicate(y, &c));
+
+    const double dt = (tfinal - t0) / static_cast<double>(num_steps);
+    long matvecs = 0;
+    const auto wall0 = std::chrono::steady_clock::now();
+
+    for (Index step = 0; step < num_steps; ++step) {
+        const double t = t0 + static_cast<double>(step) * dt;
+        if (kind == CustomIntegrator::Rk4Custom) {
+            // Classic RK4: a = weighted accumulator, b = stage input, c = stage k.
+            apply_liouvillian(ctx, t, y, c, matvecs);
+            PetscCallAbort(PETSC_COMM_SELF, VecCopy(c, a));                 // a = k1
+            PetscCallAbort(PETSC_COMM_SELF, VecWAXPY(b, dt * 0.5, c, y));   // b = y + dt/2 k1
+            apply_liouvillian(ctx, t + dt * 0.5, b, c, matvecs);
+            PetscCallAbort(PETSC_COMM_SELF, VecAXPY(a, 2.0, c));            // a += 2 k2
+            PetscCallAbort(PETSC_COMM_SELF, VecWAXPY(b, dt * 0.5, c, y));   // b = y + dt/2 k2
+            apply_liouvillian(ctx, t + dt * 0.5, b, c, matvecs);
+            PetscCallAbort(PETSC_COMM_SELF, VecAXPY(a, 2.0, c));            // a += 2 k3
+            PetscCallAbort(PETSC_COMM_SELF, VecWAXPY(b, dt, c, y));         // b = y + dt k3
+            apply_liouvillian(ctx, t + dt, b, c, matvecs);
+            PetscCallAbort(PETSC_COMM_SELF, VecAXPY(a, 1.0, c));            // a += k4
+            PetscCallAbort(PETSC_COMM_SELF, VecAXPY(y, dt / 6.0, a));       // y += dt/6 a
+        } else {
+            // Taylor exp-midpoint: y <- exp(dt L(t+dt/2)) y, L frozen at the midpoint.
+            // a = running result, b = current Taylor term, c = L applied to b.
+            const double tm = t + dt * 0.5;
+            PetscCallAbort(PETSC_COMM_SELF, VecCopy(y, a));  // result = y
+            PetscCallAbort(PETSC_COMM_SELF, VecCopy(y, b));  // term   = y
+            for (int k = 1; k <= expmv_order; ++k) {
+                apply_liouvillian(ctx, tm, b, c, matvecs);            // c = L term
+                PetscCallAbort(PETSC_COMM_SELF, VecCopy(c, b));
+                PetscCallAbort(
+                    PETSC_COMM_SELF, VecScale(b, dt / static_cast<double>(k)));  // term = dt/k L term
+                PetscCallAbort(PETSC_COMM_SELF, VecAXPY(a, 1.0, b));  // result += term
+                PetscReal term_norm = 0.0;
+                PetscReal res_norm = 0.0;
+                PetscCallAbort(PETSC_COMM_SELF, VecNorm(b, NORM_2, &term_norm));
+                PetscCallAbort(PETSC_COMM_SELF, VecNorm(a, NORM_2, &res_norm));
+                if (term_norm <= 1.0e-15 * res_norm) {
+                    break;
+                }
+            }
+            PetscCallAbort(PETSC_COMM_SELF, VecCopy(a, y));  // y = result
+        }
+    }
+
+    const auto wall1 = std::chrono::steady_clock::now();
+    const double wall_ms =
+        std::chrono::duration<double, std::milli>(wall1 - wall0).count();
+    std::fprintf(
+        stderr,
+        "INTEGRATOR_BENCH kind=%d steps=%ld matvecs=%ld matvecs_per_step=%.2f "
+        "wall_ms=%.1f extra_registers=3\n",
+        static_cast<int>(kind), static_cast<long>(num_steps), matvecs,
+        static_cast<double>(matvecs) / static_cast<double>(num_steps), wall_ms);
+
+    PetscCallAbort(PETSC_COMM_SELF, VecDestroy(&a));
+    PetscCallAbort(PETSC_COMM_SELF, VecDestroy(&b));
+    PetscCallAbort(PETSC_COMM_SELF, VecDestroy(&c));
+}
+
 std::vector<std::vector<Complex>> evolve_state_batch_cuda_ts(
     const Solver& solver,
     const std::vector<std::vector<Complex>>& initial_states,
@@ -368,12 +465,26 @@ std::vector<std::vector<Complex>> evolve_state_batch_cuda_ts(
 
     const double dt_initial = (tfinal - t0) / static_cast<double>(num_steps);
 
-    PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ctx.ts, t0));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ctx.ts, 0));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ctx.ts, dt_initial));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ctx.ts, static_cast<PetscInt>(num_steps)));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxTime(ctx.ts, tfinal));
-    PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
+    PetscInt integrator = 0;
+    PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetInt(
+        nullptr, nullptr, "-tc_integrator", &integrator, nullptr));
+    if (integrator == 0) {
+        PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ctx.ts, t0));
+        PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ctx.ts, 0));
+        PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ctx.ts, dt_initial));
+        PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ctx.ts, static_cast<PetscInt>(num_steps)));
+        PetscCallAbort(PETSC_COMM_SELF, TSSetMaxTime(ctx.ts, tfinal));
+        PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
+    } else {
+        PetscInt expmv_order = 24;
+        PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetInt(
+            nullptr, nullptr, "-tc_expmv_order", &expmv_order, nullptr));
+        evolve_batch_custom(
+            ctx, t0, tfinal, num_steps,
+            (integrator == 1) ? CustomIntegrator::Rk4Custom
+                              : CustomIntegrator::ExpmvMidpoint,
+            static_cast<int>(expmv_order));
+    }
 
     PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
     std::vector<std::vector<Complex>> final_states(
