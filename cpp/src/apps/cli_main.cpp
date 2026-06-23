@@ -607,6 +607,9 @@ int main(int argc, char** argv)
             PetscBool tc_comp = PETSC_FALSE;
             PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetBool(
                 nullptr, nullptr, "-tc_computational", &tc_comp, nullptr));
+            PetscBool tc_rotating = PETSC_FALSE;
+            PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetBool(
+                nullptr, nullptr, "-tc_rotating_frame", &tc_rotating, nullptr));
 
             TunableCouplerBenchmarkConfig tc_config =
                 make_tunable_coupler_benchmark_config(
@@ -615,6 +618,7 @@ int main(int argc, char** argv)
                     static_cast<Index>(tc_cd),
                     steps,
                     tc_drives == PETSC_TRUE);
+            tc_config.enable_rotating_frame = (tc_rotating == PETSC_TRUE);
 
             char tc_batch_buf[256] = {};
             PetscBool tc_batch_set = PETSC_FALSE;

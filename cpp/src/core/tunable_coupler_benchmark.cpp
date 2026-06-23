@@ -113,6 +113,76 @@ std::vector<Complex> make_two_site_full_coupling_operator(Index d)
     return op;
 }
 
+// Rotating-frame decomposition of the two-site full capacitive coupling.
+// In the frame H_R = sum omega_i n_i, the operator op = (a0^dag a1 + a0 a1^dag)
+//   - (a0^dag a1^dag + a0 a1) rotates to
+//   cos(D t) H1 + sin(D t) H2 - cos(S t) H3 - sin(S t) H4,
+// where D = omega0 - omega1 (detuning), S = omega0 + omega1 (sum), and
+//   H1 = a0^dag a1 + a0 a1^dag                 (co-rotating, real symmetric)
+//   H2 = i (a0^dag a1 - a0 a1^dag)             (co-rotating, Hermitian)
+//   H3 = a0^dag a1^dag + a0 a1                 (counter-rotating, real symmetric)
+//   H4 = i (a0^dag a1^dag - a0 a1)             (counter-rotating, Hermitian)
+// Each is a Hermitian d*d x d*d operator; the four are applied with real, time-
+// dependent coefficients so that op_rotated(0) = H1 - H3 = op (matches lab frame).
+struct TwoSiteRotatedCoupling {
+    std::vector<Complex> h1;  // a0^dag a1 + a0 a1^dag
+    std::vector<Complex> h2;  // i (a0^dag a1 - a0 a1^dag)
+    std::vector<Complex> h3;  // a0^dag a1^dag + a0 a1
+    std::vector<Complex> h4;  // i (a0^dag a1^dag - a0 a1)
+};
+
+TwoSiteRotatedCoupling make_two_site_rotated_coupling_operators(Index d)
+{
+    const Index dd = d * d;
+    TwoSiteRotatedCoupling r;
+    r.h1.assign(dd * dd, Complex{0.0, 0.0});
+    r.h2.assign(dd * dd, Complex{0.0, 0.0});
+    r.h3.assign(dd * dd, Complex{0.0, 0.0});
+    r.h4.assign(dd * dd, Complex{0.0, 0.0});
+
+    auto flatten = [d](Index left, Index right) { return left * d + right; };
+
+    for (Index n0 = 0; n0 < d; ++n0) {
+        for (Index n1 = 0; n1 < d; ++n1) {
+            const Index col = flatten(n0, n1);
+
+            // M1 = a0^dag a1 : n0->n0+1, n1->n1-1
+            if (n0 + 1 < d && n1 > 0) {
+                const Index row = flatten(n0 + 1, n1 - 1);
+                const double c = std::sqrt(static_cast<double>(n0 + 1)) *
+                                 std::sqrt(static_cast<double>(n1));
+                r.h1[row * dd + col] += Complex{c, 0.0};   // H1 += M1
+                r.h2[row * dd + col] += Complex{0.0, c};   // H2 += i*M1
+            }
+            // M2 = a0 a1^dag : n0->n0-1, n1->n1+1  (= M1^dag)
+            if (n0 > 0 && n1 + 1 < d) {
+                const Index row = flatten(n0 - 1, n1 + 1);
+                const double c = std::sqrt(static_cast<double>(n0)) *
+                                 std::sqrt(static_cast<double>(n1 + 1));
+                r.h1[row * dd + col] += Complex{c, 0.0};   // H1 += M2
+                r.h2[row * dd + col] += Complex{0.0, -c};  // H2 += -i*M2
+            }
+            // M3 = a0^dag a1^dag : n0->n0+1, n1->n1+1
+            if (n0 + 1 < d && n1 + 1 < d) {
+                const Index row = flatten(n0 + 1, n1 + 1);
+                const double c = std::sqrt(static_cast<double>(n0 + 1)) *
+                                 std::sqrt(static_cast<double>(n1 + 1));
+                r.h3[row * dd + col] += Complex{c, 0.0};   // H3 += M3
+                r.h4[row * dd + col] += Complex{0.0, c};   // H4 += i*M3
+            }
+            // M4 = a0 a1 : n0->n0-1, n1->n1-1  (= M3^dag)
+            if (n0 > 0 && n1 > 0) {
+                const Index row = flatten(n0 - 1, n1 - 1);
+                const double c = std::sqrt(static_cast<double>(n0)) *
+                                 std::sqrt(static_cast<double>(n1));
+                r.h3[row * dd + col] += Complex{c, 0.0};   // H3 += M4
+                r.h4[row * dd + col] += Complex{0.0, -c};  // H4 += -i*M4
+            }
+        }
+    }
+    return r;
+}
+
 // ---------------------------------------------------------------------------
 // CPU execution (fixed-step TSRK4, mirrors the validated chain benchmark path).
 // ---------------------------------------------------------------------------
@@ -378,15 +448,44 @@ Model build_tunable_coupler_model(const TunableCouplerBenchmarkConfig& config)
     std::vector<OperatorTerm> dissipator_terms;
     std::vector<TimeDependentTerm> time_dependent_terms;  // static model: empty
 
+    // Drive helpers, shared by the rotating-frame couplings and the lab-frame drive
+    // terms: the single-sided sine frequency modulation and the set of driven sites.
+    constexpr double kPi = 3.14159265358979323846;
+    const double drive_A = config.drive_amplitude;
+    const double drive_T =
+        (config.drive_t_gate > 0.0) ? config.drive_t_gate : config.tfinal;
+    std::vector<bool> driven(n_elem, false);
+    if (config.enable_drives) {
+        for (Index s : config.driven_sites) {
+            if (s >= n_elem) {
+                throw std::invalid_argument(
+                    "build_tunable_coupler_model: driven site out of range");
+            }
+            driven[s] = true;
+        }
+    }
+    // omega_k(t) = omega_k - A*sin(pi t/T); delta_omega(t) is the deviation.
+    auto delta_omega = [drive_A, drive_T, kPi](double t) -> double {
+        if (t <= 0.0 || t >= drive_T) {
+            return 0.0;
+        }
+        return -drive_A * std::sin(kPi * t / drive_T);
+    };
+
     // Per-element bare Hamiltonian + dissipators.
     for (Index i = 0; i < n_elem; ++i) {
-        std::vector<Complex> omega_term = n_local;
-        for (Complex& x : omega_term) {
-            x *= config.omega[i];
+        // omega_i * n_i. In the rotating frame H_R = sum_i omega_i n_i this term is
+        // exactly removed (the fast bare oscillation); only the slow anharmonicity and
+        // drive modulation survive on the diagonal.
+        if (!config.enable_rotating_frame) {
+            std::vector<Complex> omega_term = n_local;
+            for (Complex& x : omega_term) {
+                x *= config.omega[i];
+            }
+            hamiltonian_terms.push_back(OperatorTerm{
+                TermKind::Hamiltonian, "omega_n_" + std::to_string(i),
+                {i}, omega_term, d, d});
         }
-        hamiltonian_terms.push_back(OperatorTerm{
-            TermKind::Hamiltonian, "omega_n_" + std::to_string(i),
-            {i}, omega_term, d, d});
 
         std::vector<Complex> alpha_term = n2_shifted_local;
         for (Complex& x : alpha_term) {
@@ -415,76 +514,107 @@ Model build_tunable_coupler_model(const TunableCouplerBenchmarkConfig& config)
 
     // ALL-TO-ALL pairwise capacitive coupling (uniform g for the benchmark).
     const Index dd = d * d;
-    for (Index i = 0; i < n_elem; ++i) {
-        for (Index j = i + 1; j < n_elem; ++j) {
-            std::vector<Complex> coupling_term = coupling_local;
-            for (Complex& x : coupling_term) {
-                x *= config.g;
+    if (config.enable_rotating_frame) {
+        // Rotating frame: every coupling is time-dependent. The full strength
+        // g_ij(t) = g*sqrt(w_i(t)w_j(t)/(w_i w_j)) multiplies the rotated operator
+        //   cos(D t)H1 + sin(D t)H2 - cos(S t)H3 - sin(S t)H4,
+        // with D = w_i - w_j (detuning, slow) and S = w_i + w_j (sum frequency, fast
+        // but with tiny g-sized amplitude). At t=0 this reduces to g*(H1 - H3) = g*op.
+        const TwoSiteRotatedCoupling rot =
+            make_two_site_rotated_coupling_operators(d);
+        for (Index i = 0; i < n_elem; ++i) {
+            for (Index j = i + 1; j < n_elem; ++j) {
+                const double wi0 = config.omega[i];
+                const double wj0 = config.omega[j];
+                const double detuning = wi0 - wj0;
+                const double sum_freq = wi0 + wj0;
+                const bool di = driven[i];
+                const bool dj = driven[j];
+                const double g0 = config.g;
+                auto g_of_t =
+                    [wi0, wj0, di, dj, g0, delta_omega](double t) -> double {
+                        const double wi = wi0 + (di ? delta_omega(t) : 0.0);
+                        const double wj = wj0 + (dj ? delta_omega(t) : 0.0);
+                        return g0 * std::sqrt((wi * wj) / (wi0 * wj0));
+                    };
+                const std::string tag =
+                    std::to_string(i) + "_" + std::to_string(j);
+                time_dependent_terms.push_back(TimeDependentTerm{
+                    "rf_coup_h1_" + tag, {i, j}, rot.h1, dd, dd,
+                    [g_of_t, detuning](double t) {
+                        return g_of_t(t) * std::cos(detuning * t);
+                    }});
+                time_dependent_terms.push_back(TimeDependentTerm{
+                    "rf_coup_h2_" + tag, {i, j}, rot.h2, dd, dd,
+                    [g_of_t, detuning](double t) {
+                        return g_of_t(t) * std::sin(detuning * t);
+                    }});
+                time_dependent_terms.push_back(TimeDependentTerm{
+                    "rf_coup_h3_" + tag, {i, j}, rot.h3, dd, dd,
+                    [g_of_t, sum_freq](double t) {
+                        return -g_of_t(t) * std::cos(sum_freq * t);
+                    }});
+                time_dependent_terms.push_back(TimeDependentTerm{
+                    "rf_coup_h4_" + tag, {i, j}, rot.h4, dd, dd,
+                    [g_of_t, sum_freq](double t) {
+                        return -g_of_t(t) * std::sin(sum_freq * t);
+                    }});
             }
-            hamiltonian_terms.push_back(OperatorTerm{
-                TermKind::Hamiltonian,
-                "coupling_" + std::to_string(i) + "_" + std::to_string(j),
-                {i, j}, coupling_term, dd, dd});
+        }
+    } else {
+        for (Index i = 0; i < n_elem; ++i) {
+            for (Index j = i + 1; j < n_elem; ++j) {
+                std::vector<Complex> coupling_term = coupling_local;
+                for (Complex& x : coupling_term) {
+                    x *= config.g;
+                }
+                hamiltonian_terms.push_back(OperatorTerm{
+                    TermKind::Hamiltonian,
+                    "coupling_" + std::to_string(i) + "_" + std::to_string(j),
+                    {i, j}, coupling_term, dd, dd});
+            }
         }
     }
 
     // Time-dependent gate drives: frequency modulation of selected elements.
     if (config.enable_drives) {
-        constexpr double kPi = 3.14159265358979323846;
-        const double A = config.drive_amplitude;
-        const double T = (config.drive_t_gate > 0.0) ? config.drive_t_gate : config.tfinal;
-
-        std::vector<bool> driven(n_elem, false);
-        for (Index s : config.driven_sites) {
-            if (s >= n_elem) {
-                throw std::invalid_argument(
-                    "build_tunable_coupler_model: driven site out of range");
-            }
-            driven[s] = true;
-        }
-
-        // Frequency deviation of a driven element: omega_k(t) = omega_k - A*sin(pi t/T).
-        auto delta_omega = [A, T, kPi](double t) -> double {
-            if (t <= 0.0 || t >= T) {
-                return 0.0;
-            }
-            return -A * std::sin(kPi * t / T);
-        };
-
-        // (1) Diagonal frequency-modulation term Delta_omega(t) * n on each driven element.
+        // (1) Diagonal frequency-modulation Delta_omega(t)*n on each driven element.
+        //     Identical in lab and rotating frames (diagonal => commutes with H_R).
         for (Index k = 0; k < n_elem; ++k) {
             if (!driven[k]) {
                 continue;
             }
-            TimeScalarFunction coeff = [delta_omega](double t) { return delta_omega(t); };
+            TimeScalarFunction coeff =
+                [delta_omega](double t) { return delta_omega(t); };
             time_dependent_terms.push_back(TimeDependentTerm{
                 "drive_omega_" + std::to_string(k), {k}, n_local, d, d, coeff});
         }
 
-        // (2) Induced coupling modulation on every edge incident to a driven element:
-        //     g_lm(t) = g * sqrt(omega_l(t) omega_m(t) / (omega_l omega_m)); the static
-        //     part g is already in the Hamiltonian, so the time-dependent coefficient is
-        //     the delta g_lm(t) - g.
-        for (Index i = 0; i < n_elem; ++i) {
-            for (Index j = i + 1; j < n_elem; ++j) {
-                if (!driven[i] && !driven[j]) {
-                    continue;
+        // (2) Induced coupling modulation g_lm(t) - g on every edge incident to a
+        //     driven element. LAB FRAME ONLY: the rotating-frame couplings already
+        //     carry the full g_ij(t) in their time-dependent coefficients.
+        if (!config.enable_rotating_frame) {
+            for (Index i = 0; i < n_elem; ++i) {
+                for (Index j = i + 1; j < n_elem; ++j) {
+                    if (!driven[i] && !driven[j]) {
+                        continue;
+                    }
+                    const double wi0 = config.omega[i];
+                    const double wj0 = config.omega[j];
+                    const bool di = driven[i];
+                    const bool dj = driven[j];
+                    const double g_idle = config.g;
+                    TimeScalarFunction coeff =
+                        [wi0, wj0, di, dj, g_idle, delta_omega](double t) -> double {
+                            const double wi = wi0 + (di ? delta_omega(t) : 0.0);
+                            const double wj = wj0 + (dj ? delta_omega(t) : 0.0);
+                            const double ratio = (wi * wj) / (wi0 * wj0);
+                            return g_idle * (std::sqrt(ratio) - 1.0);
+                        };
+                    time_dependent_terms.push_back(TimeDependentTerm{
+                        "drive_g_" + std::to_string(i) + "_" + std::to_string(j),
+                        {i, j}, coupling_local, dd, dd, coeff});
                 }
-                const double wi0 = config.omega[i];
-                const double wj0 = config.omega[j];
-                const bool di = driven[i];
-                const bool dj = driven[j];
-                const double g_idle = config.g;
-                TimeScalarFunction coeff =
-                    [wi0, wj0, di, dj, g_idle, delta_omega](double t) -> double {
-                        const double wi = wi0 + (di ? delta_omega(t) : 0.0);
-                        const double wj = wj0 + (dj ? delta_omega(t) : 0.0);
-                        const double ratio = (wi * wj) / (wi0 * wj0);
-                        return g_idle * (std::sqrt(ratio) - 1.0);
-                    };
-                time_dependent_terms.push_back(TimeDependentTerm{
-                    "drive_g_" + std::to_string(i) + "_" + std::to_string(j),
-                    {i, j}, coupling_local, dd, dd, coeff});
             }
         }
     }

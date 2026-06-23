@@ -56,6 +56,16 @@ struct TunableCouplerBenchmarkConfig {
     double drive_amplitude = 0.0;   // A
     double drive_t_gate = 0.0;      // T_gate (<=0 means use tfinal)
 
+    // Evolve in the rotating frame of the bare idle frequencies H_R = sum_i omega_i n_i.
+    // This is an EXACT time-dependent unitary basis change (no approximation): the fast
+    // bare oscillation omega_i*n_i is removed (only the slow anharmonicity, drive
+    // modulation, and detuning/sum-frequency-modulated couplings remain), so the
+    // fixed-step RK4 integrator reaches a given accuracy in far fewer steps. The lab-frame
+    // result is recovered by the diagonal phase rho_lab(t)_kl = exp(-i(E_k-E_l)t) rho_R_kl,
+    // E_k = sum_i omega_i * occ_i(k). Dissipators are frame-invariant (the rotation phase
+    // cancels in L rho L^dag and L^dag L). The reference frequencies are config.omega.
+    bool enable_rotating_frame = false;
+
     BenchmarkStateSelection state_selection;
     Index batched_num_steps = 500;
 };
