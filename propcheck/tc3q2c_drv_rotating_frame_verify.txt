@@ -1,0 +1,22 @@
+################################################################################
+ROTATING-FRAME VERIFY  tc3q2c_drv  (NQ=3 NC=2 d=3 -> N=5, D=243, t_f=40)
+rho_R -> rho_lab via exp(-i(E_k-E_l)t_f), then entry-by-entry vs lab-frame QuTiP.
+################################################################################
+
+=== rotating frame @ 250 steps (dt=0.16) : back-transformed vs QuTiP ===
+  max|rho_lab - QuTiP| = 1.602e-04
+
+=== rotating frame @ 500 steps (dt=0.08) : back-transformed vs QuTiP ===
+  max|rho_lab - QuTiP| = 5.631e-06
+
+=== rotating frame @ 1000 steps (dt=0.04) : back-transformed vs QuTiP ===
+  max|rho_lab - QuTiP| = 1.912e-07
+
+=== invariants on lab-recovered state @ 1000 steps ===
+  trace preservation worst |Tr - delta| = 3.331e-15
+  Hermiticity        worst |U_ab - U_ba^dag| = 3.103e-17
+
+================================================================================
+step-reduction gain @ 1000 steps: lab err 2.002e-03 / rot err 1.912e-07 -> ~10.12x fewer steps
+=> ROTATING FRAME OK (matches QuTiP; see gain above)
+================================================================================
