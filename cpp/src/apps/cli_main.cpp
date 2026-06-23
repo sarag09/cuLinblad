@@ -423,7 +423,8 @@ culindblad::TunableCouplerBenchmarkConfig make_tunable_coupler_benchmark_config(
     culindblad::Index num_qubits,
     culindblad::Index num_couplers,
     culindblad::Index cutoff_dim,
-    culindblad::Index batched_num_steps)
+    culindblad::Index batched_num_steps,
+    bool enable_drives)
 {
     culindblad::TunableCouplerBenchmarkConfig config{};
     config.num_qubits = num_qubits;
@@ -443,6 +444,23 @@ culindblad::TunableCouplerBenchmarkConfig make_tunable_coupler_benchmark_config(
     config.t0 = 0.0;
     config.tfinal = 40.0;
     config.batched_num_steps = batched_num_steps;
+
+    // Drive the first num_qubits/2 qubits (sites 0..) and the first num_couplers/2
+    // couplers (sites num_qubits..), i.e. ~half the elements. For 4Q4C this is
+    // Q1,Q2,C1,C2; for 2Q1C just Q1.
+    if (enable_drives) {
+        config.enable_drives = true;
+        config.drive_amplitude = 0.5;
+        config.drive_t_gate = config.tfinal;
+        const culindblad::Index nq_drive = num_qubits / 2;
+        const culindblad::Index nc_drive = num_couplers / 2;
+        for (culindblad::Index q = 0; q < nq_drive; ++q) {
+            config.driven_sites.push_back(q);                  // qubit site q
+        }
+        for (culindblad::Index c = 0; c < nc_drive; ++c) {
+            config.driven_sites.push_back(num_qubits + c);     // coupler site
+        }
+    }
     return config;
 }
 
@@ -476,15 +494,13 @@ void tc_dump_one_propagator(
               << " batch_size=" << batch_size << "\n";
 }
 
-void tc_dump_full_propagator(
-    const culindblad::TunableCouplerBenchmarkConfig& base_config,
+// Dump the states selected by config.state_selection (full propagator if
+// evolve_all_states, otherwise the listed indices, e.g. computational states).
+void tc_dump_states(
+    const culindblad::TunableCouplerBenchmarkConfig& config,
     bool run_cpu)
 {
     using namespace culindblad;
-    TunableCouplerBenchmarkConfig config = base_config;
-    config.state_selection.evolve_all_states = true;
-    config.state_selection.selected_state_indices.clear();
-
     const Model model = build_tunable_coupler_model(config);
     const Solver solver = make_solver(model);
 
@@ -585,12 +601,20 @@ int main(int argc, char** argv)
                     ? static_cast<Index>(dump_steps)
                     : kValidationBatchSteps;
 
-            const TunableCouplerBenchmarkConfig tc_config =
+            PetscBool tc_drives = PETSC_FALSE;
+            PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetBool(
+                nullptr, nullptr, "-tc_drives", &tc_drives, nullptr));
+            PetscBool tc_comp = PETSC_FALSE;
+            PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetBool(
+                nullptr, nullptr, "-tc_computational", &tc_comp, nullptr));
+
+            TunableCouplerBenchmarkConfig tc_config =
                 make_tunable_coupler_benchmark_config(
                     static_cast<Index>(tc_nq),
                     static_cast<Index>(tc_nc),
                     static_cast<Index>(tc_cd),
-                    steps);
+                    steps,
+                    tc_drives == PETSC_TRUE);
 
             char tc_batch_buf[256] = {};
             PetscBool tc_batch_set = PETSC_FALSE;
@@ -598,13 +622,27 @@ int main(int argc, char** argv)
                 nullptr, nullptr, "-dump_batch_sizes",
                 tc_batch_buf, sizeof(tc_batch_buf), &tc_batch_set));
 
-            if (tc_batch_set == PETSC_TRUE) {
+            // Computational-subspace states (qubits in {0,1}, couplers in |0>) vs the
+            // full propagator (all density_dim basis states).
+            if (tc_comp == PETSC_TRUE) {
+                tc_config.state_selection.evolve_all_states = false;
+                tc_config.state_selection.selected_state_indices =
+                    tunable_coupler_computational_density_indices(
+                        static_cast<Index>(tc_nq),
+                        static_cast<Index>(tc_nc),
+                        static_cast<Index>(tc_cd));
+            } else {
+                tc_config.state_selection.evolve_all_states = true;
+                tc_config.state_selection.selected_state_indices.clear();
+            }
+
+            if (tc_batch_set == PETSC_TRUE && tc_comp != PETSC_TRUE) {
                 tc_dump_batch_sweep(tc_config, parse_batch_sizes_csv(tc_batch_buf));
             } else {
                 PetscBool dump_cpu = PETSC_FALSE;
                 PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetBool(
                     nullptr, nullptr, "-dump_propagator_cpu", &dump_cpu, nullptr));
-                tc_dump_full_propagator(tc_config, dump_cpu == PETSC_TRUE);
+                tc_dump_states(tc_config, dump_cpu == PETSC_TRUE);
             }
             PetscFinalize();
             return 0;

@@ -13,6 +13,8 @@
 #include "culindblad/batch_evolution.hpp"
 #include "culindblad/petsc_cuda_ts_rhs.hpp"
 #include "culindblad/state_buffer.hpp"
+#include "culindblad/time_dependence.hpp"
+#include "culindblad/time_dependent_term.hpp"
 
 namespace culindblad {
 
@@ -426,8 +428,109 @@ Model build_tunable_coupler_model(const TunableCouplerBenchmarkConfig& config)
         }
     }
 
+    // Time-dependent gate drives: frequency modulation of selected elements.
+    if (config.enable_drives) {
+        constexpr double kPi = 3.14159265358979323846;
+        const double A = config.drive_amplitude;
+        const double T = (config.drive_t_gate > 0.0) ? config.drive_t_gate : config.tfinal;
+
+        std::vector<bool> driven(n_elem, false);
+        for (Index s : config.driven_sites) {
+            if (s >= n_elem) {
+                throw std::invalid_argument(
+                    "build_tunable_coupler_model: driven site out of range");
+            }
+            driven[s] = true;
+        }
+
+        // Frequency deviation of a driven element: omega_k(t) = omega_k - A*sin(pi t/T).
+        auto delta_omega = [A, T, kPi](double t) -> double {
+            if (t <= 0.0 || t >= T) {
+                return 0.0;
+            }
+            return -A * std::sin(kPi * t / T);
+        };
+
+        // (1) Diagonal frequency-modulation term Delta_omega(t) * n on each driven element.
+        for (Index k = 0; k < n_elem; ++k) {
+            if (!driven[k]) {
+                continue;
+            }
+            TimeScalarFunction coeff = [delta_omega](double t) { return delta_omega(t); };
+            time_dependent_terms.push_back(TimeDependentTerm{
+                "drive_omega_" + std::to_string(k), {k}, n_local, d, d, coeff});
+        }
+
+        // (2) Induced coupling modulation on every edge incident to a driven element:
+        //     g_lm(t) = g * sqrt(omega_l(t) omega_m(t) / (omega_l omega_m)); the static
+        //     part g is already in the Hamiltonian, so the time-dependent coefficient is
+        //     the delta g_lm(t) - g.
+        for (Index i = 0; i < n_elem; ++i) {
+            for (Index j = i + 1; j < n_elem; ++j) {
+                if (!driven[i] && !driven[j]) {
+                    continue;
+                }
+                const double wi0 = config.omega[i];
+                const double wj0 = config.omega[j];
+                const bool di = driven[i];
+                const bool dj = driven[j];
+                const double g_idle = config.g;
+                TimeScalarFunction coeff =
+                    [wi0, wj0, di, dj, g_idle, delta_omega](double t) -> double {
+                        const double wi = wi0 + (di ? delta_omega(t) : 0.0);
+                        const double wj = wj0 + (dj ? delta_omega(t) : 0.0);
+                        const double ratio = (wi * wj) / (wi0 * wj0);
+                        return g_idle * (std::sqrt(ratio) - 1.0);
+                    };
+                time_dependent_terms.push_back(TimeDependentTerm{
+                    "drive_g_" + std::to_string(i) + "_" + std::to_string(j),
+                    {i, j}, coupling_local, dd, dd, coeff});
+            }
+        }
+    }
+
     return Model{
         local_dims, hamiltonian_terms, dissipator_terms, time_dependent_terms};
+}
+
+std::vector<Index> tunable_coupler_computational_density_indices(
+    Index num_qubits, Index num_couplers, Index cutoff_dim)
+{
+    const Index n_elem = num_qubits + num_couplers;
+    const Index d = cutoff_dim;
+
+    Index D = 1;
+    for (Index i = 0; i < n_elem; ++i) {
+        D *= d;
+    }
+
+    // Site-0-major strides: stride[i] = d^(n_elem-1-i).
+    std::vector<Index> stride(n_elem, 1);
+    for (Index i = n_elem; i-- > 1;) {
+        stride[i - 1] = stride[i] * d;
+    }
+
+    // Hilbert index of each computational ket (qubit sites 0..num_qubits-1 in {0,1},
+    // coupler sites in |0>); qubit 0 = most-significant bit of a.
+    const Index num_comp = (Index(1) << num_qubits);
+    std::vector<Index> ket_hilbert(num_comp, 0);
+    for (Index a = 0; a < num_comp; ++a) {
+        Index h = 0;
+        for (Index qi = 0; qi < num_qubits; ++qi) {
+            const Index bit = (a >> (num_qubits - 1 - qi)) & Index(1);
+            h += bit * stride[qi];
+        }
+        ket_hilbert[a] = h;
+    }
+
+    std::vector<Index> indices;
+    indices.reserve(num_comp * num_comp);
+    for (Index a = 0; a < num_comp; ++a) {
+        for (Index b = 0; b < num_comp; ++b) {
+            indices.push_back(ket_hilbert[a] * D + ket_hilbert[b]);
+        }
+    }
+    return indices;
 }
 
 TransmonChainBenchmarkTiming run_tunable_coupler_cpu_benchmark(

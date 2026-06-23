@@ -46,12 +46,29 @@ struct TunableCouplerBenchmarkConfig {
     double t0 = 0.0;
     double tfinal = 1.0;
 
+    // Time-dependent gate drive: each driven element's frequency is modulated as a
+    // single-sided sine, omega_k(t) = omega_k - A*sin(pi*t/T_gate). This makes the
+    // driven element's bare number term time-dependent AND (because g = K*sqrt(w_l w_m))
+    // every coupling edge incident to a driven element time-dependent. driven_sites
+    // are global site indices (qubits occupy 0..num_qubits-1, couplers the rest).
+    bool enable_drives = false;
+    std::vector<Index> driven_sites;
+    double drive_amplitude = 0.0;   // A
+    double drive_t_gate = 0.0;      // T_gate (<=0 means use tfinal)
+
     BenchmarkStateSelection state_selection;
     Index batched_num_steps = 500;
 };
 
 // Total number of qutrit modes = num_qubits + num_couplers.
 Index tunable_coupler_num_elements(const TunableCouplerBenchmarkConfig& config);
+
+// Flat density-matrix indices of the COMPUTATIONAL-subspace basis density matrices
+// |ket_a><ket_b|: qubits (sites 0..num_qubits-1) in {0,1}, couplers (the remaining
+// sites) in |0>. Returns (2^num_qubits)^2 indices in (a,b) lexicographic order over
+// the 2^num_qubits computational kets (qubit 0 = most-significant bit). Site-0-major.
+std::vector<Index> tunable_coupler_computational_density_indices(
+    Index num_qubits, Index num_couplers, Index cutoff_dim);
 
 Model build_tunable_coupler_model(const TunableCouplerBenchmarkConfig& config);
 
