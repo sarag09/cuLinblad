@@ -10,14 +10,13 @@ Time-dependent omega(t) drives on ~half the elements.  C++ (TSRK4) vs QuTiP (ver
 
 === computational states @ 16000 steps (dt=0.0025) : GPU vs QuTiP ===
   entries checked = 11664 (16 states x 729), max|C++ - QuTiP| = 3.082e-08  @state3(0,12)
-  GPU vs CPU backend (same C++ model) max|diff| = 9.548e-15
 
 === RK4 convergence (1000 -> 16000 steps, 16x refinement) ===
   worst|diff|: 2.002e-03 -> 3.082e-08   (shrink x64957.7; ideal O(dt^4) = 16^4 = 65536)
 
 === Physics invariants (no oracle), @ 16000 steps ===
   trace preservation  worst |Tr - delta| = 1.088e-14
-  Hermiticity         worst |U_ab - U_ba^dag| = 4.653e-16
+  Hermiticity         worst |U_ab - U_ba^dag| = 1.066e-15
 
 ================================================================================
 Converged worst |C++ - QuTiP| over EVERY entry/state = 3.082e-08

@@ -10,7 +10,10 @@
 #include <stdexcept>
 #include <string>
 
+#include <vector>
+
 #include "culindblad/cuda_elementwise.hpp"
+#include "culindblad/local_operator_utils.hpp"
 #include "culindblad/petsc_cuda_apply.hpp"
 #include "culindblad/time_dependent_term.hpp"
 
@@ -124,6 +127,119 @@ void accumulate_operator_scaled(
     for (Index i = 0; i < term.size(); ++i) {
         accum[i] += scale * term[i];
     }
+}
+
+// Apply -i[H_eff(t), rho] for a layout whose TIME-DEPENDENT effective Hamiltonian is
+// still structured (diagonal or sparse), using the cheap diagonal/sparse commutator
+// kernels instead of a general cuTENSOR contraction. The structured values change every
+// step, so they are recomputed from effective_hamiltonian and re-uploaded into reusable
+// per-layout device scratch. Returns true if a fast path was used; false => caller falls
+// back to the general cuTENSOR commutator. Correctness is identical to the cuTENSOR path
+// (same operator, same kernels already validated for the static case).
+bool try_apply_dynamic_structured_commutator(
+    CachedGroupedLayoutEntry& layout_entry,
+    const std::vector<Complex>& effective_hamiltonian,
+    const void* d_grouped_input,
+    void* d_grouped_output,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    const std::size_t n = effective_hamiltonian.size();
+    if (n == 0) {
+        return false;
+    }
+    const Index matrix_dim =
+        static_cast<Index>(std::llround(std::sqrt(static_cast<double>(n))));
+    if (static_cast<std::size_t>(matrix_dim) * static_cast<std::size_t>(matrix_dim) != n) {
+        return false;
+    }
+    if (matrix_dim == 0 ||
+        layout_entry.grouped_layout.hilbert_dim % matrix_dim != 0) {
+        return false;
+    }
+    const Index complement_dim =
+        layout_entry.grouped_layout.hilbert_dim / matrix_dim;
+
+    // (1) Diagonal effective Hamiltonian -> diagonal commutator kernel.
+    std::vector<Complex> diagonal;
+    if (try_extract_local_diagonal(effective_hamiltonian, matrix_dim, diagonal)) {
+        const std::size_t bytes = diagonal.size() * sizeof(Complex);
+        if (layout_entry.dynamic_diagonal_capacity < diagonal.size()) {
+            if (layout_entry.d_dynamic_diagonal != nullptr) {
+                cudaFree(layout_entry.d_dynamic_diagonal);
+                layout_entry.d_dynamic_diagonal = nullptr;
+            }
+            if (cudaMalloc(&layout_entry.d_dynamic_diagonal, bytes) != cudaSuccess) {
+                layout_entry.d_dynamic_diagonal = nullptr;
+                layout_entry.dynamic_diagonal_capacity = 0;
+                return false;
+            }
+            layout_entry.dynamic_diagonal_capacity = diagonal.size();
+        }
+        if (cudaMemcpyAsync(layout_entry.d_dynamic_diagonal, diagonal.data(), bytes,
+                            cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+            return false;
+        }
+        return launch_batched_grouped_diagonal_commutator_kernel(
+            layout_entry.d_dynamic_diagonal, d_grouped_input, d_grouped_output,
+            matrix_dim, complement_dim, batch_size, stream);
+    }
+
+    // (2) Sparse 2-site effective Hamiltonian -> sparse commutator kernel.
+    if (layout_entry.sites.size() != 2) {
+        return false;
+    }
+    std::vector<Complex> values;
+    std::vector<Index> rows;
+    std::vector<Index> cols;
+    for (Index row = 0; row < matrix_dim; ++row) {
+        for (Index col = 0; col < matrix_dim; ++col) {
+            const Complex value = effective_hamiltonian[row * matrix_dim + col];
+            if (std::abs(value) == 0.0) {
+                continue;
+            }
+            rows.push_back(row);
+            cols.push_back(col);
+            values.push_back(value);
+        }
+    }
+    if (values.empty()) {
+        return false;
+    }
+    const std::size_t nnz = values.size();
+    if (layout_entry.dynamic_sparse_capacity < nnz) {
+        if (layout_entry.d_dynamic_sparse_values != nullptr) {
+            cudaFree(layout_entry.d_dynamic_sparse_values);
+        }
+        if (layout_entry.d_dynamic_sparse_rows != nullptr) {
+            cudaFree(layout_entry.d_dynamic_sparse_rows);
+        }
+        if (layout_entry.d_dynamic_sparse_cols != nullptr) {
+            cudaFree(layout_entry.d_dynamic_sparse_cols);
+        }
+        layout_entry.d_dynamic_sparse_values = nullptr;
+        layout_entry.d_dynamic_sparse_rows = nullptr;
+        layout_entry.d_dynamic_sparse_cols = nullptr;
+        layout_entry.dynamic_sparse_capacity = 0;
+        if (cudaMalloc(&layout_entry.d_dynamic_sparse_values, nnz * sizeof(Complex)) != cudaSuccess ||
+            cudaMalloc(reinterpret_cast<void**>(&layout_entry.d_dynamic_sparse_rows), nnz * sizeof(Index)) != cudaSuccess ||
+            cudaMalloc(reinterpret_cast<void**>(&layout_entry.d_dynamic_sparse_cols), nnz * sizeof(Index)) != cudaSuccess) {
+            return false;
+        }
+        layout_entry.dynamic_sparse_capacity = nnz;
+    }
+    if (cudaMemcpyAsync(layout_entry.d_dynamic_sparse_values, values.data(),
+                        nnz * sizeof(Complex), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+        cudaMemcpyAsync(layout_entry.d_dynamic_sparse_rows, rows.data(),
+                        nnz * sizeof(Index), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+        cudaMemcpyAsync(layout_entry.d_dynamic_sparse_cols, cols.data(),
+                        nnz * sizeof(Index), cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+        return false;
+    }
+    return launch_batched_grouped_sparse_commutator_kernel(
+        layout_entry.d_dynamic_sparse_values, layout_entry.d_dynamic_sparse_rows,
+        layout_entry.d_dynamic_sparse_cols, static_cast<Index>(nnz),
+        d_grouped_input, d_grouped_output, matrix_dim, complement_dim, batch_size, stream);
 }
 
 CachedGroupedLayoutEntry* find_cached_grouped_layout_mutable(
@@ -412,6 +528,16 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
                     s)) {
                 return PETSC_ERR_LIB;
             }
+        } else if (has_dynamic_hamiltonian &&
+                   try_apply_dynamic_structured_commutator(
+                       layout_entry,
+                       effective_hamiltonian,
+                       rhs_ctx.grouped_scratch.d_grouped_input,
+                       rhs_ctx.grouped_scratch.d_grouped_term,
+                       rhs_ctx.batch_size,
+                       s)) {
+            // Dynamic (time-dependent) effective Hamiltonian applied via a structured
+            // fast path (diagonal / sparse) instead of a general cuTENSOR contraction.
         } else {
             PetscCall(apply_grouped_commutator_cuda_buffer(
                 solver,

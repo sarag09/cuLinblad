@@ -15,7 +15,7 @@ Time-dependent omega(t) drives on ~half the elements.  C++ (TSRK4) vs QuTiP (ver
 
 === Physics invariants (no oracle), @ 16000 steps ===
   trace preservation  worst |Tr - delta| = 1.543e-14
-  Hermiticity         worst |U_ab - U_ba^dag| = 1.619e-15
+  Hermiticity         worst |U_ab - U_ba^dag| = 6.897e-16
 
 ================================================================================
 Converged worst |C++ - QuTiP| over EVERY entry/state = 4.087e-08

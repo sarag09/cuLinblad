@@ -410,6 +410,24 @@ void destroy_cached_grouped_layouts(
         entry.grouped_bytes = 0;
         destroy_cached_sparse_static_hamiltonian(entry);
         destroy_cached_diagonal_static_hamiltonian(entry);
+        if (entry.d_dynamic_diagonal != nullptr) {
+            cudaFree(entry.d_dynamic_diagonal);
+            entry.d_dynamic_diagonal = nullptr;
+        }
+        entry.dynamic_diagonal_capacity = 0;
+        if (entry.d_dynamic_sparse_values != nullptr) {
+            cudaFree(entry.d_dynamic_sparse_values);
+            entry.d_dynamic_sparse_values = nullptr;
+        }
+        if (entry.d_dynamic_sparse_rows != nullptr) {
+            cudaFree(entry.d_dynamic_sparse_rows);
+            entry.d_dynamic_sparse_rows = nullptr;
+        }
+        if (entry.d_dynamic_sparse_cols != nullptr) {
+            cudaFree(entry.d_dynamic_sparse_cols);
+            entry.d_dynamic_sparse_cols = nullptr;
+        }
+        entry.dynamic_sparse_capacity = 0;
         (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
     }
     cached.clear();

@@ -40,6 +40,18 @@ struct CachedGroupedLayoutEntry {
     void* d_static_sparse_hamiltonian_values = nullptr;
     Index* d_static_sparse_hamiltonian_rows = nullptr;
     Index* d_static_sparse_hamiltonian_cols = nullptr;
+
+    // Reusable device scratch for the DYNAMIC structured fast paths. When a layout's
+    // effective Hamiltonian is time-dependent but stays diagonal (driven omega(t)*n) or
+    // sparse (driven g(t)*coupling), its structured values are recomputed and re-uploaded
+    // here each RHS step so the cheap diagonal/sparse commutator kernels can be used
+    // instead of a general cuTENSOR contraction. Allocated lazily; freed on teardown.
+    void* d_dynamic_diagonal = nullptr;
+    std::size_t dynamic_diagonal_capacity = 0;
+    void* d_dynamic_sparse_values = nullptr;
+    Index* d_dynamic_sparse_rows = nullptr;
+    Index* d_dynamic_sparse_cols = nullptr;
+    std::size_t dynamic_sparse_capacity = 0;
 };
 
 struct GroupedRhsScratchBuffers {
