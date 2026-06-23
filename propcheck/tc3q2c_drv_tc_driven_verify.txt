@@ -1,0 +1,23 @@
+################################################################################
+DRIVEN TUNABLE-COUPLER VERIFY  tc3q2c_drv  (NQ=3 NC=2 d=3 -> N=5, D=243)
+Evolving 64 computational density matrices (qubits in {0,1}, couplers in |0>).
+Time-dependent omega(t) drives on ~half the elements.  C++ (TSRK4) vs QuTiP (vern9).
+################################################################################
+
+=== computational states @ 1000 steps (dt=0.04) : GPU vs QuTiP ===
+  entries checked = 3779136 (64 states x 59049), max|C++ - QuTiP| = 2.637e-03  @state3(0,36)
+
+=== computational states @ 16000 steps (dt=0.0025) : GPU vs QuTiP ===
+  entries checked = 3779136 (64 states x 59049), max|C++ - QuTiP| = 4.087e-08  @state56(117,0)
+
+=== RK4 convergence (1000 -> 16000 steps, 16x refinement) ===
+  worst|diff|: 2.637e-03 -> 4.087e-08   (shrink x64512.8; ideal O(dt^4) = 16^4 = 65536)
+
+=== Physics invariants (no oracle), @ 16000 steps ===
+  trace preservation  worst |Tr - delta| = 1.543e-14
+  Hermiticity         worst |U_ab - U_ba^dag| = 1.619e-15
+
+================================================================================
+Converged worst |C++ - QuTiP| over EVERY entry/state = 4.087e-08
+=> DRIVEN C++ == QuTiP (same physics; residual is RK4 truncation -> 0)
+================================================================================
