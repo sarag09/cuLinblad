@@ -11,11 +11,22 @@
 namespace culindblad {
 
 struct CudaGroupedStateLayout {
-    Index flat_size;
-    Index grouped_size;
+    Index flat_size;     // density_dim = D*D
+    Index grouped_size;  // = flat_size (same element count, reordered)
 
-    Index* d_flat_to_grouped;
-    Index* d_grouped_to_flat;
+    // The flat<->grouped permutation is a deterministic function of the target sites and
+    // mixed-radix strides, so it is computed arithmetically in the relayout kernels from
+    // this small descriptor instead of being stored as two density_dim-sized index tables
+    // (which cost ~688 MB/layout at D=6561, i.e. tens of GB across an all-to-all model).
+    Index hilbert_dim;      // D
+    Index target_dim;       // product of target-site dims
+    Index complement_dim;   // product of complement-site dims
+    Index num_target;       // number of target sites
+    Index num_complement;   // number of complement sites
+    // Packed per-position descriptors, length 3*num_target / 3*num_complement; each
+    // position contributes [full_hilbert_stride, local_dim, packed_weight].
+    Index* d_target_desc;
+    Index* d_complement_desc;
 };
 
 bool create_cuda_grouped_state_layout(
