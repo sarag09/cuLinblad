@@ -419,6 +419,9 @@ void dump_batch_sweep(
 // Same PROPAGATOR_DUMP format as the chain dump, for the all-to-all tunable-coupler
 // model. Used to verify the C++ solver against the QuTiP reference (2Q1C etc).
 
+// Set from -tc_realistic_freqs before make_tunable_coupler_benchmark_config is called.
+static bool s_tc_realistic_freqs = false;
+
 culindblad::TunableCouplerBenchmarkConfig make_tunable_coupler_benchmark_config(
     culindblad::Index num_qubits,
     culindblad::Index num_couplers,
@@ -439,6 +442,22 @@ culindblad::TunableCouplerBenchmarkConfig make_tunable_coupler_benchmark_config(
     config.tphi.assign(n_elem, 30.0);
     for (culindblad::Index i = 0; i < n_elem; ++i) {
         config.omega[i] = 5.0 + 0.05 * static_cast<double>(i);
+    }
+    // Realistic device frequency layout (opt-in via -tc_realistic_freqs): qubits spread
+    // across 3.5-4.5 GHz, couplers across 4.6-5.5 GHz, so qubit-coupler detunings reach
+    // ~1-2 GHz (vs the near-degenerate default). Only affects the gain measurement, not
+    // correctness. Set after the default so the flag can override config.omega.
+    if (s_tc_realistic_freqs) {
+        auto band = [](culindblad::Index k, culindblad::Index n, double lo, double hi) {
+            const double f = (n > 1) ? static_cast<double>(k) / (n - 1) : 0.0;
+            return lo + (hi - lo) * f;
+        };
+        for (culindblad::Index q = 0; q < num_qubits; ++q) {
+            config.omega[q] = band(q, num_qubits, 3.5, 4.5);
+        }
+        for (culindblad::Index c = 0; c < num_couplers; ++c) {
+            config.omega[num_qubits + c] = band(c, num_couplers, 4.6, 5.5);
+        }
     }
     config.g = 0.02;
     config.t0 = 0.0;
@@ -610,6 +629,10 @@ int main(int argc, char** argv)
             PetscBool tc_rotating = PETSC_FALSE;
             PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetBool(
                 nullptr, nullptr, "-tc_rotating_frame", &tc_rotating, nullptr));
+            PetscBool tc_realistic = PETSC_FALSE;
+            PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetBool(
+                nullptr, nullptr, "-tc_realistic_freqs", &tc_realistic, nullptr));
+            s_tc_realistic_freqs = (tc_realistic == PETSC_TRUE);
 
             TunableCouplerBenchmarkConfig tc_config =
                 make_tunable_coupler_benchmark_config(
