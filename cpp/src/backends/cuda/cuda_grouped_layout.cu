@@ -1,6 +1,7 @@
 #include "culindblad/cuda_grouped_layout.hpp"
 
 #include <cstddef>
+#include <cuComplex.h>
 #include <cuda_runtime.h>
 
 #include "culindblad/types.hpp"
@@ -137,6 +138,36 @@ __global__ void grouped_to_flat_batched_kernel(
     const Index f = grouped_to_flat_index(local_grouped, D, target_dim, complement_dim,
                                           tdesc, num_t, cdesc, num_c);
     flat_output[batch * flat_size + f] = grouped_input[idx];
+}
+
+// Like grouped_to_flat_batched_kernel but ACCUMULATES into the flat output
+// (flat[f] += grouped[g]) so a layer's contribution can be added straight into the RHS
+// vector f (zeroed once per RHS step), removing the per-layer temp vector + add + copy.
+// Each grouped index maps to a unique flat index within a call, so there is no intra-call
+// write conflict; sequential layers accumulate in stream order.
+__global__ void grouped_to_flat_accumulate_batched_kernel(
+    const Complex* grouped_input,
+    Complex* flat_output,
+    Index flat_size,
+    Index grouped_size,
+    Index total_grouped_size,
+    Index D, Index target_dim, Index complement_dim,
+    const Index* tdesc, Index num_t, const Index* cdesc, Index num_c)
+{
+    const Index idx =
+        static_cast<Index>(blockIdx.x) * static_cast<Index>(blockDim.x) +
+        static_cast<Index>(threadIdx.x);
+    if (idx >= total_grouped_size) {
+        return;
+    }
+    const Index batch = idx / grouped_size;
+    const Index local_grouped = idx % grouped_size;
+    const Index f = grouped_to_flat_index(local_grouped, D, target_dim, complement_dim,
+                                          tdesc, num_t, cdesc, num_c);
+    const Index out = batch * flat_size + f;
+    cuDoubleComplex* fo = reinterpret_cast<cuDoubleComplex*>(flat_output);
+    const cuDoubleComplex* gi = reinterpret_cast<const cuDoubleComplex*>(grouped_input);
+    fo[out] = cuCadd(fo[out], gi[idx]);
 }
 
 } // namespace
@@ -335,6 +366,31 @@ bool launch_grouped_to_flat_batched_kernel(
         static_cast<int>((total_grouped_size + block_size - 1) / block_size);
 
     grouped_to_flat_batched_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const Complex*>(d_grouped_input),
+        reinterpret_cast<Complex*>(d_flat_output),
+        cuda_layout.flat_size,
+        cuda_layout.grouped_size,
+        total_grouped_size,
+        cuda_layout.hilbert_dim, cuda_layout.target_dim, cuda_layout.complement_dim,
+        cuda_layout.d_target_desc, cuda_layout.num_target,
+        cuda_layout.d_complement_desc, cuda_layout.num_complement);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_grouped_to_flat_accumulate_batched_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream)
+{
+    constexpr int block_size = 256;
+    const Index total_grouped_size = batch_size * cuda_layout.grouped_size;
+    const int grid_size =
+        static_cast<int>((total_grouped_size + block_size - 1) / block_size);
+
+    grouped_to_flat_accumulate_batched_kernel<<<grid_size, block_size, 0, stream>>>(
         reinterpret_cast<const Complex*>(d_grouped_input),
         reinterpret_cast<Complex*>(d_flat_output),
         cuda_layout.flat_size,

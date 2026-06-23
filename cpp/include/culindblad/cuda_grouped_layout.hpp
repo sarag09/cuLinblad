@@ -62,4 +62,12 @@ bool launch_grouped_to_flat_batched_kernel(
     void* d_flat_output,
     cudaStream_t stream);
 
+// Accumulating variant: flat_output[f] += grouped_input[g] (flat_output not overwritten).
+bool launch_grouped_to_flat_accumulate_batched_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream);
+
 } // namespace culindblad

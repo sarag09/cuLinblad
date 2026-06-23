@@ -687,22 +687,14 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
         return 0;
     }
 
-    PetscCall(flatten_grouped_buffer_to_petsc_cuda_vec(
+    // Accumulate this layer's flattened contribution straight into f (zeroed once per
+    // RHS step), avoiding a per-layer temporary vector + add + copy.
+    PetscCall(flatten_grouped_buffer_accumulate_into_petsc_cuda_vec(
         layout_entry.cuda_grouped_layout,
         rhs_ctx.grouped_scratch.d_grouped_accum,
-        rhs_ctx.work_vec_a,
-        rhs_ctx.batch_size,
-        s,
-        s));
-
-    PetscCall(add_petsc_cuda_vecs(
         f,
-        rhs_ctx.work_vec_a,
-        rhs_ctx.work_vec_b,
-        rhs_total_density_dim(rhs_ctx),
+        rhs_ctx.batch_size,
         s));
-
-    PetscCall(VecCopy(rhs_ctx.work_vec_b, f));
 
     return 0;
 }

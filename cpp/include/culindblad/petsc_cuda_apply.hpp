@@ -81,6 +81,13 @@ PetscErrorCode flatten_grouped_buffer_to_petsc_cuda_vec(
     cudaStream_t consumer_stream,
     cudaStream_t producer_stream);
 
+PetscErrorCode flatten_grouped_buffer_accumulate_into_petsc_cuda_vec(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    const void* d_grouped_input,
+    Vec y,
+    Index batch_size,
+    cudaStream_t stream);
+
 PetscErrorCode apply_grouped_commutator_cuda_buffer(
     const Solver& solver,
     const std::string& term_label,

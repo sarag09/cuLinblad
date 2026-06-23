@@ -1419,6 +1419,29 @@ PetscErrorCode flatten_grouped_buffer_to_petsc_cuda_vec(
     return ierr;
 }
 
+// Accumulate a grouped buffer directly into y (y[flat] += grouped[g]) on the given stream.
+// y must already hold the running sum (it is zeroed once per RHS step); this avoids a
+// per-layer temporary vector + add + copy. get_petsc_vec_device_write_ptr uses
+// VecCUDAGetArray (read-write), so y's existing contents are preserved.
+PetscErrorCode flatten_grouped_buffer_accumulate_into_petsc_cuda_vec(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    const void* d_grouped_input,
+    Vec y,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    void* d_flat_output = nullptr;
+    PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
+    const bool ok = launch_grouped_to_flat_accumulate_batched_kernel(
+        cuda_grouped_layout,
+        batch_size,
+        d_grouped_input,
+        d_flat_output,
+        stream);
+    PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+    return ok ? 0 : PETSC_ERR_LIB;
+}
+
 PetscErrorCode apply_grouped_commutator_cuda_buffer(
     const Solver& solver,
     const std::string& term_label,
