@@ -344,6 +344,25 @@ std::vector<CachedDissipatorAuxiliaries> build_cached_static_dissipators(
                     throw std::runtime_error(
                         "build_cached_static_dissipators: failed to upload diagonal dissipator jump");
                 }
+            } else {
+                // Non-diagonal single-site collapse op (e.g. relaxation a): upload the
+                // small dense L so the dense jump kernel can replace the cuTENSOR path.
+                const std::size_t l_bytes = aux.l_op.size() * sizeof(Complex);
+                if (l_bytes != 0) {
+                    if (cudaMalloc(&aux.d_l_op, l_bytes) != cudaSuccess ||
+                        cudaMemcpy(
+                            aux.d_l_op,
+                            aux.l_op.data(),
+                            l_bytes,
+                            cudaMemcpyHostToDevice) != cudaSuccess) {
+                        if (aux.d_l_op != nullptr) {
+                            cudaFree(aux.d_l_op);
+                            aux.d_l_op = nullptr;
+                        }
+                        throw std::runtime_error(
+                            "build_cached_static_dissipators: failed to upload dense dissipator L");
+                    }
+                }
             }
             cached.push_back(std::move(aux));
         }
@@ -362,6 +381,10 @@ void destroy_cached_static_dissipators(
         if (aux.d_jump_diagonal != nullptr) {
             cudaFree(aux.d_jump_diagonal);
             aux.d_jump_diagonal = nullptr;
+        }
+        if (aux.d_l_op != nullptr) {
+            cudaFree(aux.d_l_op);
+            aux.d_l_op = nullptr;
         }
         aux.jump_diagonal.clear();
     }

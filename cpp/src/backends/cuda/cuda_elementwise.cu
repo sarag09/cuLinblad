@@ -638,6 +638,70 @@ __global__ void batched_grouped_diagonal_anti_commutator_kernel(
             rho_val));
 }
 
+// Dissipator jump L rho L^dag for a (small) dense single-site collapse operator L that
+// acts only on the target block (e.g. relaxation L = sqrt(1/T1) a):
+//   (L rho L^dag)[i,ic,j,jc] = sum_{k,l} L[i,k] rho[k,ic,l,jc] conj(L[j,l]).
+// The complement indices (ic, jc) pass through unchanged. Drop-in for the general
+// cuTENSOR jump path; cheap when target_hilbert_dim is small (single-site qutrit = 3).
+__global__ void batched_grouped_dense_jump_kernel(
+    const cuDoubleComplex* l_op,
+    const cuDoubleComplex* grouped_input,
+    cuDoubleComplex* grouped_output,
+    std::size_t target_hilbert_dim,
+    std::size_t complement_dim,
+    std::size_t batch_size)
+{
+    const std::size_t per_state_size =
+        target_hilbert_dim * complement_dim * target_hilbert_dim * complement_dim;
+
+    const std::size_t total_elements =
+        per_state_size * batch_size;
+
+    const std::size_t idx =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+    if (idx >= total_elements) {
+        return;
+    }
+
+    const std::size_t batch_idx = idx / per_state_size;
+    const std::size_t state_offset = idx % per_state_size;
+
+    const std::size_t bra_comp = state_offset % complement_dim;
+    const std::size_t tmp0 = state_offset / complement_dim;
+
+    const std::size_t bra_target = tmp0 % target_hilbert_dim;
+    const std::size_t tmp1 = tmp0 / target_hilbert_dim;
+
+    const std::size_t ket_comp = tmp1 % complement_dim;
+    const std::size_t ket_target = tmp1 / complement_dim;
+
+    const std::size_t base = batch_idx * per_state_size;
+    cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
+
+    for (std::size_t k = 0; k < target_hilbert_dim; ++k) {
+        const cuDoubleComplex l_ik = l_op[ket_target * target_hilbert_dim + k];
+        if (l_ik.x == 0.0 && l_ik.y == 0.0) {
+            continue;
+        }
+        for (std::size_t l = 0; l < target_hilbert_dim; ++l) {
+            const cuDoubleComplex l_jl = l_op[bra_target * target_hilbert_dim + l];
+            if (l_jl.x == 0.0 && l_jl.y == 0.0) {
+                continue;
+            }
+            const std::size_t rho_idx =
+                base +
+                ((k * complement_dim + ket_comp) * target_hilbert_dim + l) * complement_dim +
+                bra_comp;
+            acc = cuCadd(
+                acc,
+                cuCmul(cuCmul(l_ik, grouped_input[rho_idx]), cuConj(l_jl)));
+        }
+    }
+
+    grouped_output[idx] = acc;
+}
+
 bool launch_batched_grouped_left_diagonal_kernel(
     const void* diagonal_op,
     const void* grouped_input,
@@ -777,6 +841,43 @@ bool launch_batched_grouped_diagonal_anti_commutator_kernel(
 
     batched_grouped_diagonal_anti_commutator_kernel<<<blocks, threads_per_block, 0, stream>>>(
         static_cast<const cuDoubleComplex*>(diagonal_op),
+        static_cast<const cuDoubleComplex*>(grouped_input),
+        static_cast<cuDoubleComplex*>(grouped_output),
+        static_cast<std::size_t>(target_hilbert_dim),
+        static_cast<std::size_t>(complement_dim),
+        static_cast<std::size_t>(batch_size));
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_batched_grouped_dense_jump_kernel(
+    const void* l_op,
+    const void* grouped_input,
+    void* grouped_output,
+    Index target_hilbert_dim,
+    Index complement_dim,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    if (l_op == nullptr || grouped_input == nullptr || grouped_output == nullptr) {
+        return false;
+    }
+
+    const std::size_t per_state_size =
+        static_cast<std::size_t>(target_hilbert_dim) *
+        static_cast<std::size_t>(complement_dim) *
+        static_cast<std::size_t>(target_hilbert_dim) *
+        static_cast<std::size_t>(complement_dim);
+
+    const std::size_t total_elements =
+        per_state_size * static_cast<std::size_t>(batch_size);
+
+    constexpr int threads_per_block = 256;
+    const int blocks =
+        static_cast<int>((total_elements + threads_per_block - 1) / threads_per_block);
+
+    batched_grouped_dense_jump_kernel<<<blocks, threads_per_block, 0, stream>>>(
+        static_cast<const cuDoubleComplex*>(l_op),
         static_cast<const cuDoubleComplex*>(grouped_input),
         static_cast<cuDoubleComplex*>(grouped_output),
         static_cast<std::size_t>(target_hilbert_dim),

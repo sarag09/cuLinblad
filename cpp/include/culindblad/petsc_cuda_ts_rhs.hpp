@@ -23,6 +23,9 @@ struct CachedDissipatorAuxiliaries {
     std::vector<Complex> l_dag_l;
     std::vector<Complex> jump_diagonal;
     void* d_jump_diagonal = nullptr;
+    // Device copy of the (small, dense) collapse operator L for non-diagonal single-site
+    // dissipators (e.g. relaxation a), used by the dense jump fast path.
+    void* d_l_op = nullptr;
 };
 
 struct CachedGroupedLayoutEntry {

@@ -586,6 +586,26 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
                     s)) {
                 return PETSC_ERR_LIB;
             }
+        } else if (d_aux.d_l_op != nullptr) {
+            // Non-diagonal single-site collapse op (e.g. relaxation a): dense jump
+            // kernel L rho L^dag instead of a general cuTENSOR contraction.
+            const Index target_hilbert_dim =
+                static_cast<Index>(std::llround(std::sqrt(
+                    static_cast<double>(d_aux.l_op.size()))));
+            const Index complement_dim =
+                layout_entry.grouped_layout.hilbert_dim / target_hilbert_dim;
+            const ScopedNvtxRange jump_range(
+                make_nvtx_label("rhs_dissipator_jump_dense", d_aux.name));
+            if (!launch_batched_grouped_dense_jump_kernel(
+                    d_aux.d_l_op,
+                    rhs_ctx.grouped_scratch.d_grouped_input,
+                    rhs_ctx.grouped_scratch.d_grouped_term,
+                    target_hilbert_dim,
+                    complement_dim,
+                    rhs_ctx.batch_size,
+                    s)) {
+                return PETSC_ERR_LIB;
+            }
         } else {
             const ScopedNvtxRange jump_range(
                 make_nvtx_label("rhs_dissipator_jump", d_aux.name));
