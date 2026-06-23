@@ -140,6 +140,55 @@ void cache_diagonal_static_hamiltonian(
     }
 }
 
+void destroy_cached_diagonal_static_dissipator_norm(
+    CachedGroupedLayoutEntry& entry)
+{
+    if (entry.d_static_dissipator_norm_diagonal != nullptr) {
+        cudaFree(entry.d_static_dissipator_norm_diagonal);
+        entry.d_static_dissipator_norm_diagonal = nullptr;
+    }
+    entry.static_dissipator_norm_diagonal.clear();
+}
+
+// Extract and upload the diagonal of the (diagonal) dissipator norm sum (sum_k L_k^dag L_k)
+// so the anti-commutator -1/2{D,rho} can use the cheap diagonal kernel instead of a
+// general cuTENSOR contraction. No-op (falls back to cuTENSOR) if the norm sum is not
+// diagonal.
+void cache_diagonal_static_dissipator_norm(
+    CachedGroupedLayoutEntry& entry)
+{
+    destroy_cached_diagonal_static_dissipator_norm(entry);
+
+    if (entry.static_dissipator_norm_sum.empty()) {
+        return;
+    }
+
+    const Index matrix_dim =
+        static_cast<Index>(std::llround(std::sqrt(
+            static_cast<double>(entry.static_dissipator_norm_sum.size()))));
+    if (static_cast<std::size_t>(matrix_dim) * static_cast<std::size_t>(matrix_dim) !=
+        entry.static_dissipator_norm_sum.size() ||
+        !try_extract_local_diagonal(
+            entry.static_dissipator_norm_sum,
+            matrix_dim,
+            entry.static_dissipator_norm_diagonal)) {
+        return;
+    }
+
+    const std::size_t diagonal_bytes =
+        entry.static_dissipator_norm_diagonal.size() * sizeof(Complex);
+    if (cudaMalloc(&entry.d_static_dissipator_norm_diagonal, diagonal_bytes) != cudaSuccess ||
+        cudaMemcpy(
+            entry.d_static_dissipator_norm_diagonal,
+            entry.static_dissipator_norm_diagonal.data(),
+            diagonal_bytes,
+            cudaMemcpyHostToDevice) != cudaSuccess) {
+        destroy_cached_diagonal_static_dissipator_norm(entry);
+        throw std::runtime_error(
+            "cache_diagonal_static_dissipator_norm: failed to upload diagonal dissipator norm");
+    }
+}
+
 void cache_sparse_static_hamiltonian(
     CachedGroupedLayoutEntry& entry)
 {
@@ -367,6 +416,7 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
 
                 cache_diagonal_static_hamiltonian(entry);
                 cache_sparse_static_hamiltonian(entry);
+                cache_diagonal_static_dissipator_norm(entry);
 
                 if (!create_cuda_grouped_state_layout(
                         entry.grouped_layout,
@@ -379,6 +429,7 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
             } catch (...) {
                 destroy_cached_sparse_static_hamiltonian(entry);
                 destroy_cached_diagonal_static_hamiltonian(entry);
+                destroy_cached_diagonal_static_dissipator_norm(entry);
                 (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
                 throw;
             }
@@ -410,6 +461,7 @@ void destroy_cached_grouped_layouts(
         entry.grouped_bytes = 0;
         destroy_cached_sparse_static_hamiltonian(entry);
         destroy_cached_diagonal_static_hamiltonian(entry);
+        destroy_cached_diagonal_static_dissipator_norm(entry);
         if (entry.d_dynamic_diagonal != nullptr) {
             cudaFree(entry.d_dynamic_diagonal);
             entry.d_dynamic_diagonal = nullptr;

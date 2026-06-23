@@ -33,10 +33,12 @@ struct CachedGroupedLayoutEntry {
     std::vector<Complex> static_hamiltonian_sum;
     std::vector<Complex> static_hamiltonian_diagonal;
     std::vector<Complex> static_dissipator_norm_sum;
+    std::vector<Complex> static_dissipator_norm_diagonal;
     std::vector<Complex> static_sparse_hamiltonian_values;
     std::vector<Index> static_sparse_hamiltonian_rows;
     std::vector<Index> static_sparse_hamiltonian_cols;
     void* d_static_hamiltonian_diagonal = nullptr;
+    void* d_static_dissipator_norm_diagonal = nullptr;
     void* d_static_sparse_hamiltonian_values = nullptr;
     Index* d_static_sparse_hamiltonian_rows = nullptr;
     Index* d_static_sparse_hamiltonian_cols = nullptr;
