@@ -506,7 +506,7 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
                     layout_entry.d_static_sparse_hamiltonian_cols,
                     static_cast<Index>(layout_entry.static_sparse_hamiltonian_values.size()),
                     rhs_ctx.grouped_scratch.d_grouped_input,
-                    rhs_ctx.grouped_scratch.d_grouped_term,
+                    rhs_ctx.grouped_scratch.d_grouped_accum,
                     target_hilbert_dim,
                     complement_dim,
                     rhs_ctx.batch_size,
@@ -521,7 +521,7 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             if (!launch_batched_grouped_diagonal_commutator_kernel(
                     layout_entry.d_static_hamiltonian_diagonal,
                     rhs_ctx.grouped_scratch.d_grouped_input,
-                    rhs_ctx.grouped_scratch.d_grouped_term,
+                    rhs_ctx.grouped_scratch.d_grouped_accum,
                     target_hilbert_dim,
                     complement_dim,
                     rhs_ctx.batch_size,
@@ -533,12 +533,13 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
                        layout_entry,
                        effective_hamiltonian,
                        rhs_ctx.grouped_scratch.d_grouped_input,
-                       rhs_ctx.grouped_scratch.d_grouped_term,
+                       rhs_ctx.grouped_scratch.d_grouped_accum,
                        rhs_ctx.batch_size,
                        s)) {
             // Dynamic (time-dependent) effective Hamiltonian applied via a structured
-            // fast path (diagonal / sparse) instead of a general cuTENSOR contraction.
+            // fast path (diagonal / sparse), accumulated directly into d_grouped_accum.
         } else {
+            // General cuTENSOR fallback writes the term buffer, then accumulates.
             PetscCall(apply_grouped_commutator_cuda_buffer(
                 solver,
                 effective_term_label,
@@ -552,14 +553,10 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
                 s,
                 nullptr,
                 nullptr));
+            PetscCall(accumulate_grouped_layout_term(
+                rhs_ctx, layout_entry, 1.0, rhs_ctx.batch_size, s));
         }
 
-        PetscCall(accumulate_grouped_layout_term(
-            rhs_ctx,
-            layout_entry,
-            1.0,
-            rhs_ctx.batch_size,
-            s));
         has_contribution = true;
     }
 
@@ -579,7 +576,7 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             if (!launch_batched_grouped_diagonal_dissipator_jump_kernel(
                     d_aux.d_jump_diagonal,
                     rhs_ctx.grouped_scratch.d_grouped_input,
-                    rhs_ctx.grouped_scratch.d_grouped_term,
+                    rhs_ctx.grouped_scratch.d_grouped_accum,
                     target_hilbert_dim,
                     complement_dim,
                     rhs_ctx.batch_size,
@@ -599,7 +596,7 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             if (!launch_batched_grouped_dense_jump_kernel(
                     d_aux.d_l_op,
                     rhs_ctx.grouped_scratch.d_grouped_input,
-                    rhs_ctx.grouped_scratch.d_grouped_term,
+                    rhs_ctx.grouped_scratch.d_grouped_accum,
                     target_hilbert_dim,
                     complement_dim,
                     rhs_ctx.batch_size,
@@ -623,14 +620,10 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
                 s,
                 nullptr,
                 nullptr));
+            PetscCall(accumulate_grouped_layout_term(
+                rhs_ctx, layout_entry, 1.0, rhs_ctx.batch_size, s));
         }
 
-        PetscCall(accumulate_grouped_layout_term(
-            rhs_ctx,
-            layout_entry,
-            1.0,
-            rhs_ctx.batch_size,
-            s));
         has_contribution = true;
     }
 
@@ -651,7 +644,7 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             if (!launch_batched_grouped_diagonal_anti_commutator_kernel(
                     layout_entry.d_static_dissipator_norm_diagonal,
                     rhs_ctx.grouped_scratch.d_grouped_input,
-                    rhs_ctx.grouped_scratch.d_grouped_term,
+                    rhs_ctx.grouped_scratch.d_grouped_accum,
                     target_hilbert_dim,
                     complement_dim,
                     rhs_ctx.batch_size,
@@ -672,14 +665,10 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
                 s,
                 nullptr,
                 nullptr));
+            PetscCall(accumulate_grouped_layout_term(
+                rhs_ctx, layout_entry, 1.0, rhs_ctx.batch_size, s));
         }
 
-        PetscCall(accumulate_grouped_layout_term(
-            rhs_ctx,
-            layout_entry,
-            1.0,
-            rhs_ctx.batch_size,
-            s));
         has_contribution = true;
     }
 

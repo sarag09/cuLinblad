@@ -149,7 +149,9 @@ __global__ void batched_grouped_sparse_commutator_kernel(
     }
 
     const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
-    grouped_output[idx] = cuCmul(minus_i, cuCsub(left_sum, right_sum));
+    grouped_output[idx] = cuCadd(
+        grouped_output[idx],
+        cuCmul(minus_i, cuCsub(left_sum, right_sum)));
 }
 
 } // namespace
@@ -538,7 +540,9 @@ __global__ void batched_grouped_diagonal_dissipator_jump_kernel(
     const cuDoubleComplex bra_factor = cuConj(diagonal_op[bra_target]);
     const cuDoubleComplex rho_val = grouped_input[idx];
 
-    grouped_output[idx] = cuCmul(cuCmul(ket_factor, rho_val), bra_factor);
+    grouped_output[idx] = cuCadd(
+        grouped_output[idx],
+        cuCmul(cuCmul(ket_factor, rho_val), bra_factor));
 }
 
 __global__ void batched_grouped_diagonal_commutator_kernel(
@@ -581,11 +585,13 @@ __global__ void batched_grouped_diagonal_commutator_kernel(
     const cuDoubleComplex rho_val = grouped_input[idx];
     const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
 
-    grouped_output[idx] = cuCmul(
-        minus_i,
+    grouped_output[idx] = cuCadd(
+        grouped_output[idx],
         cuCmul(
-            cuCsub(ket_factor, bra_factor),
-            rho_val));
+            minus_i,
+            cuCmul(
+                cuCsub(ket_factor, bra_factor),
+                rho_val)));
 }
 
 // Anti-commutator -1/2 {D, rho} for a DIAGONAL operator D (= sum_k L_k^dag L_k):
@@ -631,11 +637,13 @@ __global__ void batched_grouped_diagonal_anti_commutator_kernel(
     const cuDoubleComplex rho_val = grouped_input[idx];
     const cuDoubleComplex minus_half = make_cuDoubleComplex(-0.5, 0.0);
 
-    grouped_output[idx] = cuCmul(
-        minus_half,
+    grouped_output[idx] = cuCadd(
+        grouped_output[idx],
         cuCmul(
-            cuCadd(ket_factor, bra_factor),
-            rho_val));
+            minus_half,
+            cuCmul(
+                cuCadd(ket_factor, bra_factor),
+                rho_val)));
 }
 
 // Dissipator jump L rho L^dag for a (small) dense single-site collapse operator L that
@@ -699,7 +707,7 @@ __global__ void batched_grouped_dense_jump_kernel(
         }
     }
 
-    grouped_output[idx] = acc;
+    grouped_output[idx] = cuCadd(grouped_output[idx], acc);
 }
 
 bool launch_batched_grouped_left_diagonal_kernel(
