@@ -568,13 +568,15 @@ PetscErrorCode create_rhs_work_vectors(
     Vec prototype,
     PetscCudaTsRhsContext& rhs_ctx)
 {
+    // The full-model CUDA RHS (ts_rhs_function_cuda_full_model_liouvillian) accumulates
+    // every layer's contribution straight into f and no longer needs per-RHS work
+    // vectors, so skip allocating them here (saves ~3*batch*density_dim of device
+    // memory). They remain null; only the separate smoke grouped-liouvillian path uses
+    // work vectors, and it allocates its own.
+    (void)prototype;
     rhs_ctx.work_vec_a = nullptr;
     rhs_ctx.work_vec_b = nullptr;
     rhs_ctx.work_vec_c = nullptr;
-
-    PetscCall(VecDuplicate(prototype, &rhs_ctx.work_vec_a));
-    PetscCall(VecDuplicate(prototype, &rhs_ctx.work_vec_b));
-    PetscCall(VecDuplicate(prototype, &rhs_ctx.work_vec_c));
     return 0;
 }
 
