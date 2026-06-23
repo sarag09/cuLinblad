@@ -458,12 +458,6 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
         rhs_ctx.batch_size,
         s));
 
-    PetscCall(zero_grouped_layout_accumulator(
-        rhs_ctx,
-        layout_entry,
-        rhs_ctx.batch_size,
-        s));
-
     bool has_contribution = false;
     std::vector<Complex> effective_hamiltonian =
         layout_entry.static_hamiltonian_sum;
@@ -481,6 +475,16 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             effective_hamiltonian);
         has_effective_hamiltonian = true;
         has_dynamic_hamiltonian = true;
+    }
+
+    // The commutator (first term, applied by an overwriting fast-path kernel) initializes
+    // the accumulator for this layer, so the explicit per-layer zeroing is only needed when
+    // no commutator is present (e.g. a dissipator-only layer). This removes a full-buffer
+    // memset per layer per RHS (~5% of GPU time at 4Q4C). The cuTENSOR commutator fallback
+    // re-zeros itself below.
+    if (!has_effective_hamiltonian) {
+        PetscCall(zero_grouped_layout_accumulator(
+            rhs_ctx, layout_entry, rhs_ctx.batch_size, s));
     }
 
     if (has_effective_hamiltonian) {
@@ -539,7 +543,12 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             // Dynamic (time-dependent) effective Hamiltonian applied via a structured
             // fast path (diagonal / sparse), accumulated directly into d_grouped_accum.
         } else {
-            // General cuTENSOR fallback writes the term buffer, then accumulates.
+            // General cuTENSOR fallback writes the term buffer, then accumulates. Unlike
+            // the overwriting fast-path kernels, it does not initialize the accumulator, so
+            // (since the per-layer zero is now skipped when a commutator is present) zero it
+            // here first. Dead for the structured tunable-coupler model; kept correct.
+            PetscCall(zero_grouped_layout_accumulator(
+                rhs_ctx, layout_entry, rhs_ctx.batch_size, s));
             PetscCall(apply_grouped_commutator_cuda_buffer(
                 solver,
                 effective_term_label,

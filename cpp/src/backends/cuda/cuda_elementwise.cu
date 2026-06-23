@@ -149,9 +149,10 @@ __global__ void batched_grouped_sparse_commutator_kernel(
     }
 
     const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
-    grouped_output[idx] = cuCadd(
-        grouped_output[idx],
-        cuCmul(minus_i, cuCsub(left_sum, right_sum)));
+    // The commutator is the first term applied on every layer and writes every output
+    // element, so it OVERWRITES the accumulator (the per-layer zeroing is skipped in the
+    // RHS whenever a commutator is present). 0 += X is identical to = X, so bit-for-bit.
+    grouped_output[idx] = cuCmul(minus_i, cuCsub(left_sum, right_sum));
 }
 
 } // namespace
@@ -585,13 +586,12 @@ __global__ void batched_grouped_diagonal_commutator_kernel(
     const cuDoubleComplex rho_val = grouped_input[idx];
     const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
 
-    grouped_output[idx] = cuCadd(
-        grouped_output[idx],
+    // Commutator overwrites the accumulator (first term per layer; zero skipped in the RHS).
+    grouped_output[idx] = cuCmul(
+        minus_i,
         cuCmul(
-            minus_i,
-            cuCmul(
-                cuCsub(ket_factor, bra_factor),
-                rho_val)));
+            cuCsub(ket_factor, bra_factor),
+            rho_val));
 }
 
 // Anti-commutator -1/2 {D, rho} for a DIAGONAL operator D (= sum_k L_k^dag L_k):
