@@ -87,12 +87,22 @@ Index tunable_coupler_num_elements(const TunableCouplerBenchmarkConfig& config);
 std::vector<Index> tunable_coupler_computational_density_indices(
     Index num_qubits, Index num_couplers, Index cutoff_dim);
 
+// Hilbert-space (D-space) indices of the computational basis KETS |a> (qubits in {0,1},
+// couplers in |0>), 2^num_qubits entries. The state-vector analogue of the density version.
+std::vector<Index> tunable_coupler_computational_state_indices(
+    Index num_qubits, Index num_couplers, Index cutoff_dim);
+
 Model build_tunable_coupler_model(const TunableCouplerBenchmarkConfig& config);
 
 TransmonChainBenchmarkTiming run_tunable_coupler_cpu_benchmark(
     const TunableCouplerBenchmarkConfig& config);
 
 TransmonChainBenchmarkTiming run_tunable_coupler_cuda_benchmark(
+    const TunableCouplerBenchmarkConfig& config);
+
+// Closed-system (Schrodinger) run: evolves the computational basis |psi> through the gate via
+// the matrix-free state-vector solver. final_states are length-hilbert_dim |psi(T)> vectors.
+TransmonChainBenchmarkTiming run_tunable_coupler_schrodinger_cuda_benchmark(
     const TunableCouplerBenchmarkConfig& config);
 
 // Closed-system Schrodinger evolve self-test: evolves a random |psi> via the state-vector solver

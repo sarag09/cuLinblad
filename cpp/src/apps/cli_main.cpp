@@ -547,6 +547,38 @@ void tc_dump_states(
     }
 }
 
+// Closed-system (Schrodinger) dump: each STATE is a length-hilbert_dim |psi(T)> vector. Tagged
+// mode=schrodinger / state_len=hilbert_dim so the parser reads D entries, not D^2.
+void tc_dump_states_schrodinger(
+    const culindblad::TunableCouplerBenchmarkConfig& config)
+{
+    using namespace culindblad;
+    const Model model = build_tunable_coupler_model(config);
+    const Solver solver = make_solver(model);
+    const TransmonChainBenchmarkTiming timing =
+        run_tunable_coupler_schrodinger_cuda_benchmark(config);
+
+    std::cout << "PROPAGATOR_DUMP_BEGIN backend=gpu mode=schrodinger"
+              << " num_qubits=" << config.num_qubits
+              << " num_couplers=" << config.num_couplers
+              << " cutoff_dim=" << config.cutoff_dim
+              << " hilbert_dim=" << solver.layout.hilbert_dim
+              << " state_len=" << solver.layout.hilbert_dim
+              << " steps=" << config.batched_num_steps
+              << " num_states=" << timing.final_states.size() << "\n";
+    const std::streamsize old_prec = std::cout.precision();
+    std::cout << std::setprecision(17);
+    for (std::size_t s = 0; s < timing.final_states.size(); ++s) {
+        std::cout << "STATE " << s << "\n";
+        const std::vector<Complex>& psi = timing.final_states[s];
+        for (std::size_t i = 0; i < psi.size(); ++i) {
+            std::cout << psi[i].real() << " " << psi[i].imag() << "\n";
+        }
+    }
+    std::cout << std::setprecision(old_prec);
+    std::cout << "PROPAGATOR_DUMP_END backend=gpu mode=schrodinger\n";
+}
+
 void tc_dump_batch_sweep(
     const culindblad::TunableCouplerBenchmarkConfig& base_config,
     const std::vector<culindblad::Index>& batch_sizes)
@@ -860,6 +892,9 @@ int main(int argc, char** argv)
             PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetBool(
                 nullptr, nullptr, "-tc_realistic_freqs", &tc_realistic, nullptr));
             s_tc_realistic_freqs = (tc_realistic == PETSC_TRUE);
+            PetscBool tc_schrod = PETSC_FALSE;
+            PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetBool(
+                nullptr, nullptr, "-tc_schrodinger", &tc_schrod, nullptr));
 
             TunableCouplerBenchmarkConfig tc_config =
                 make_tunable_coupler_benchmark_config(
@@ -882,16 +917,23 @@ int main(int argc, char** argv)
             if (tc_comp == PETSC_TRUE) {
                 tc_config.state_selection.evolve_all_states = false;
                 tc_config.state_selection.selected_state_indices =
-                    tunable_coupler_computational_density_indices(
-                        static_cast<Index>(tc_nq),
-                        static_cast<Index>(tc_nc),
-                        static_cast<Index>(tc_cd));
+                    (tc_schrod == PETSC_TRUE)
+                        ? tunable_coupler_computational_state_indices(
+                              static_cast<Index>(tc_nq),
+                              static_cast<Index>(tc_nc),
+                              static_cast<Index>(tc_cd))
+                        : tunable_coupler_computational_density_indices(
+                              static_cast<Index>(tc_nq),
+                              static_cast<Index>(tc_nc),
+                              static_cast<Index>(tc_cd));
             } else {
                 tc_config.state_selection.evolve_all_states = true;
                 tc_config.state_selection.selected_state_indices.clear();
             }
 
-            if (tc_batch_set == PETSC_TRUE && tc_comp != PETSC_TRUE) {
+            if (tc_schrod == PETSC_TRUE) {
+                tc_dump_states_schrodinger(tc_config);
+            } else if (tc_batch_set == PETSC_TRUE && tc_comp != PETSC_TRUE) {
                 tc_dump_batch_sweep(tc_config, parse_batch_sizes_csv(tc_batch_buf));
             } else {
                 PetscBool dump_cpu = PETSC_FALSE;

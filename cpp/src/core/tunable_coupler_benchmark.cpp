@@ -825,16 +825,11 @@ Model build_tunable_coupler_model(const TunableCouplerBenchmarkConfig& config)
         local_dims, hamiltonian_terms, dissipator_terms, time_dependent_terms};
 }
 
-std::vector<Index> tunable_coupler_computational_density_indices(
+std::vector<Index> tunable_coupler_computational_state_indices(
     Index num_qubits, Index num_couplers, Index cutoff_dim)
 {
     const Index n_elem = num_qubits + num_couplers;
     const Index d = cutoff_dim;
-
-    Index D = 1;
-    for (Index i = 0; i < n_elem; ++i) {
-        D *= d;
-    }
 
     // Site-0-major strides: stride[i] = d^(n_elem-1-i).
     std::vector<Index> stride(n_elem, 1);
@@ -854,6 +849,20 @@ std::vector<Index> tunable_coupler_computational_density_indices(
         }
         ket_hilbert[a] = h;
     }
+    return ket_hilbert;
+}
+
+std::vector<Index> tunable_coupler_computational_density_indices(
+    Index num_qubits, Index num_couplers, Index cutoff_dim)
+{
+    const Index n_elem = num_qubits + num_couplers;
+    Index D = 1;
+    for (Index i = 0; i < n_elem; ++i) {
+        D *= cutoff_dim;
+    }
+    const std::vector<Index> ket_hilbert =
+        tunable_coupler_computational_state_indices(num_qubits, num_couplers, cutoff_dim);
+    const Index num_comp = ket_hilbert.size();
 
     std::vector<Index> indices;
     indices.reserve(num_comp * num_comp);
@@ -932,6 +941,38 @@ TransmonChainBenchmarkTiming run_tunable_coupler_cuda_benchmark(
         solver, initial_states, config.t0, config.tfinal,
         config.batched_num_steps, ctx);
 
+    const auto t_end = std::chrono::steady_clock::now();
+    timing.wall_seconds = std::chrono::duration<double>(t_end - t_start).count();
+
+    PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
+    return timing;
+}
+
+TransmonChainBenchmarkTiming run_tunable_coupler_schrodinger_cuda_benchmark(
+    const TunableCouplerBenchmarkConfig& config)
+{
+    Model model = build_tunable_coupler_model(config);
+    model.dissipator_terms.clear();  // closed system: evolve the Schrodinger equation only
+    const Solver solver = make_solver(model);
+
+    std::vector<Index> selected_indices = config.state_selection.selected_state_indices;
+    if (selected_indices.empty()) {
+        selected_indices = tunable_coupler_computational_state_indices(
+            config.num_qubits, config.num_couplers, config.cutoff_dim);
+    }
+    const std::vector<std::vector<Complex>> initial_states =
+        make_selected_basis_state_vectors(solver, selected_indices);
+
+    CudaBatchExecutionContext ctx{};
+    PetscCallAbort(
+        PETSC_COMM_SELF,
+        create_cuda_state_vector_execution_context(solver, selected_indices.size(), ctx));
+
+    const auto t_start = std::chrono::steady_clock::now();
+    TransmonChainBenchmarkTiming timing;
+    timing.num_evolved_states = selected_indices.size();
+    timing.final_states = evolve_state_vector_batch_cuda_ts(
+        solver, initial_states, config.t0, config.tfinal, config.batched_num_steps, ctx);
     const auto t_end = std::chrono::steady_clock::now();
     timing.wall_seconds = std::chrono::duration<double>(t_end - t_start).count();
 
