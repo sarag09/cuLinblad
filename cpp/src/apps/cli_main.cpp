@@ -24,6 +24,7 @@
 #include "culindblad/grouped_state_layout.hpp"
 #include "culindblad/model.hpp"
 #include "culindblad/model_io.hpp"
+#include "culindblad/pulse_envelope.hpp"
 #include "culindblad/petsc_cuda_ts_rhs.hpp"
 #include "culindblad/solver.hpp"
 #include "culindblad/time_dependent_term.hpp"
@@ -812,6 +813,72 @@ int run_load_model_selftest() {
     return fails == 0 ? 0 : 1;
 }
 
+// Segment 2 gate: the pulse-envelope factory matches the Julia gate_sim.jl formulas at sample points,
+// and the product-of-sqrt coupling coefficient is built correctly through the full loader.
+int run_pulse_factory_selftest() {
+    using namespace culindblad;
+    int fails = 0;
+    auto close = [&](double got, double want, const std::string& msg) {
+        if (std::abs(got - want) > 1e-12) {
+            std::cerr << "  [pulse_factory_selftest] FAIL " << msg << ": got "
+                      << std::setprecision(17) << got << " want " << want << std::endl;
+            ++fails;
+        }
+    };
+    {
+        EnvelopeSpec s; s.shape = "sine"; s.a = 2; s.b = 1; s.T = 10;
+        const TimeScalarFunction f = make_envelope(s);
+        close(f(5.0), 2.0, "sine t=5"); close(f(0.0), 1.0, "sine t=0");
+        close(f(10.0), 1.0, "sine t=10"); close(f(2.5), 1.7071067811865475, "sine t=2.5");
+    }
+    {
+        EnvelopeSpec s; s.shape = "flattop"; s.a = 2; s.b = 1; s.T = 10; s.tr = 2;
+        const TimeScalarFunction f = make_envelope(s);
+        close(f(5.0), 2.0, "flattop hold"); close(f(1.0), 1.5, "flattop ramp");
+        close(f(0.0), 1.0, "flattop idle");
+    }
+    {
+        EnvelopeSpec s; s.shape = "flat_top_gaussian"; s.a = 2; s.b = 1; s.t0 = 3; s.tau = 4; s.sigma = 1;
+        close(make_envelope(s)(5.0), 1.9544997361036416, "flat_top_gaussian center");
+    }
+    {
+        EnvelopeSpec s; s.shape = "slepian"; s.omega1 = 1; s.K = 1; s.cg = std::sqrt(2.0); s.T = 10;
+        s.omega_c_idle = 99.0; s.ugrid = {0.0, 1.0}; s.thetagrid = {0.6, 0.6};
+        const TimeScalarFunction f = make_envelope(s);
+        close(f(5.0), 6.109428656516023, "slepian const-theta"); close(f(0.0), 99.0, "slepian idle");
+    }
+    // product_sqrt coupling coefficient through the full loader: sqrt(4)*sqrt(9) = 6 at t=5.
+    {
+        const std::string p = "/tmp/culindblad_pulse_selftest.json";
+        const char* doc = R"JSON({
+          "device":{"local_dims":[2,2],"n_qubits":1,"n_couplers":1}, "system":"closed",
+          "hamiltonian_terms":[], "dissipator_terms":[],
+          "time_dependent_terms":[
+            {"name":"cpl","sites":[0,1],"row_dim":4,"col_dim":4,
+             "matrix":{"real":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                       "imag":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]},
+             "coefficient":{"kind":"product_sqrt","keys":["e1","e2"]}}],
+          "envelopes":{"e1":{"shape":"sine","a":4,"b":4,"T":10},
+                       "e2":{"shape":"sine","a":9,"b":9,"T":10}},
+          "evolution":{"tfinal":10.0}, "initial_states":{"encoding":"computational","num_states":2} })JSON";
+        { std::ofstream f(p); f << doc; }
+        try {
+            const LoadedModel lm = load_model_from_json(p);
+            if (lm.model.time_dependent_hamiltonian_terms.size() != 1) {
+                std::cerr << "  [pulse_factory_selftest] FAIL: expected 1 td term" << std::endl; ++fails;
+            } else {
+                close(lm.model.time_dependent_hamiltonian_terms[0].coefficient(5.0), 6.0,
+                      "product_sqrt sqrt(4)*sqrt(9)");
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "  [pulse_factory_selftest] product_sqrt threw: " << e.what() << std::endl; ++fails;
+        }
+        std::remove(p.c_str());
+    }
+    if (fails == 0) std::cout << "  [pulse_factory_selftest] PASS" << std::endl;
+    return fails == 0 ? 0 : 1;
+}
+
 int run_psi_kernel_selftest() {
     using culindblad::CudaGroupedStateLayout;
     using culindblad::GroupedStateLayout;
@@ -1032,9 +1099,10 @@ int main(int argc, char** argv)
     PetscBool load_model_selftest = PETSC_FALSE;
     PetscOptionsGetBool(nullptr, nullptr, "-load_model_selftest", &load_model_selftest, nullptr);
     if (load_model_selftest == PETSC_TRUE) {
-        const int rc = run_load_model_selftest();
+        const int rc_des = run_load_model_selftest();
+        const int rc_pulse = run_pulse_factory_selftest();
         PetscFinalize();
-        return rc;
+        return (rc_des == 0 && rc_pulse == 0) ? 0 : 1;
     }
 
     try {

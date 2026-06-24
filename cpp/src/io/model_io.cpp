@@ -1,11 +1,15 @@
 #include "culindblad/model_io.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <fstream>
+#include <map>
 #include <numeric>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
+
+#include "culindblad/pulse_envelope.hpp"
 
 namespace culindblad {
 
@@ -44,6 +48,25 @@ std::size_t block_dim_over_sites(const std::vector<Index>& local_dims,
         d *= static_cast<std::size_t>(local_dims[s]);
     }
     return d;
+}
+
+EnvelopeSpec parse_envelope_spec(const json& e) {
+    EnvelopeSpec s;
+    s.shape = e.at("shape").get<std::string>();
+    s.a = e.value("a", 0.0);
+    s.b = e.value("b", 0.0);
+    s.T = e.value("T", 0.0);
+    s.tr = e.value("tr", 0.0);
+    s.t0 = e.value("t0", 0.0);
+    s.tau = e.value("tau", 0.0);
+    s.sigma = e.value("sigma", 0.0);
+    s.omega1 = e.value("omega1", 0.0);
+    s.K = e.value("K", 0.0);
+    s.cg = e.value("cg", 0.0);
+    s.omega_c_idle = e.value("omega_c_idle", 0.0);
+    if (e.contains("ugrid")) s.ugrid = e.at("ugrid").get<std::vector<double>>();
+    if (e.contains("thetagrid")) s.thetagrid = e.at("thetagrid").get<std::vector<double>>();
+    return s;
 }
 
 OperatorTerm parse_term(const json& t, TermKind kind, const std::vector<Index>& local_dims) {
@@ -111,10 +134,59 @@ LoadedModel load_model_from_json(const std::string& path) {
                                  + std::to_string(lm.model.dissipator_terms.size()) + " dissipator_terms");
     }
 
-    // Time-dependent terms + envelopes: wired by the pulse-factory segment. Require the keys to exist
-    // (so a malformed file is caught) but do not yet build coefficients.
+    // Envelopes -> named TimeScalarFunctions (closed-form replay of the Julia gate_sim.jl structs).
+    std::map<std::string, TimeScalarFunction> envs;
+    if (j.contains("envelopes")) {
+        for (auto it = j.at("envelopes").begin(); it != j.at("envelopes").end(); ++it) {
+            envs[it.key()] = make_envelope(parse_envelope_spec(it.value()));
+        }
+    }
+    auto lookup_env = [&envs](const std::string& key) -> const TimeScalarFunction& {
+        auto e = envs.find(key);
+        if (e == envs.end()) {
+            throw std::runtime_error("model_io: time-dependent term references unknown envelope '" + key + "'");
+        }
+        return e->second;
+    };
+
+    // Time-dependent Hamiltonian terms: H(t) = H0 + sum_i coeff_i(t) * H_i.
     if (!j.contains("time_dependent_terms")) {
         throw std::runtime_error("model_io: missing 'time_dependent_terms' (may be [])");
+    }
+    for (const json& t : j.at("time_dependent_terms")) {
+        TimeDependentTerm td;
+        td.name = t.value("name", std::string());
+        td.sites = t.at("sites").get<std::vector<Index>>();
+        td.rows = t.at("row_dim").get<Index>();
+        td.cols = t.at("col_dim").get<Index>();
+        const std::string where = "td term '" + td.name + "'";
+        const std::size_t expect = block_dim_over_sites(lm.model.local_dims, td.sites, where);
+        if (static_cast<std::size_t>(td.rows) != expect ||
+            static_cast<std::size_t>(td.cols) != expect) {
+            throw std::runtime_error("model_io: " + where + " row/col_dim != product of site dims "
+                                     + std::to_string(expect));
+        }
+        td.matrix = parse_matrix(t.at("matrix"),
+                                 static_cast<std::size_t>(td.rows) * static_cast<std::size_t>(td.cols),
+                                 where);
+        const json& coeff = t.at("coefficient");
+        const std::string kind = coeff.at("kind").get<std::string>();
+        if (kind == "envelope") {
+            td.coefficient = lookup_env(coeff.at("key").get<std::string>());
+        } else if (kind == "product_sqrt") {
+            std::vector<TimeScalarFunction> fns;
+            for (const json& k : coeff.at("keys")) {
+                fns.push_back(lookup_env(k.get<std::string>()));
+            }
+            td.coefficient = [fns](double t) {
+                double r = 1.0;
+                for (const TimeScalarFunction& f : fns) r *= std::sqrt(f(t));
+                return r;
+            };
+        } else {
+            throw std::runtime_error("model_io: " + where + " unknown coefficient kind '" + kind + "'");
+        }
+        lm.model.time_dependent_hamiltonian_terms.push_back(std::move(td));
     }
 
     const json& ev = j.at("evolution");

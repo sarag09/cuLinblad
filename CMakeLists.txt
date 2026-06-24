@@ -66,6 +66,7 @@ add_executable(run_sim
     cpp/src/core/transmon_chain_benchmark.cpp
     cpp/src/core/tunable_coupler_benchmark.cpp
     cpp/src/io/model_io.cpp
+    cpp/src/io/pulse_envelope.cpp
 )
 
 target_include_directories(run_sim PRIVATE
