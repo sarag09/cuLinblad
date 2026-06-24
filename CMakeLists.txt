@@ -65,10 +65,12 @@ add_executable(run_sim
     cpp/src/backends/cuda/batched_grouped_apply.cpp
     cpp/src/core/transmon_chain_benchmark.cpp
     cpp/src/core/tunable_coupler_benchmark.cpp
+    cpp/src/io/model_io.cpp
 )
 
 target_include_directories(run_sim PRIVATE
     cpp/include
+    cpp/third_party
 )
 
 target_link_libraries(run_sim PRIVATE

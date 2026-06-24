@@ -23,6 +23,7 @@
 #include "culindblad/cuda_grouped_layout.hpp"
 #include "culindblad/grouped_state_layout.hpp"
 #include "culindblad/model.hpp"
+#include "culindblad/model_io.hpp"
 #include "culindblad/petsc_cuda_ts_rhs.hpp"
 #include "culindblad/solver.hpp"
 #include "culindblad/time_dependent_term.hpp"
@@ -730,6 +731,87 @@ std::vector<Complex> brute_force_minus_i_H_psi(
     return out;
 }
 
+// Segment 1 gate: round-trip a hand-written term-list JSON through load_model_from_json and assert
+// the Model is populated element-exact (row-major), plus the dim + system/dissipator invariants fire.
+int run_load_model_selftest() {
+    using namespace culindblad;
+    int fails = 0;
+    auto check = [&](bool ok, const std::string& msg) {
+        if (!ok) { std::cerr << "  [load_model_selftest] FAIL: " << msg << std::endl; ++fails; }
+    };
+
+    const std::string good_path = "/tmp/culindblad_model_selftest.json";
+    const char* good = R"JSON({
+      "schema_version": 1,
+      "device": { "site_labels":["Q1","C1"], "local_dims":[2,2], "n_qubits":1, "n_couplers":1 },
+      "system": "closed",
+      "hamiltonian_terms": [
+        { "name":"h1", "sites":[0], "row_dim":2, "col_dim":2,
+          "matrix": { "real":[1,2,3,4], "imag":[0,0,0,0.5] } },
+        { "name":"h2", "sites":[0,1], "row_dim":4, "col_dim":4,
+          "matrix": { "real":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],
+                      "imag":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0] } }
+      ],
+      "dissipator_terms": [],
+      "time_dependent_terms": [],
+      "evolution": { "t0":0.0, "tfinal":1.0e-8, "num_steps":123, "rotating_frame":true,
+                     "frame_omegas":[1.5, 2.5], "result_frame":"lab" },
+      "initial_states": { "encoding":"computational", "num_states":2 }
+    })JSON";
+    { std::ofstream f(good_path); f << good; }
+
+    try {
+        const LoadedModel lm = load_model_from_json(good_path);
+        check(lm.model.local_dims == std::vector<Index>({2, 2}), "local_dims");
+        check(!lm.is_open, "system closed");
+        check(lm.num_qubits == 1 && lm.num_couplers == 1, "n_qubits/couplers");
+        check(lm.model.hamiltonian_terms.size() == 2, "num hamiltonian_terms");
+        check(lm.model.dissipator_terms.empty(), "no dissipators (closed)");
+        const OperatorTerm& h1 = lm.model.hamiltonian_terms.at(0);
+        check(h1.kind == TermKind::Hamiltonian && h1.sites == std::vector<Index>({0}), "h1 kind/sites");
+        check(h1.row_dim == 2 && h1.col_dim == 2 && h1.matrix.size() == 4, "h1 dims");
+        // row-major [1,2,3,4] with imag[3]=0.5 -> matrix[3] == (4, 0.5)
+        check(h1.matrix[0] == Complex(1, 0) && h1.matrix[3] == Complex(4, 0.5), "h1 row-major values");
+        const OperatorTerm& h2 = lm.model.hamiltonian_terms.at(1);
+        check(h2.sites == std::vector<Index>({0, 1}), "h2 sites");
+        check(h2.row_dim == 4 && h2.col_dim == 4 && h2.matrix.size() == 16, "h2 dims");
+        check(h2.matrix[0] == Complex(1, 0) && h2.matrix[15] == Complex(16, 0), "h2 endpoints");
+        check(lm.evolution.num_steps == 123 && lm.evolution.rotating_frame, "evolution num_steps/frame");
+        check(lm.evolution.frame_omegas == std::vector<double>({1.5, 2.5}), "frame_omegas");
+        check(lm.evolution.result_frame == "lab", "result_frame");
+        check(lm.initial_states.num_states == 2, "num_states");
+    } catch (const std::exception& e) {
+        std::cerr << "  [load_model_selftest] good doc threw: " << e.what() << std::endl;
+        ++fails;
+    }
+    std::remove(good_path.c_str());
+
+    // Invariant 1: system=="closed" with a dissipator must throw (valid dims so the dim check passes).
+    auto expect_throw = [&](const char* doc, const std::string& msg) {
+        const std::string p = "/tmp/culindblad_model_selftest_bad.json";
+        { std::ofstream f(p); f << doc; }
+        bool threw = false;
+        try { (void)load_model_from_json(p); } catch (const std::exception&) { threw = true; }
+        check(threw, msg);
+        std::remove(p.c_str());
+    };
+    expect_throw(R"JSON({ "device":{"local_dims":[2]}, "system":"closed", "hamiltonian_terms":[],
+      "dissipator_terms":[{"name":"d","sites":[0],"row_dim":2,"col_dim":2,
+        "matrix":{"real":[0,0,0,0],"imag":[0,0,0,0]}}],
+      "time_dependent_terms":[], "evolution":{"tfinal":1e-8}, "initial_states":{} })JSON",
+      "closed + dissipator should throw");
+    // Invariant 2: a block whose row/col_dim != product of site dims must throw (the convention guard).
+    expect_throw(R"JSON({ "device":{"local_dims":[3,3]}, "system":"closed",
+      "hamiltonian_terms":[{"name":"bad","sites":[0],"row_dim":2,"col_dim":2,
+        "matrix":{"real":[0,0,0,0],"imag":[0,0,0,0]}}],
+      "dissipator_terms":[], "time_dependent_terms":[], "evolution":{"tfinal":1e-8},
+      "initial_states":{} })JSON",
+      "row_dim != product of site dims should throw");
+
+    if (fails == 0) std::cout << "  [load_model_selftest] PASS" << std::endl;
+    return fails == 0 ? 0 : 1;
+}
+
 int run_psi_kernel_selftest() {
     using culindblad::CudaGroupedStateLayout;
     using culindblad::GroupedStateLayout;
@@ -945,6 +1027,14 @@ int main(int argc, char** argv)
         const int rc_evolve = culindblad::run_psi_evolve_schrodinger_selftest();
         PetscFinalize();
         return (rc_kernel == 0 && rc_rhs == 0 && rc_evolve == 0) ? 0 : 1;
+    }
+
+    PetscBool load_model_selftest = PETSC_FALSE;
+    PetscOptionsGetBool(nullptr, nullptr, "-load_model_selftest", &load_model_selftest, nullptr);
+    if (load_model_selftest == PETSC_TRUE) {
+        const int rc = run_load_model_selftest();
+        PetscFinalize();
+        return rc;
     }
 
     try {
