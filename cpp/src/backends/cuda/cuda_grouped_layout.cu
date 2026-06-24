@@ -279,6 +279,44 @@ __global__ void batched_psi_fused_diagonal_kernel(
     flat_output[idx] = cuCadd(flat_output[idx], val);
 }
 
+// Open-system (density) fused single-site diagonal: one regroup-free flat-direct pass folding ALL
+// single-site Liouvillian-diagonal contributions. site_factors holds a per-site dim x dim matrix
+// F_s[ket,bra] = -i(Dh[ket]-Dh[bra]) - 0.5(Dn[ket]+Dn[bra]) + Dj[ket]conj(Dj[bra]) (the commutator
+// + diagonal anti-commutator + dephase jump; the -i is baked in host-side). For a density element
+// idx = ket_full*D + bra_full this applies f[idx] += (sum_s F_s[ket_s,bra_s]) * rho[idx]. The relax
+// (dense) jump still runs per-layer (it needs the regroup); only the diagonal kernels are folded.
+__global__ void batched_rho_fused_diagonal_kernel(
+    const cuDoubleComplex* site_factors,
+    const Index* site_desc,
+    Index num_folded,
+    const cuDoubleComplex* rho_flat,
+    cuDoubleComplex* flat_output,
+    Index hilbert_dim,
+    Index batch_size)
+{
+    const Index density_dim = hilbert_dim * hilbert_dim;
+    const Index total = batch_size * density_dim;
+    const Index idx =
+        static_cast<Index>(blockIdx.x) * static_cast<Index>(blockDim.x) +
+        static_cast<Index>(threadIdx.x);
+    if (idx >= total) {
+        return;
+    }
+    const Index local = idx % density_dim;
+    const Index ket_full = local / hilbert_dim;
+    const Index bra_full = local % hilbert_dim;
+    cuDoubleComplex factor = make_cuDoubleComplex(0.0, 0.0);
+    for (Index sfold = 0; sfold < num_folded; ++sfold) {
+        const Index off = site_desc[3 * sfold];
+        const Index stride = site_desc[3 * sfold + 1];
+        const Index dim = site_desc[3 * sfold + 2];
+        const Index ket_s = (ket_full / stride) % dim;
+        const Index bra_s = (bra_full / stride) % dim;
+        factor = cuCadd(factor, site_factors[off + ket_s * dim + bra_s]);
+    }
+    flat_output[idx] = cuCadd(flat_output[idx], cuCmul(factor, rho_flat[idx]));
+}
+
 // One-sided left action -i*H_diag|psi> for a single-site diagonal term (h_diag indexed by the
 // target-site occupation), accumulated into the flat RHS f.
 __global__ void batched_grouped_diagonal_left_to_flat_kernel(
@@ -997,6 +1035,32 @@ bool launch_psi_fused_diagonal_kernel(
         reinterpret_cast<const Index*>(site_desc),
         num_folded,
         reinterpret_cast<const cuDoubleComplex*>(psi_flat),
+        reinterpret_cast<cuDoubleComplex*>(flat_output),
+        hilbert_dim,
+        batch_size);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_rho_fused_diagonal_kernel(
+    const void* site_factors,
+    const void* site_desc,
+    Index num_folded,
+    const void* rho_flat,
+    void* flat_output,
+    Index hilbert_dim,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    constexpr int block_size = 256;
+    const Index total = batch_size * hilbert_dim * hilbert_dim;
+    const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
+
+    batched_rho_fused_diagonal_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const cuDoubleComplex*>(site_factors),
+        reinterpret_cast<const Index*>(site_desc),
+        num_folded,
+        reinterpret_cast<const cuDoubleComplex*>(rho_flat),
         reinterpret_cast<cuDoubleComplex*>(flat_output),
         hilbert_dim,
         batch_size);

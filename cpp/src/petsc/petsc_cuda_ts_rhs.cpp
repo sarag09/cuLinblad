@@ -707,6 +707,108 @@ PetscErrorCode apply_fused_psi_diagonal_prepass(
     return 0;
 }
 
+// OPEN-system fused single-site diagonal pre-pass: fold every single-site layer's Liouvillian
+// diagonal (commutator + diagonal anti-commutator + dephase jump) into one regroup-free flat-direct
+// pass over rho. Builds a per-site dim x dim factor F_s[ket,bra] = -i(Dh[ket]-Dh[bra]) -
+// 0.5(Dn[ket]+Dn[bra]) + Dj[ket]conj(Dj[bra]) host-side from the layer's effective-H / norm /
+// dephase-jump diagonals; the GPU sums F_s[ket_s,bra_s] over folded sites. The per-layer loop must
+// SKIP the single-site fused-diagonal kernel but KEEP the regroup + relax dense jump (which need the
+// grouped layout). Only folds layers with <=1 diagonal jump (those that take the to-flat branch).
+PetscErrorCode apply_open_fused_diagonal_prepass(
+    const Solver& solver,
+    PetscCudaTsRhsContext& rhs_ctx,
+    Vec x,
+    Vec f,
+    PetscReal t)
+{
+    cudaStream_t s = rhs_ctx.elementwise_stream;
+    const Index D = solver.layout.hilbert_dim;
+    const std::vector<Index>& dims = solver.model.local_dims;
+    const Index n = dims.size();
+    std::vector<Index> full_stride(n, 1);
+    for (Index i = n; i-- > 1;) {
+        full_stride[i - 1] = full_stride[i] * dims[i];
+    }
+
+    std::vector<Complex> factors;
+    std::vector<Index> desc;
+    for (CachedGroupedLayoutEntry& entry : rhs_ctx.cached_grouped_layouts) {
+        if (entry.sites.size() != 1) {
+            continue;
+        }
+        int n_diag_jumps = 0;
+        const std::vector<Complex>* dephase = nullptr;
+        for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx.cached_static_dissipators) {
+            if (same_sites(entry.sites, d_aux.sites) && !d_aux.jump_diagonal.empty()) {
+                ++n_diag_jumps;
+                if (dephase == nullptr) {
+                    dephase = &d_aux.jump_diagonal;
+                }
+            }
+        }
+        if (n_diag_jumps > 1) {
+            continue;  // takes the accumulate branch (not the to-flat path); not skipped in the loop
+        }
+        std::vector<Complex> effective_hamiltonian = entry.static_hamiltonian_sum;
+        bool has_effective_hamiltonian = !effective_hamiltonian.empty();
+        for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
+            if (!same_sites(entry.sites, td_term.sites)) {
+                continue;
+            }
+            accumulate_operator_scaled(
+                td_term.matrix,
+                evaluate_time_dependent_coefficient(td_term, static_cast<double>(t)),
+                effective_hamiltonian);
+            has_effective_hamiltonian = true;
+        }
+        if (!has_effective_hamiltonian) {
+            continue;
+        }
+        const Index matrix_dim = static_cast<Index>(std::llround(std::sqrt(
+            static_cast<double>(effective_hamiltonian.size()))));
+        std::vector<Complex> Dh;
+        if (!try_extract_local_diagonal(effective_hamiltonian, matrix_dim, Dh)) {
+            continue;
+        }
+        const Index site = entry.sites[0];
+        const Index ds = dims[site];
+        const std::vector<Complex>& Dn = entry.static_dissipator_norm_diagonal;
+        desc.push_back(static_cast<Index>(factors.size()));
+        desc.push_back(full_stride[site]);
+        desc.push_back(ds);
+        const Complex minus_i(0.0, -1.0);
+        for (Index ket = 0; ket < ds; ++ket) {
+            for (Index bra = 0; bra < ds; ++bra) {
+                Complex fval = minus_i * (Dh[ket] - Dh[bra]);
+                if (!Dn.empty()) {
+                    fval += -0.5 * (Dn[ket] + Dn[bra]);
+                }
+                if (dephase != nullptr) {
+                    fval += (*dephase)[ket] * std::conj((*dephase)[bra]);
+                }
+                factors.push_back(fval);
+            }
+        }
+    }
+    const Index num_folded = static_cast<Index>(desc.size() / 3);
+    if (num_folded == 0) {
+        return 0;
+    }
+    if (cudaMemcpyAsync(rhs_ctx.grouped_scratch.d_open_diag_factors, factors.data(),
+                        factors.size() * sizeof(Complex),
+                        cudaMemcpyHostToDevice, s) != cudaSuccess ||
+        cudaMemcpyAsync(rhs_ctx.grouped_scratch.d_open_diag_desc, desc.data(),
+                        desc.size() * sizeof(Index),
+                        cudaMemcpyHostToDevice, s) != cudaSuccess) {
+        return PETSC_ERR_LIB;
+    }
+    PetscCall(apply_rho_fused_diagonal_to_petsc_vec(
+        rhs_ctx.grouped_scratch.d_open_diag_factors,
+        rhs_ctx.grouped_scratch.d_open_diag_desc,
+        num_folded, x, f, D, rhs_ctx.batch_size, s));
+    return 0;
+}
+
 PetscErrorCode apply_grouped_layout_terms_to_rhs(
     const Solver& solver,
     PetscCudaTsRhsContext& rhs_ctx,
@@ -766,6 +868,15 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
         PetscInt fuse_opt = 0;
         PetscOptionsGetInt(nullptr, nullptr, "-tc_fuse_coupling", &fuse_opt, nullptr);
         s_fuse_coupling = (fuse_opt != 0) ? 1 : 0;
+    }
+    // -tc_fused_diag_prepass folds all single-site diagonals into one flat pass BEFORE the layer
+    // loop (apply_open_fused_diagonal_prepass); here the single-site to-flat branch then skips the
+    // fused-diagonal kernel and runs only the relax dense jump.
+    static int s_fused_diag_prepass = -1;
+    if (s_fused_diag_prepass < 0) {
+        PetscInt prepass_opt = 0;
+        PetscOptionsGetInt(nullptr, nullptr, "-tc_fused_diag_prepass", &prepass_opt, nullptr);
+        s_fused_diag_prepass = (prepass_opt != 0) ? 1 : 0;
     }
     if (s_fused_diagonal == 1 && has_effective_hamiltonian) {
         const Index matrix_dim = static_cast<Index>(std::llround(std::sqrt(
@@ -838,11 +949,16 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             // when there is no extra diagonal jump (the fused kernel folds in exactly one;
             // there is no diagonal-jump-to-flat variant).
             if (s_fuse_coupling == 1 && n_diag_jumps <= 1) {
-                PetscCall(apply_grouped_fused_diagonal_to_petsc_vec(
-                    layout_entry.cuda_grouped_layout,
-                    layout_entry.d_dynamic_diagonal, norm_ptr, fused_jump,
-                    rhs_ctx.grouped_scratch.d_grouped_input,
-                    f, rhs_ctx.batch_size, s));
+                // When the fused-diagonal pre-pass is on, all single-site diagonals are already
+                // folded into one flat pass before the layer loop; here run only the relax dense
+                // jump (which needs the regroup done above).
+                if (s_fused_diag_prepass == 0) {
+                    PetscCall(apply_grouped_fused_diagonal_to_petsc_vec(
+                        layout_entry.cuda_grouped_layout,
+                        layout_entry.d_dynamic_diagonal, norm_ptr, fused_jump,
+                        rhs_ctx.grouped_scratch.d_grouped_input,
+                        f, rhs_ctx.batch_size, s));
+                }
                 for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx.cached_static_dissipators) {
                     if (same_sites(layout_entry.sites, d_aux.sites) &&
                         d_aux.jump_diagonal.empty() && d_aux.d_l_op != nullptr) {
@@ -1332,6 +1448,23 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
 
     const Index total_density_dim = rhs_total_density_dim(*rhs_ctx);
     PetscCall(zero_petsc_cuda_vec(f, total_density_dim, s));
+
+    // Fused single-site diagonal pre-pass (opt-in -tc_fused_diag_prepass; only meaningful with the
+    // fuse-coupling to-flat path). Folds all single-site Liouvillian diagonals into one flat pass;
+    // the per-layer loop then skips the single-site fused-diagonal kernel (keeping its relax jump).
+    static int s_prepass = -1;
+    static int s_prepass_fuse = -1;
+    if (s_prepass < 0) {
+        PetscInt prepass_opt = 0;
+        PetscOptionsGetInt(nullptr, nullptr, "-tc_fused_diag_prepass", &prepass_opt, nullptr);
+        s_prepass = (prepass_opt != 0) ? 1 : 0;
+        PetscInt fuse_opt = 0;
+        PetscOptionsGetInt(nullptr, nullptr, "-tc_fuse_coupling", &fuse_opt, nullptr);
+        s_prepass_fuse = (fuse_opt != 0) ? 1 : 0;
+    }
+    if (s_prepass == 1 && s_prepass_fuse == 1) {
+        PetscCall(apply_open_fused_diagonal_prepass(solver, *rhs_ctx, x, f, t));
+    }
 
     for (CachedGroupedLayoutEntry& layout_entry : rhs_ctx->cached_grouped_layouts) {
         PetscCall(apply_grouped_layout_terms_to_rhs(

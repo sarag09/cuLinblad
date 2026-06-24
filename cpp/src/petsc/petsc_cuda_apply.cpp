@@ -1566,6 +1566,29 @@ PetscErrorCode apply_psi_fused_diagonal_to_petsc_vec(
     return ok ? 0 : PETSC_ERR_LIB;
 }
 
+// Open-system fused single-site diagonal: -i*(folded diagonal)*rho straight from x into y.
+PetscErrorCode apply_rho_fused_diagonal_to_petsc_vec(
+    const void* site_factors,
+    const void* site_desc,
+    Index num_folded,
+    Vec x,
+    Vec y,
+    Index hilbert_dim,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    const void* d_rho = nullptr;
+    PetscCall(get_petsc_vec_device_read_ptr(x, d_rho));
+    void* d_flat_output = nullptr;
+    PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
+    const bool ok = launch_rho_fused_diagonal_kernel(
+        site_factors, site_desc, num_folded, d_rho, d_flat_output,
+        hilbert_dim, batch_size, stream);
+    PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+    PetscCall(restore_petsc_vec_device_read_ptr(x, d_rho));
+    return ok ? 0 : PETSC_ERR_LIB;
+}
+
 PetscErrorCode apply_grouped_fused_diagonal_to_petsc_vec(
     const CudaGroupedStateLayout& cuda_grouped_layout,
     const void* h_diag,

@@ -130,6 +130,18 @@ bool launch_psi_fused_diagonal_kernel(
     Index batch_size,
     cudaStream_t stream);
 
+// Open-system fused single-site diagonal: f[idx] += (sum_s F_s[ket_s,bra_s]) * rho[idx] over the
+// full flat density vector (F_s = per-site dim x dim Liouvillian-diagonal factor, -i baked in).
+bool launch_rho_fused_diagonal_kernel(
+    const void* site_factors,
+    const void* site_desc,
+    Index num_folded,
+    const void* rho_flat,
+    void* flat_output,
+    Index hilbert_dim,
+    Index batch_size,
+    cudaStream_t stream);
+
 // Accumulating variant: flat_output[f] += grouped_input[g] (flat_output not overwritten).
 bool launch_grouped_to_flat_accumulate_batched_kernel(
     const CudaGroupedStateLayout& cuda_layout,

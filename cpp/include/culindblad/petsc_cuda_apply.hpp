@@ -120,6 +120,16 @@ PetscErrorCode apply_psi_fused_diagonal_to_petsc_vec(
     Index batch_size,
     cudaStream_t stream);
 
+PetscErrorCode apply_rho_fused_diagonal_to_petsc_vec(
+    const void* site_factors,
+    const void* site_desc,
+    Index num_folded,
+    Vec x,
+    Vec y,
+    Index hilbert_dim,
+    Index batch_size,
+    cudaStream_t stream);
+
 PetscErrorCode flatten_grouped_buffer_to_petsc_cuda_vec(
     const CudaGroupedStateLayout& cuda_grouped_layout,
     const void* d_grouped_input,

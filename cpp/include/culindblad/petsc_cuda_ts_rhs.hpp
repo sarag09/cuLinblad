@@ -83,6 +83,12 @@ struct GroupedRhsScratchBuffers {
     void* d_psi_site_diags = nullptr;
     Index* d_psi_site_desc = nullptr;
     std::size_t psi_site_diags_bytes = 0;
+    // Open-system fused single-site diagonal pre-pass (-tc_fused_diag_prepass): per-site dim x dim
+    // Liouvillian-diagonal factor matrices F_s (sum of folded dim^2) + their [offset,stride,dim]
+    // descriptor. Tiny; lazily allocated on the density scratch.
+    void* d_open_diag_factors = nullptr;
+    Index* d_open_diag_desc = nullptr;
+    std::size_t open_diag_factors_bytes = 0;
 };
 
 struct PetscCudaTsRhsContext {

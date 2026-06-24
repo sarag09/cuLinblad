@@ -561,6 +561,31 @@ PetscErrorCode create_grouped_rhs_scratch_buffers(
         return PETSC_ERR_MEM;
     }
 
+    // Tiny scratch for the open fused-diagonal pre-pass (-tc_fused_diag_prepass): per-site dim x dim
+    // factor matrices (sum of dim^2, generous bound) + their [offset,stride,dim] descriptor.
+    if (rhs_ctx.solver != nullptr) {
+        std::size_t total_dim_sq = 0;
+        for (Index dlen : rhs_ctx.solver->model.local_dims) {
+            total_dim_sq += static_cast<std::size_t>(dlen) * static_cast<std::size_t>(dlen);
+        }
+        const std::size_t fbytes = std::max<std::size_t>(1, total_dim_sq) * sizeof(Complex);
+        const std::size_t dbytes =
+            std::max<std::size_t>(1, 3 * rhs_ctx.solver->model.local_dims.size()) * sizeof(Index);
+        if (cudaMalloc(&rhs_ctx.grouped_scratch.d_open_diag_factors, fbytes) != cudaSuccess ||
+            cudaMalloc(reinterpret_cast<void**>(&rhs_ctx.grouped_scratch.d_open_diag_desc),
+                       dbytes) != cudaSuccess) {
+            if (rhs_ctx.grouped_scratch.d_open_diag_factors != nullptr) {
+                cudaFree(rhs_ctx.grouped_scratch.d_open_diag_factors);
+                rhs_ctx.grouped_scratch.d_open_diag_factors = nullptr;
+            }
+            cudaFree(rhs_ctx.grouped_scratch.d_grouped_input);
+            rhs_ctx.grouped_scratch.d_grouped_input = nullptr;
+            rhs_ctx.grouped_scratch.grouped_bytes = 0;
+            return PETSC_ERR_MEM;
+        }
+        rhs_ctx.grouped_scratch.open_diag_factors_bytes = fbytes;
+    }
+
     return 0;
 }
 
@@ -626,6 +651,15 @@ void destroy_grouped_rhs_scratch_buffers(
         rhs_ctx.grouped_scratch.d_psi_site_desc = nullptr;
     }
     rhs_ctx.grouped_scratch.psi_site_diags_bytes = 0;
+    if (rhs_ctx.grouped_scratch.d_open_diag_factors != nullptr) {
+        cudaFree(rhs_ctx.grouped_scratch.d_open_diag_factors);
+        rhs_ctx.grouped_scratch.d_open_diag_factors = nullptr;
+    }
+    if (rhs_ctx.grouped_scratch.d_open_diag_desc != nullptr) {
+        cudaFree(rhs_ctx.grouped_scratch.d_open_diag_desc);
+        rhs_ctx.grouped_scratch.d_open_diag_desc = nullptr;
+    }
+    rhs_ctx.grouped_scratch.open_diag_factors_bytes = 0;
     if (rhs_ctx.grouped_scratch.d_grouped_accum != nullptr) {
         cudaFree(rhs_ctx.grouped_scratch.d_grouped_accum);
         rhs_ctx.grouped_scratch.d_grouped_accum = nullptr;
