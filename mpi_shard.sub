@@ -1,0 +1,25 @@
+# Condor submit for the MPI 2-GPU state-sharding run (single node, mpiexec -n 2 inside the job).
+# DEFAULT: the fast 2-GPU bit-identical CONFIRMATION (3Q2C, 200 steps, validate) -- run this FIRST
+# to confirm rank->GPU binding + bit-identical on two REAL GPUs (~minutes).
+# For the production 4Q4C 256-state anchor, change `arguments` to:  2 4 4 1000 run
+universe = vanilla
+executable = run_mpi_shard.sh
+arguments = 2 3 2 200 validate
+
+# Pin to qis4 (binary compiled for sm_120 Blackwell).
+requirements = (TARGET.IsOttenComputer =?= True) && (TARGET.Machine == "qis4.hep.wisc.edu")
+
+log = mpi_shard.log
+error = mpi_shard.err
+output = mpi_shard.out
+
++WantGPULab = true
++GPUJobLength = "medium"
+
+# 2 GPUs, one MPI rank each (must match arguments[0]). request_cpus = 2 per GPU + headroom.
+request_gpus = 2
+request_cpus = 8
+request_memory = 524288
+request_disk = 20000000
+
+queue
