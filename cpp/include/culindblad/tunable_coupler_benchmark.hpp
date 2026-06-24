@@ -92,6 +92,23 @@ std::vector<Index> tunable_coupler_computational_density_indices(
 std::vector<Index> tunable_coupler_computational_state_indices(
     Index num_qubits, Index num_couplers, Index cutoff_dim);
 
+// Mixed-dim (heterogeneous local_dims) computational-index generators for the loaded-model handoff
+// (same Q1=MSB, site-0-major convention). Qubits are sites 0..num_qubits-1.
+std::vector<Index> computational_state_indices_for_dims(
+    const std::vector<Index>& local_dims, Index num_qubits);
+std::vector<Index> computational_density_indices_for_dims(
+    const std::vector<Index>& local_dims, Index num_qubits);
+
+// Evolve a deserialized handoff Model in the LAB frame (matches the Julia reference; closed = |psi>
+// Schrodinger, open = rho Lindblad). Initial states are the selected computational kets / density
+// columns. Uses the -tc_integrator dispatch (pass -tc_integrator 1 for the custom RK4).
+TransmonChainBenchmarkTiming evolve_loaded_model_schrodinger(
+    const Model& model, const std::vector<Index>& selected_indices,
+    double t0, double tfinal, int num_steps);
+TransmonChainBenchmarkTiming evolve_loaded_model_liouvillian(
+    const Model& model, const std::vector<Index>& selected_density_indices,
+    double t0, double tfinal, int num_steps);
+
 Model build_tunable_coupler_model(const TunableCouplerBenchmarkConfig& config);
 
 TransmonChainBenchmarkTiming run_tunable_coupler_cpu_benchmark(

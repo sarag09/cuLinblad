@@ -879,6 +879,81 @@ int run_pulse_factory_selftest() {
     return fails == 0 ? 0 : 1;
 }
 
+// Dump the loaded-model evolution result in the PROPAGATOR_DUMP text format (lab-frame; the loaded
+// model is already lab-frame and evolved in lab, so no back-transform). Parser-compatible with the
+// existing verify_*.py / golden_regression.py readers.
+void dump_loaded_model_result(std::ostream& out, const culindblad::LoadedModel& lm,
+                              const culindblad::TransmonChainBenchmarkTiming& timing,
+                              const std::string& mode) {
+    using namespace culindblad;
+    Index D = 1;
+    for (const Index d : lm.model.local_dims) D *= d;
+    out << "PROPAGATOR_DUMP_BEGIN backend=gpu mode=" << mode
+        << " num_qubits=" << lm.num_qubits << " num_couplers=" << lm.num_couplers
+        << " hilbert_dim=" << D;
+    if (mode == "schrodinger") {
+        out << " state_len=" << D;
+    } else {
+        out << " density_dim=" << (D * D);
+    }
+    out << " steps=" << lm.evolution.num_steps
+        << " result_frame=" << lm.evolution.result_frame
+        << " batch_size=" << timing.final_states.size()
+        << " num_states=" << timing.final_states.size() << "\n";
+    const std::streamsize old_prec = out.precision();
+    out << std::setprecision(17);
+    for (std::size_t s = 0; s < timing.final_states.size(); ++s) {
+        out << "STATE " << s << "\n";
+        for (const Complex& z : timing.final_states[s]) {
+            out << z.real() << " " << z.imag() << "\n";
+        }
+    }
+    out << std::setprecision(old_prec);
+    out << "PROPAGATOR_DUMP_END backend=gpu mode=" << mode << "\n";
+}
+
+// -load_model <json> [-results_out <path>]: deserialize a Julia-exported term-list model, evolve the
+// computational basis in the LAB frame (closed |psi> or open rho per the "system" field), and dump.
+int run_loaded_model(const std::string& model_path, const std::string& results_path) {
+    using namespace culindblad;
+    try {
+        const LoadedModel lm = load_model_from_json(model_path);
+        const int num_steps = lm.evolution.num_steps > 0 ? lm.evolution.num_steps : 1000;
+        std::ofstream fout;
+        std::ostream* out = &std::cout;
+        if (!results_path.empty()) {
+            fout.open(results_path);
+            if (!fout.is_open()) {
+                std::cerr << "[load_model] cannot open results file: " << results_path << std::endl;
+                return 1;
+            }
+            out = &fout;
+        }
+        std::cerr << "[load_model] " << (lm.is_open ? "open (Lindblad rho)" : "closed (Schrodinger psi)")
+                  << ", " << lm.model.local_dims.size() << " sites, num_qubits=" << lm.num_qubits
+                  << ", num_steps=" << num_steps
+                  << ", terms=" << lm.model.hamiltonian_terms.size() << "+"
+                  << lm.model.time_dependent_hamiltonian_terms.size() << "td" << std::endl;
+        if (lm.is_open) {
+            const std::vector<Index> idx =
+                computational_density_indices_for_dims(lm.model.local_dims, lm.num_qubits);
+            const TransmonChainBenchmarkTiming timing = evolve_loaded_model_liouvillian(
+                lm.model, idx, lm.evolution.t0, lm.evolution.tfinal, num_steps);
+            dump_loaded_model_result(*out, lm, timing, "lindblad");
+        } else {
+            const std::vector<Index> idx =
+                computational_state_indices_for_dims(lm.model.local_dims, lm.num_qubits);
+            const TransmonChainBenchmarkTiming timing = evolve_loaded_model_schrodinger(
+                lm.model, idx, lm.evolution.t0, lm.evolution.tfinal, num_steps);
+            dump_loaded_model_result(*out, lm, timing, "schrodinger");
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "[load_model] error: " << e.what() << std::endl;
+        return 1;
+    }
+}
+
 int run_psi_kernel_selftest() {
     using culindblad::CudaGroupedStateLayout;
     using culindblad::GroupedStateLayout;
@@ -1103,6 +1178,22 @@ int main(int argc, char** argv)
         const int rc_pulse = run_pulse_factory_selftest();
         PetscFinalize();
         return (rc_des == 0 && rc_pulse == 0) ? 0 : 1;
+    }
+
+    char model_path_buf[1024] = {};
+    PetscBool model_set = PETSC_FALSE;
+    PetscOptionsGetString(nullptr, nullptr, "-load_model",
+                          model_path_buf, sizeof(model_path_buf), &model_set);
+    if (model_set == PETSC_TRUE) {
+        char results_buf[1024] = {};
+        PetscBool results_set = PETSC_FALSE;
+        PetscOptionsGetString(nullptr, nullptr, "-results_out",
+                              results_buf, sizeof(results_buf), &results_set);
+        const int rc = run_loaded_model(
+            std::string(model_path_buf),
+            results_set == PETSC_TRUE ? std::string(results_buf) : std::string());
+        PetscFinalize();
+        return rc;
     }
 
     try {

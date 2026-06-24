@@ -891,6 +891,97 @@ std::vector<Index> tunable_coupler_computational_density_indices(
     return indices;
 }
 
+// Mixed-dim variants for the loaded-model handoff: same Q1=MSB, site-0-major convention as the
+// tunable_coupler_* generators, but per-site strides from local_dims (the loaded model can have
+// heterogeneous dims, e.g. [3,3,2,2,3,2,2,2]). Qubits are sites 0..num_qubits-1.
+std::vector<Index> computational_state_indices_for_dims(
+    const std::vector<Index>& local_dims, Index num_qubits)
+{
+    const Index n = static_cast<Index>(local_dims.size());
+    std::vector<Index> stride(n, 1);
+    for (Index i = n; i-- > 1;) {
+        stride[i - 1] = stride[i] * local_dims[i];
+    }
+    const Index num_comp = (Index(1) << num_qubits);
+    std::vector<Index> ket(num_comp, 0);
+    for (Index a = 0; a < num_comp; ++a) {
+        Index h = 0;
+        for (Index qi = 0; qi < num_qubits; ++qi) {
+            const Index bit = (a >> (num_qubits - 1 - qi)) & Index(1);
+            h += bit * stride[qi];
+        }
+        ket[a] = h;
+    }
+    return ket;
+}
+
+std::vector<Index> computational_density_indices_for_dims(
+    const std::vector<Index>& local_dims, Index num_qubits)
+{
+    Index D = 1;
+    for (const Index d : local_dims) D *= d;
+    const std::vector<Index> ket = computational_state_indices_for_dims(local_dims, num_qubits);
+    std::vector<Index> out;
+    out.reserve(ket.size() * ket.size());
+    for (std::size_t a = 0; a < ket.size(); ++a) {
+        for (std::size_t b = 0; b < ket.size(); ++b) {
+            out.push_back(ket[a] * D + ket[b]);
+        }
+    }
+    return out;
+}
+
+// Evolve a deserialized handoff Model in the LAB frame (no rotating-frame transform: the exported
+// model is already lab-frame, matching the Julia sesolve/mesolve reference). The integrator is the
+// usual -tc_integrator dispatch inside evolve_*_batch_cuda_ts (use -tc_integrator 1 for custom RK4).
+TransmonChainBenchmarkTiming evolve_loaded_model_schrodinger(
+    const Model& model_in, const std::vector<Index>& selected_indices,
+    double t0, double tfinal, int num_steps)
+{
+    Model model = model_in;
+    model.dissipator_terms.clear();  // closed system: Schrodinger equation only
+    const Solver solver = make_solver(model);
+    const std::vector<std::vector<Complex>> initial =
+        make_selected_basis_state_vectors(solver, selected_indices);
+    CudaBatchExecutionContext ctx{};
+    PetscCallAbort(PETSC_COMM_SELF,
+        create_cuda_state_vector_execution_context(solver, selected_indices.size(), ctx));
+    TransmonChainBenchmarkTiming timing;
+    timing.num_evolved_states = selected_indices.size();
+    timing.final_states =
+        evolve_state_vector_batch_cuda_ts(solver, initial, t0, tfinal, num_steps, ctx);
+    PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
+    return timing;
+}
+
+TransmonChainBenchmarkTiming evolve_loaded_model_liouvillian(
+    const Model& model, const std::vector<Index>& selected_density_indices,
+    double t0, double tfinal, int num_steps)
+{
+    const Solver solver = make_solver(model);
+    const std::vector<std::vector<Complex>> initial =
+        make_selected_basis_density_states(solver, selected_density_indices);
+    CudaBatchExecutionContext ctx{};
+    PetscCallAbort(PETSC_COMM_SELF,
+        create_cuda_batch_execution_context(solver, selected_density_indices.size(), ctx));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetType(ctx.ts, TSRK));
+    PetscCallAbort(PETSC_COMM_SELF, TSRKSetType(ctx.ts, TSRK4));
+    TSAdapt adapt = nullptr;
+    PetscCallAbort(PETSC_COMM_SELF, TSGetAdapt(ctx.ts, &adapt));
+    PetscCallAbort(PETSC_COMM_SELF, TSAdaptSetType(adapt, TSADAPTNONE));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetRHSFunction(
+        ctx.ts, nullptr, ts_rhs_function_cuda_full_model_liouvillian, &ctx.rhs_ctx));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ctx.ts, 1000000));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetExactFinalTime(ctx.ts, TS_EXACTFINALTIME_MATCHSTEP));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetFromOptions(ctx.ts));
+    TransmonChainBenchmarkTiming timing;
+    timing.num_evolved_states = selected_density_indices.size();
+    timing.final_states =
+        evolve_state_batch_cuda_ts(solver, initial, t0, tfinal, num_steps, ctx);
+    PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
+    return timing;
+}
+
 TransmonChainBenchmarkTiming run_tunable_coupler_cpu_benchmark(
     const TunableCouplerBenchmarkConfig& config)
 {
