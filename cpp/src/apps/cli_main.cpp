@@ -524,6 +524,25 @@ void tc_dump_one_propagator(
               << " batch_size=" << batch_size << "\n";
 }
 
+// MPI state-sharding: keep only rank r's contiguous slice of the selected-index list (low ranks
+// take the remainder, so the union is exact with no gaps/overlap and the GLOBAL index values are
+// preserved for the dump/merge). Identity for size<=1 (single-process unchanged). Never empty
+// unless size>n.
+std::vector<culindblad::Index> shard_indices(
+    const std::vector<culindblad::Index>& all, int rank, int size)
+{
+    if (size <= 1) {
+        return all;
+    }
+    const std::size_t n = all.size();
+    const std::size_t base = n / static_cast<std::size_t>(size);
+    const std::size_t rem = n % static_cast<std::size_t>(size);
+    const std::size_t r = static_cast<std::size_t>(rank);
+    const std::size_t begin = r * base + std::min<std::size_t>(r, rem);
+    const std::size_t cnt = base + (r < rem ? 1 : 0);
+    return std::vector<culindblad::Index>(all.begin() + begin, all.begin() + begin + cnt);
+}
+
 // Dump the states selected by config.state_selection (full propagator if
 // evolve_all_states, otherwise the listed indices, e.g. computational states).
 void tc_dump_states(
@@ -962,6 +981,15 @@ int main(int argc, char** argv)
                 tc_config.state_selection.evolve_all_states = true;
                 tc_config.state_selection.selected_state_indices.clear();
             }
+
+            // MPI state-sharding: each rank evolves a disjoint contiguous slice of the selected
+            // computational states (identity for single-process). The solver/run-entry are
+            // unchanged -- they size the batch to the (now per-rank) selected_state_indices.
+            tc_config.state_selection.selected_state_indices = shard_indices(
+                tc_config.state_selection.selected_state_indices, mpi_rank, mpi_size);
+            std::cerr << "[rank " << mpi_rank << "/" << mpi_size << "] evolving "
+                      << tc_config.state_selection.selected_state_indices.size()
+                      << " state(s)" << std::endl;
 
             if (tc_schrod == PETSC_TRUE) {
                 tc_dump_states_schrodinger(tc_config);
