@@ -195,6 +195,54 @@ __global__ void batched_grouped_sparse_left_to_flat_kernel(
     flat_output[out] = cuCadd(flat_output[out], val);
 }
 
+// CSR variant of the sparse left action: each output thread visits only its row's nonzeros via
+// sparse_row_ptr (CSR over the row-major pattern), instead of scanning all nnz and branching on
+// row == ket_target. Bit-identical to batched_grouped_sparse_left_to_flat_kernel (the per-row
+// column order is preserved), but issues far fewer instructions on the gather-bound kernel.
+__global__ void batched_grouped_sparse_left_csr_to_flat_kernel(
+    const cuDoubleComplex* sparse_values,
+    const Index* sparse_cols,
+    const Index* sparse_row_ptr,
+    const cuDoubleComplex* grouped_input,
+    cuDoubleComplex* flat_output,
+    Index flat_size,
+    Index grouped_size,
+    Index target_hilbert_dim,
+    Index complement_dim,
+    Index batch_size,
+    const Index* tdesc, Index num_t, const Index* cdesc, Index num_c)
+{
+    const Index total = batch_size * grouped_size;
+    const Index idx =
+        static_cast<Index>(blockIdx.x) * static_cast<Index>(blockDim.x) +
+        static_cast<Index>(threadIdx.x);
+    if (idx >= total) {
+        return;
+    }
+    const Index batch = idx / grouped_size;
+    const Index local = idx % grouped_size;
+    const Index ket_comp = local % complement_dim;
+    const Index ket_target_out = local / complement_dim;
+
+    const Index left_base = batch * grouped_size + ket_comp;
+    const Index left_stride = complement_dim;
+
+    cuDoubleComplex left_sum = make_cuDoubleComplex(0.0, 0.0);
+    const Index begin = sparse_row_ptr[ket_target_out];
+    const Index end = sparse_row_ptr[ket_target_out + 1];
+    for (Index nz = begin; nz < end; ++nz) {
+        left_sum = cuCadd(left_sum,
+            cuCmul(sparse_values[nz],
+                   grouped_input[left_base + sparse_cols[nz] * left_stride]));
+    }
+    const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
+    const cuDoubleComplex val = cuCmul(minus_i, left_sum);
+
+    const Index f = grouped_to_flat_vec_index(local, complement_dim, tdesc, num_t, cdesc, num_c);
+    const Index out = batch * flat_size + f;
+    flat_output[out] = cuCadd(flat_output[out], val);
+}
+
 // One-sided left action -i*H_diag|psi> for a single-site diagonal term (h_diag indexed by the
 // target-site occupation), accumulated into the flat RHS f.
 __global__ void batched_grouped_diagonal_left_to_flat_kernel(
@@ -816,6 +864,37 @@ bool launch_grouped_sparse_left_to_flat_kernel(
         reinterpret_cast<const Index*>(sparse_rows),
         reinterpret_cast<const Index*>(sparse_cols),
         sparse_nnz,
+        reinterpret_cast<const cuDoubleComplex*>(d_grouped_input),
+        reinterpret_cast<cuDoubleComplex*>(d_flat_output),
+        cuda_layout.flat_size,
+        cuda_layout.grouped_size,
+        cuda_layout.target_dim,
+        cuda_layout.complement_dim,
+        batch_size,
+        cuda_layout.d_target_desc, cuda_layout.num_target,
+        cuda_layout.d_complement_desc, cuda_layout.num_complement);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_grouped_sparse_left_csr_to_flat_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    const void* sparse_values,
+    const void* sparse_cols,
+    const void* sparse_row_ptr,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream)
+{
+    constexpr int block_size = 256;
+    const Index total = batch_size * cuda_layout.grouped_size;
+    const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
+
+    batched_grouped_sparse_left_csr_to_flat_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const cuDoubleComplex*>(sparse_values),
+        reinterpret_cast<const Index*>(sparse_cols),
+        reinterpret_cast<const Index*>(sparse_row_ptr),
         reinterpret_cast<const cuDoubleComplex*>(d_grouped_input),
         reinterpret_cast<cuDoubleComplex*>(d_flat_output),
         cuda_layout.flat_size,

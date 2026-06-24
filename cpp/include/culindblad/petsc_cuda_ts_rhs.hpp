@@ -61,6 +61,11 @@ struct CachedGroupedLayoutEntry {
     Index* d_dynamic_sparse_rows = nullptr;
     Index* d_dynamic_sparse_cols = nullptr;
     std::size_t dynamic_sparse_capacity = 0;
+    // CSR row pointers (size matrix_dim+1) over the row-major dynamic sparse pattern, so the
+    // Schrodinger sparse-left kernel visits only each output row's 1-4 nonzeros instead of
+    // scanning all ~24. Built alongside the pattern; unused by the density commutator kernel.
+    Index* d_dynamic_sparse_row_ptr = nullptr;
+    std::size_t dynamic_sparse_row_ptr_capacity = 0;
 };
 
 struct GroupedRhsScratchBuffers {

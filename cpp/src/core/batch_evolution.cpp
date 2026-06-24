@@ -519,6 +519,11 @@ void destroy_cached_grouped_layouts(
             entry.d_dynamic_sparse_cols = nullptr;
         }
         entry.dynamic_sparse_capacity = 0;
+        if (entry.d_dynamic_sparse_row_ptr != nullptr) {
+            cudaFree(entry.d_dynamic_sparse_row_ptr);
+            entry.d_dynamic_sparse_row_ptr = nullptr;
+        }
+        entry.dynamic_sparse_row_ptr_capacity = 0;
         (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
         if (entry.has_psi_layout) {
             (void)destroy_cuda_grouped_state_layout(entry.psi_cuda_grouped_layout);

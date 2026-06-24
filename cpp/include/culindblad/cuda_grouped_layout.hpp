@@ -97,6 +97,18 @@ bool launch_grouped_sparse_left_to_flat_kernel(
     void* d_flat_output,
     cudaStream_t stream);
 
+// CSR variant of the sparse left action (each thread visits only its row's nonzeros via
+// sparse_row_ptr; bit-identical, far fewer instructions on the gather-bound kernel).
+bool launch_grouped_sparse_left_csr_to_flat_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    const void* sparse_values,
+    const void* sparse_cols,
+    const void* sparse_row_ptr,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream);
+
 bool launch_grouped_diagonal_left_to_flat_kernel(
     const CudaGroupedStateLayout& cuda_layout,
     const void* h_diag,

@@ -100,6 +100,16 @@ PetscErrorCode apply_grouped_diagonal_left_to_psi_vec(
     Index batch_size,
     cudaStream_t stream);
 
+PetscErrorCode apply_grouped_sparse_left_csr_to_psi_vec(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    const void* sparse_values,
+    const void* sparse_cols,
+    const void* sparse_row_ptr,
+    const void* d_grouped_input,
+    Vec y,
+    Index batch_size,
+    cudaStream_t stream);
+
 PetscErrorCode flatten_grouped_buffer_to_petsc_cuda_vec(
     const CudaGroupedStateLayout& cuda_grouped_layout,
     const void* d_grouped_input,

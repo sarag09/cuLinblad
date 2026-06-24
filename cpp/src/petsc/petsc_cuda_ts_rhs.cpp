@@ -199,6 +199,33 @@ bool upload_dynamic_sparse_hamiltonian(
                         nnz * sizeof(Index), cudaMemcpyHostToDevice, stream) != cudaSuccess) {
         return false;
     }
+    // CSR row pointers over the row-major pattern (row_ptr[r] = first nnz index of row r), so the
+    // Schrodinger sparse-left kernel scans only each row's nonzeros. Unused by the density kernels.
+    const std::size_t row_ptr_len = static_cast<std::size_t>(matrix_dim) + 1;
+    std::vector<Index> row_ptr(row_ptr_len, 0);
+    for (std::size_t i = 0; i < nnz; ++i) {
+        ++row_ptr[rows[i] + 1];
+    }
+    for (Index r = 0; r < matrix_dim; ++r) {
+        row_ptr[r + 1] += row_ptr[r];
+    }
+    if (layout_entry.dynamic_sparse_row_ptr_capacity < row_ptr_len) {
+        if (layout_entry.d_dynamic_sparse_row_ptr != nullptr) {
+            cudaFree(layout_entry.d_dynamic_sparse_row_ptr);
+            layout_entry.d_dynamic_sparse_row_ptr = nullptr;
+        }
+        if (cudaMalloc(reinterpret_cast<void**>(&layout_entry.d_dynamic_sparse_row_ptr),
+                       row_ptr_len * sizeof(Index)) != cudaSuccess) {
+            layout_entry.d_dynamic_sparse_row_ptr = nullptr;
+            layout_entry.dynamic_sparse_row_ptr_capacity = 0;
+            return false;
+        }
+        layout_entry.dynamic_sparse_row_ptr_capacity = row_ptr_len;
+    }
+    if (cudaMemcpyAsync(layout_entry.d_dynamic_sparse_row_ptr, row_ptr.data(),
+                        row_ptr_len * sizeof(Index), cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+        return false;
+    }
     out_nnz = nnz;
     return true;
 }
@@ -555,32 +582,33 @@ PetscErrorCode apply_grouped_layout_terms_to_psi_rhs(
     }
 
     // Sparse 2-site (coupling) effective Hamiltonian -> sparse left action.
-    const void* sv = nullptr;
-    const void* sr = nullptr;
-    const void* sc = nullptr;
-    Index nnz = 0;
     if (has_dynamic_hamiltonian) {
         std::size_t dyn_nnz = 0;
         if (!upload_dynamic_sparse_hamiltonian(
                 layout_entry, effective_hamiltonian, matrix_dim, dyn_nnz, s)) {
             return 0;  // all-zero effective H this step -> no contribution
         }
-        sv = layout_entry.d_dynamic_sparse_values;
-        sr = layout_entry.d_dynamic_sparse_rows;
-        sc = layout_entry.d_dynamic_sparse_cols;
-        nnz = static_cast<Index>(dyn_nnz);
-    } else if (can_use_static_sparse_commutator(layout_entry, false)) {
-        sv = layout_entry.d_static_sparse_hamiltonian_values;
-        sr = layout_entry.d_static_sparse_hamiltonian_rows;
-        sc = layout_entry.d_static_sparse_hamiltonian_cols;
-        nnz = static_cast<Index>(layout_entry.static_sparse_hamiltonian_values.size());
-    } else {
-        return PETSC_ERR_SUP;  // general cuTENSOR fallback not implemented for |psi> yet
+        // CSR sparse-left: visit only each output row's nonzeros (row_ptr built in the upload).
+        PetscCall(apply_grouped_sparse_left_csr_to_psi_vec(
+            layout_entry.psi_cuda_grouped_layout,
+            layout_entry.d_dynamic_sparse_values,
+            layout_entry.d_dynamic_sparse_cols,
+            layout_entry.d_dynamic_sparse_row_ptr,
+            rhs_ctx.grouped_scratch.d_psi_grouped, f, rhs_ctx.batch_size, s));
+        return 0;
     }
-    PetscCall(apply_grouped_sparse_left_to_psi_vec(
-        layout_entry.psi_cuda_grouped_layout, sv, sr, sc, nnz,
-        rhs_ctx.grouped_scratch.d_psi_grouped, f, rhs_ctx.batch_size, s));
-    return 0;
+    if (can_use_static_sparse_commutator(layout_entry, false)) {
+        // Static (lab-frame) couplings: the all-nnz scan; no CSR row_ptr is cached for these.
+        PetscCall(apply_grouped_sparse_left_to_psi_vec(
+            layout_entry.psi_cuda_grouped_layout,
+            layout_entry.d_static_sparse_hamiltonian_values,
+            layout_entry.d_static_sparse_hamiltonian_rows,
+            layout_entry.d_static_sparse_hamiltonian_cols,
+            static_cast<Index>(layout_entry.static_sparse_hamiltonian_values.size()),
+            rhs_ctx.grouped_scratch.d_psi_grouped, f, rhs_ctx.batch_size, s));
+        return 0;
+    }
+    return PETSC_ERR_SUP;  // general cuTENSOR fallback not implemented for |psi> yet
 }
 
 PetscErrorCode apply_grouped_layout_terms_to_rhs(
