@@ -13,8 +13,13 @@
 #include <cuda_runtime.h>
 #include <random>
 
+#include "culindblad/batch_evolution.hpp"
 #include "culindblad/cuda_grouped_layout.hpp"
 #include "culindblad/grouped_state_layout.hpp"
+#include "culindblad/model.hpp"
+#include "culindblad/petsc_cuda_ts_rhs.hpp"
+#include "culindblad/solver.hpp"
+#include "culindblad/time_dependent_term.hpp"
 #include "culindblad/transmon_chain_benchmark.hpp"
 #include "culindblad/tunable_coupler_benchmark.hpp"
 #include "culindblad/types.hpp"
@@ -705,6 +710,69 @@ int run_psi_kernel_selftest() {
               << (worst < 1e-12 ? "   PASS" : "   FAIL") << std::endl;
     return worst < 1e-12 ? 0 : 1;
 }
+
+// Full Schrodinger RHS check: build a 2Q1C driven model, call ts_rhs_function_cuda_full_model_
+// schrodinger, and compare to a CPU -i*H_full(t)|psi> assembled term-by-term (static + time-
+// dependent), at t=0 and mid-gate. Exercises regroup + effective-H assembly + diagonal/sparse
+// dispatch through the real context, including the dynamic (driven) path.
+int run_psi_rhs_selftest() {
+    using namespace culindblad;
+    TunableCouplerBenchmarkConfig cfg{};
+    cfg.num_qubits = 2; cfg.num_couplers = 1; cfg.cutoff_dim = 3;
+    cfg.omega = {5.0, 5.2, 4.8}; cfg.alpha = {-0.2, -0.2, -0.2};
+    cfg.t1 = {1.0e4, 1.0e4, 1.0e4}; cfg.tphi = {1.0e4, 1.0e4, 1.0e4};
+    cfg.g = 0.02; cfg.t0 = 0.0; cfg.tfinal = 15.0;
+    cfg.enable_drives = true; cfg.driven_sites = {0};
+    cfg.drive_amplitude = 0.1; cfg.drive_t_gate = 15.0;
+    Model model = build_tunable_coupler_model(cfg);
+    Solver solver = make_solver(model);
+    const std::vector<Index>& dims = solver.model.local_dims;
+    Index D = 1; for (Index d : dims) D *= d;
+    const Index batch = 2;
+
+    CudaBatchExecutionContext ctx{};
+    if (create_cuda_state_vector_execution_context(solver, batch, ctx) != 0) {
+        std::cerr << "  psi context creation failed\n"; return 1;
+    }
+    std::mt19937 rng(999); std::uniform_real_distribution<double> u(-1.0, 1.0);
+    std::vector<Complex> psi(D * batch);
+    for (auto& z : psi) z = Complex(u(rng), u(rng));
+    {
+        PetscScalar* arr = nullptr; VecGetArray(ctx.x, &arr);
+        for (Index i = 0; i < D * batch; ++i) arr[i] = psi[i];
+        VecRestoreArray(ctx.x, &arr);
+    }
+    Vec f = nullptr; VecDuplicate(ctx.x, &f);
+
+    double worst = 0.0;
+    for (double t : {0.0, 7.5}) {
+        ts_rhs_function_cuda_full_model_schrodinger(nullptr, t, ctx.x, f, &ctx.rhs_ctx);
+        const PetscScalar* farr = nullptr; VecGetArrayRead(f, &farr);
+        for (Index b = 0; b < batch; ++b) {
+            std::vector<Complex> psi_b(psi.begin() + b * D, psi.begin() + (b + 1) * D);
+            std::vector<Complex> ref(D, Complex(0.0, 0.0));
+            auto add_term = [&](const std::vector<Index>& sites, const std::vector<Complex>& mat,
+                                Index rdim, double scale) {
+                std::vector<Complex> scaled(mat.size());
+                for (std::size_t k = 0; k < mat.size(); ++k) scaled[k] = mat[k] * scale;
+                std::vector<Complex> c = brute_force_minus_i_H_psi(dims, sites, scaled, rdim, psi_b);
+                for (Index i = 0; i < D; ++i) ref[i] += c[i];
+            };
+            for (const OperatorTerm& h : solver.model.hamiltonian_terms)
+                add_term(h.sites, h.matrix, h.row_dim, 1.0);
+            for (const TimeDependentTerm& td : solver.model.time_dependent_hamiltonian_terms)
+                add_term(td.sites, td.matrix, td.rows, evaluate_time_dependent_coefficient(td, t));
+            for (Index i = 0; i < D; ++i)
+                worst = std::max(worst, std::abs(static_cast<Complex>(farr[b * D + i]) - ref[i]));
+        }
+        VecRestoreArrayRead(f, &farr);
+    }
+    VecDestroy(&f);
+    destroy_cuda_batch_execution_context(ctx);
+    std::cout << "PSI RHS SELFTEST (2Q1C lab+drive, t=0 & 7.5) worst |gpu - cpu| = " << worst
+              << (worst < 1e-9 ? "   PASS" : "   FAIL") << std::endl;
+    return worst < 1e-9 ? 0 : 1;
+}
 }  // namespace
 
 int main(int argc, char** argv)
@@ -720,9 +788,10 @@ int main(int argc, char** argv)
     PetscBool psi_selftest = PETSC_FALSE;
     PetscOptionsGetBool(nullptr, nullptr, "-psi_selftest", &psi_selftest, nullptr);
     if (psi_selftest == PETSC_TRUE) {
-        const int rc = run_psi_kernel_selftest();
+        const int rc_kernel = run_psi_kernel_selftest();
+        const int rc_rhs = run_psi_rhs_selftest();
         PetscFinalize();
-        return rc;
+        return (rc_kernel == 0 && rc_rhs == 0) ? 0 : 1;
     }
 
     try {

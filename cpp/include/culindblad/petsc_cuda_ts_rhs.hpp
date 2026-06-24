@@ -32,6 +32,10 @@ struct CachedGroupedLayoutEntry {
     std::vector<Index> sites;
     GroupedStateLayout grouped_layout;
     CudaGroupedStateLayout cuda_grouped_layout;
+    // State-vector (ket-only, D-sized) layout sharing the same descriptors, used by the
+    // Schrodinger solver's one-sided H|psi> path. Built alongside the density layout.
+    CudaGroupedStateLayout psi_cuda_grouped_layout;
+    bool has_psi_layout = false;
     std::size_t grouped_bytes = 0;
     std::vector<Complex> static_hamiltonian_sum;
     std::vector<Complex> static_hamiltonian_diagonal;
@@ -64,6 +68,10 @@ struct GroupedRhsScratchBuffers {
     void* d_grouped_term = nullptr;
     void* d_grouped_accum = nullptr;
     std::size_t grouped_bytes = 0;
+    // State-vector regroup scratch (D-sized, batch*hilbert_dim). Used by the Schrodinger RHS;
+    // the D^2 buffers above are left null for a state-vector context.
+    void* d_psi_grouped = nullptr;
+    std::size_t psi_grouped_bytes = 0;
 };
 
 struct PetscCudaTsRhsContext {
@@ -109,6 +117,16 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
     void* ctx);
 
 PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
+    TS ts,
+    PetscReal t,
+    Vec x,
+    Vec f,
+    void* ctx);
+
+// Closed-system Schrodinger RHS: d|psi>/dt = -i H|psi>, matrix-free one-sided left action.
+// Same context as the Liouvillian RHS, but x/f are length batch*hilbert_dim (D) vectors and
+// the dissipator/anti-commutator/right-action branches are absent.
+PetscErrorCode ts_rhs_function_cuda_full_model_schrodinger(
     TS ts,
     PetscReal t,
     Vec x,

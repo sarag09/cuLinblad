@@ -26,6 +26,11 @@ Index rhs_total_density_dim(const PetscCudaTsRhsContext& rhs_ctx)
     return rhs_ctx.batch_size * rhs_ctx.solver->layout.density_dim;
 }
 
+Index rhs_total_hilbert_dim(const PetscCudaTsRhsContext& rhs_ctx)
+{
+    return rhs_ctx.batch_size * rhs_ctx.solver->layout.hilbert_dim;
+}
+
 bool same_sites(
     const std::vector<Index>& a,
     const std::vector<Index>& b)
@@ -475,6 +480,107 @@ PetscErrorCode accumulate_grouped_layout_term(
                   stream);
 
     return accum_ok ? 0 : PETSC_ERR_LIB;
+}
+
+// Closed-system per-layer left action: regroup |psi>, assemble the effective Hamiltonian, and
+// accumulate -i*H_eff|psi> straight into f via the structured diagonal / sparse LEFT kernels.
+// The one-sided, dissipator-free counterpart of apply_grouped_layout_terms_to_rhs.
+PetscErrorCode apply_grouped_layout_terms_to_psi_rhs(
+    const Solver& solver,
+    PetscCudaTsRhsContext& rhs_ctx,
+    Vec x,
+    Vec f,
+    CachedGroupedLayoutEntry& layout_entry,
+    PetscReal t)
+{
+    cudaStream_t s = rhs_ctx.elementwise_stream;
+
+    PetscCall(regroup_petsc_cuda_vec_to_psi_grouped_buffer(
+        layout_entry.psi_cuda_grouped_layout,
+        x,
+        rhs_ctx.grouped_scratch.d_psi_grouped,
+        rhs_ctx.batch_size,
+        s));
+
+    std::vector<Complex> effective_hamiltonian = layout_entry.static_hamiltonian_sum;
+    bool has_effective_hamiltonian = !effective_hamiltonian.empty();
+    bool has_dynamic_hamiltonian = false;
+    for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
+        if (!same_sites(layout_entry.sites, td_term.sites)) {
+            continue;
+        }
+        accumulate_operator_scaled(
+            td_term.matrix,
+            evaluate_time_dependent_coefficient(td_term, static_cast<double>(t)),
+            effective_hamiltonian);
+        has_effective_hamiltonian = true;
+        has_dynamic_hamiltonian = true;
+    }
+    if (!has_effective_hamiltonian) {
+        return 0;
+    }
+
+    const Index matrix_dim = static_cast<Index>(std::llround(std::sqrt(
+        static_cast<double>(effective_hamiltonian.size()))));
+
+    std::vector<Complex> diagonal;
+    if (try_extract_local_diagonal(effective_hamiltonian, matrix_dim, diagonal)) {
+        const void* d_diag = nullptr;
+        if (has_dynamic_hamiltonian) {
+            const std::size_t bytes = diagonal.size() * sizeof(Complex);
+            if (layout_entry.dynamic_diagonal_capacity < diagonal.size()) {
+                if (layout_entry.d_dynamic_diagonal != nullptr) {
+                    cudaFree(layout_entry.d_dynamic_diagonal);
+                    layout_entry.d_dynamic_diagonal = nullptr;
+                }
+                if (cudaMalloc(&layout_entry.d_dynamic_diagonal, bytes) != cudaSuccess) {
+                    layout_entry.d_dynamic_diagonal = nullptr;
+                    layout_entry.dynamic_diagonal_capacity = 0;
+                    return PETSC_ERR_LIB;
+                }
+                layout_entry.dynamic_diagonal_capacity = diagonal.size();
+            }
+            if (cudaMemcpyAsync(layout_entry.d_dynamic_diagonal, diagonal.data(), bytes,
+                                cudaMemcpyHostToDevice, s) != cudaSuccess) {
+                return PETSC_ERR_LIB;
+            }
+            d_diag = layout_entry.d_dynamic_diagonal;
+        } else {
+            d_diag = layout_entry.d_static_hamiltonian_diagonal;
+        }
+        PetscCall(apply_grouped_diagonal_left_to_psi_vec(
+            layout_entry.psi_cuda_grouped_layout, d_diag,
+            rhs_ctx.grouped_scratch.d_psi_grouped, f, rhs_ctx.batch_size, s));
+        return 0;
+    }
+
+    // Sparse 2-site (coupling) effective Hamiltonian -> sparse left action.
+    const void* sv = nullptr;
+    const void* sr = nullptr;
+    const void* sc = nullptr;
+    Index nnz = 0;
+    if (has_dynamic_hamiltonian) {
+        std::size_t dyn_nnz = 0;
+        if (!upload_dynamic_sparse_hamiltonian(
+                layout_entry, effective_hamiltonian, matrix_dim, dyn_nnz, s)) {
+            return 0;  // all-zero effective H this step -> no contribution
+        }
+        sv = layout_entry.d_dynamic_sparse_values;
+        sr = layout_entry.d_dynamic_sparse_rows;
+        sc = layout_entry.d_dynamic_sparse_cols;
+        nnz = static_cast<Index>(dyn_nnz);
+    } else if (can_use_static_sparse_commutator(layout_entry, false)) {
+        sv = layout_entry.d_static_sparse_hamiltonian_values;
+        sr = layout_entry.d_static_sparse_hamiltonian_rows;
+        sc = layout_entry.d_static_sparse_hamiltonian_cols;
+        nnz = static_cast<Index>(layout_entry.static_sparse_hamiltonian_values.size());
+    } else {
+        return PETSC_ERR_SUP;  // general cuTENSOR fallback not implemented for |psi> yet
+    }
+    PetscCall(apply_grouped_sparse_left_to_psi_vec(
+        layout_entry.psi_cuda_grouped_layout, sv, sr, sc, nnz,
+        rhs_ctx.grouped_scratch.d_psi_grouped, f, rhs_ctx.batch_size, s));
+    return 0;
 }
 
 PetscErrorCode apply_grouped_layout_terms_to_rhs(
@@ -1110,7 +1216,37 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
     if (cudaStreamSynchronize(s) != cudaSuccess) {
         return PETSC_ERR_LIB;
     }
-        
+
+    return 0;
+}
+
+PetscErrorCode ts_rhs_function_cuda_full_model_schrodinger(
+    TS,
+    PetscReal t,
+    Vec x,
+    Vec f,
+    void* ctx)
+{
+    auto* rhs_ctx = static_cast<PetscCudaTsRhsContext*>(ctx);
+    if (!rhs_ctx || !rhs_ctx->solver) {
+        return PETSC_ERR_ARG_NULL;
+    }
+
+    const Solver& solver = *rhs_ctx->solver;
+    cudaStream_t s = rhs_ctx->elementwise_stream;
+
+    const Index total_hilbert_dim = rhs_total_hilbert_dim(*rhs_ctx);
+    PetscCall(zero_petsc_cuda_vec(f, total_hilbert_dim, s));
+
+    for (CachedGroupedLayoutEntry& layout_entry : rhs_ctx->cached_grouped_layouts) {
+        PetscCall(apply_grouped_layout_terms_to_psi_rhs(
+            solver, *rhs_ctx, x, f, layout_entry, t));
+    }
+
+    if (cudaStreamSynchronize(s) != cudaSuccess) {
+        return PETSC_ERR_LIB;
+    }
+
     return 0;
 }
 

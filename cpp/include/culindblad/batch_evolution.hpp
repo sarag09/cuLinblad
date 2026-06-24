@@ -60,6 +60,13 @@ PetscErrorCode create_cuda_batch_execution_context(
     Index batch_size,
     CudaBatchExecutionContext& ctx);
 
+// State-vector (closed-system Schrodinger) context: D-sized |psi> Vec, no dissipators, the
+// matrix-free -iH|psi> RHS. Torn down by destroy_cuda_batch_execution_context (shared teardown).
+PetscErrorCode create_cuda_state_vector_execution_context(
+    const Solver& solver,
+    Index batch_size,
+    CudaBatchExecutionContext& ctx);
+
 PetscErrorCode destroy_cuda_batch_execution_context(
     CudaBatchExecutionContext& ctx);
 

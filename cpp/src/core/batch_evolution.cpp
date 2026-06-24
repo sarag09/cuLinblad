@@ -451,12 +451,25 @@ std::vector<CachedGroupedLayoutEntry> build_cached_grouped_layouts(
                         "build_cached_grouped_layouts: failed to create CUDA grouped layout");
                 }
 
+                // State-vector (ket-only, D-sized) layout for the Schrodinger solver. Shares
+                // the descriptors; just metadata + a second tiny descriptor copy.
+                if (!create_cuda_psi_grouped_state_layout(
+                        entry.grouped_layout,
+                        entry.psi_cuda_grouped_layout)) {
+                    throw std::runtime_error(
+                        "build_cached_grouped_layouts: failed to create CUDA psi layout");
+                }
+                entry.has_psi_layout = true;
+
                 cached.push_back(std::move(entry));
             } catch (...) {
                 destroy_cached_sparse_static_hamiltonian(entry);
                 destroy_cached_diagonal_static_hamiltonian(entry);
                 destroy_cached_diagonal_static_dissipator_norm(entry);
                 (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
+                if (entry.has_psi_layout) {
+                    (void)destroy_cuda_grouped_state_layout(entry.psi_cuda_grouped_layout);
+                }
                 throw;
             }
         };
@@ -507,6 +520,10 @@ void destroy_cached_grouped_layouts(
         }
         entry.dynamic_sparse_capacity = 0;
         (void)destroy_cuda_grouped_state_layout(entry.cuda_grouped_layout);
+        if (entry.has_psi_layout) {
+            (void)destroy_cuda_grouped_state_layout(entry.psi_cuda_grouped_layout);
+            entry.has_psi_layout = false;
+        }
     }
     cached.clear();
 }
@@ -548,9 +565,37 @@ PetscErrorCode create_grouped_rhs_scratch_buffers(
     return 0;
 }
 
+// State-vector scratch: a single D-sized (batch*hilbert_dim) regroup buffer. The D^2 density
+// buffers are left null -- the Schrodinger left-action kernels write straight into f.
+PetscErrorCode create_psi_rhs_scratch_buffers(
+    const Solver& solver,
+    Index batch_size,
+    PetscCudaTsRhsContext& rhs_ctx)
+{
+    rhs_ctx.grouped_scratch = GroupedRhsScratchBuffers{};
+    const std::size_t bytes =
+        static_cast<std::size_t>(batch_size) *
+        static_cast<std::size_t>(solver.layout.hilbert_dim) * sizeof(Complex);
+    rhs_ctx.grouped_scratch.psi_grouped_bytes = bytes;
+    if (bytes == 0) {
+        return 0;
+    }
+    if (cudaMalloc(&rhs_ctx.grouped_scratch.d_psi_grouped, bytes) != cudaSuccess) {
+        rhs_ctx.grouped_scratch.d_psi_grouped = nullptr;
+        rhs_ctx.grouped_scratch.psi_grouped_bytes = 0;
+        return PETSC_ERR_MEM;
+    }
+    return 0;
+}
+
 void destroy_grouped_rhs_scratch_buffers(
     PetscCudaTsRhsContext& rhs_ctx)
 {
+    if (rhs_ctx.grouped_scratch.d_psi_grouped != nullptr) {
+        cudaFree(rhs_ctx.grouped_scratch.d_psi_grouped);
+        rhs_ctx.grouped_scratch.d_psi_grouped = nullptr;
+    }
+    rhs_ctx.grouped_scratch.psi_grouped_bytes = 0;
     if (rhs_ctx.grouped_scratch.d_grouped_accum != nullptr) {
         cudaFree(rhs_ctx.grouped_scratch.d_grouped_accum);
         rhs_ctx.grouped_scratch.d_grouped_accum = nullptr;
@@ -693,6 +738,101 @@ PetscErrorCode create_cuda_batch_execution_context(
         ctx.ts,
         nullptr,
         ts_rhs_function_cuda_full_model_liouvillian,
+        &ctx.rhs_ctx));
+
+    ctx.initialized = true;
+    return 0;
+}
+
+PetscErrorCode create_cuda_state_vector_execution_context(
+    const Solver& solver,
+    Index batch_size,
+    CudaBatchExecutionContext& ctx)
+{
+    if (batch_size == 0) {
+        return PETSC_ERR_ARG_OUTOFRANGE;
+    }
+
+    ctx.ts = nullptr;
+    ctx.x = nullptr;
+    ctx.initialized = false;
+
+    const std::vector<Index> seed_target_sites = choose_seed_target_sites(solver);
+
+    PetscCall(TSCreate(PETSC_COMM_SELF, &ctx.ts));
+    PetscCall(TSSetType(ctx.ts, TSEULER));
+
+    PetscCall(VecCreate(PETSC_COMM_SELF, &ctx.x));
+    PetscCall(
+        VecSetSizes(
+            ctx.x,
+            PETSC_DECIDE,
+            batch_size * solver.layout.hilbert_dim));  // length-D |psi>, not D^2
+    PetscCall(VecSetType(ctx.x, VECCUDA));
+    PetscCall(VecSet(ctx.x, 0.0));
+
+    GroupedStateLayout grouped_layout =
+        make_grouped_state_layout(
+            seed_target_sites, solver.model.local_dims, /*build_host_tables=*/false);
+
+    CudaGroupedStateLayout cuda_grouped_layout{};
+    if (!create_cuda_grouped_state_layout(grouped_layout, cuda_grouped_layout)) {
+        PetscCall(VecDestroy(&ctx.x));
+        PetscCall(TSDestroy(&ctx.ts));
+        return PETSC_ERR_LIB;
+    }
+
+    ctx.rhs_ctx = PetscCudaTsRhsContext{
+        &solver,
+        batch_size,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        seed_target_sites,
+        grouped_layout,
+        cuda_grouped_layout,
+        CuTensorExecutorCache{},
+        {},  // closed system: no dissipators
+        build_cached_grouped_layouts(solver, batch_size),
+        GroupedRhsScratchBuffers{},
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr
+    };
+    ctx.rhs_ctx.executor_cache.max_entries =
+        estimate_executor_cache_entries(solver);
+
+    if (cudaStreamCreate(&ctx.rhs_ctx.elementwise_stream) != cudaSuccess) {
+        destroy_cached_grouped_layouts(ctx.rhs_ctx.cached_grouped_layouts);
+        (void)destroy_cuda_grouped_state_layout(ctx.rhs_ctx.cuda_grouped_layout);
+        PetscCall(VecDestroy(&ctx.x));
+        PetscCall(TSDestroy(&ctx.ts));
+        return PETSC_ERR_LIB;
+    }
+
+    {
+        const PetscErrorCode scratch_ierr =
+            create_psi_rhs_scratch_buffers(solver, batch_size, ctx.rhs_ctx);
+        if (scratch_ierr != 0) {
+            destroy_cached_grouped_layouts(ctx.rhs_ctx.cached_grouped_layouts);
+            (void)destroy_cuda_grouped_state_layout(ctx.rhs_ctx.cuda_grouped_layout);
+            if (ctx.rhs_ctx.elementwise_stream != nullptr) {
+                cudaStreamDestroy(ctx.rhs_ctx.elementwise_stream);
+                ctx.rhs_ctx.elementwise_stream = nullptr;
+            }
+            PetscCall(VecDestroy(&ctx.x));
+            PetscCall(TSDestroy(&ctx.ts));
+            return scratch_ierr;
+        }
+    }
+    PetscCall(create_rhs_work_vectors(ctx.x, ctx.rhs_ctx));
+
+    PetscCall(TSSetRHSFunction(
+        ctx.ts,
+        nullptr,
+        ts_rhs_function_cuda_full_model_schrodinger,
         &ctx.rhs_ctx));
 
     ctx.initialized = true;
