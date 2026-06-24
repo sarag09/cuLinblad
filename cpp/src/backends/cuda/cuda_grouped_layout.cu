@@ -62,6 +62,89 @@ __device__ inline Index grouped_to_flat_index(
     return ket_full * D + bra_full;
 }
 
+// ---- State-vector (ket-only) variants. ----
+// For a length-D state vector |psi> the layout carries only the KET index: the flat index IS
+// ket_full (no /D,%D bra split), and the grouped index collapses to g = ket_t*complement_dim +
+// ket_c (the bra_t/bra_c axes are gone). The target/complement descriptors are identical to the
+// density case (they describe the ket decomposition, which is bra-agnostic).
+__device__ inline Index flat_to_grouped_vec_index(
+    Index ket_full, Index complement_dim,
+    const Index* tdesc, Index num_t, const Index* cdesc, Index num_c)
+{
+    Index ket_t = 0, ket_c = 0;
+    for (Index p = 0; p < num_t; ++p) {
+        const Index fs = tdesc[3 * p], dm = tdesc[3 * p + 1], w = tdesc[3 * p + 2];
+        ket_t += ((ket_full / fs) % dm) * w;
+    }
+    for (Index q = 0; q < num_c; ++q) {
+        const Index fs = cdesc[3 * q], dm = cdesc[3 * q + 1], w = cdesc[3 * q + 2];
+        ket_c += ((ket_full / fs) % dm) * w;
+    }
+    return ket_t * complement_dim + ket_c;
+}
+
+__device__ inline Index grouped_to_flat_vec_index(
+    Index g, Index complement_dim,
+    const Index* tdesc, Index num_t, const Index* cdesc, Index num_c)
+{
+    const Index ket_c = g % complement_dim;
+    const Index ket_t = g / complement_dim;
+    Index ket_full = 0;
+    for (Index p = 0; p < num_t; ++p) {
+        const Index fs = tdesc[3 * p], dm = tdesc[3 * p + 1], w = tdesc[3 * p + 2];
+        ket_full += ((ket_t / w) % dm) * fs;
+    }
+    for (Index q = 0; q < num_c; ++q) {
+        const Index fs = cdesc[3 * q], dm = cdesc[3 * q + 1], w = cdesc[3 * q + 2];
+        ket_full += ((ket_c / w) % dm) * fs;
+    }
+    return ket_full;
+}
+
+__global__ void flat_to_grouped_vec_batched_kernel(
+    const Complex* flat_input,
+    Complex* grouped_output,
+    Index flat_size,
+    Index grouped_size,
+    Index total_flat_size,
+    Index complement_dim,
+    const Index* tdesc, Index num_t, const Index* cdesc, Index num_c)
+{
+    const Index idx =
+        static_cast<Index>(blockIdx.x) * static_cast<Index>(blockDim.x) +
+        static_cast<Index>(threadIdx.x);
+    if (idx >= total_flat_size) {
+        return;
+    }
+    const Index batch = idx / flat_size;
+    const Index local_flat = idx % flat_size;
+    const Index g = flat_to_grouped_vec_index(local_flat, complement_dim,
+                                              tdesc, num_t, cdesc, num_c);
+    grouped_output[batch * grouped_size + g] = flat_input[idx];
+}
+
+__global__ void grouped_to_flat_vec_batched_kernel(
+    const Complex* grouped_input,
+    Complex* flat_output,
+    Index flat_size,
+    Index grouped_size,
+    Index total_grouped_size,
+    Index complement_dim,
+    const Index* tdesc, Index num_t, const Index* cdesc, Index num_c)
+{
+    const Index idx =
+        static_cast<Index>(blockIdx.x) * static_cast<Index>(blockDim.x) +
+        static_cast<Index>(threadIdx.x);
+    if (idx >= total_grouped_size) {
+        return;
+    }
+    const Index batch = idx / grouped_size;
+    const Index local_grouped = idx % grouped_size;
+    const Index f = grouped_to_flat_vec_index(local_grouped, complement_dim,
+                                              tdesc, num_t, cdesc, num_c);
+    flat_output[batch * flat_size + f] = grouped_input[idx];
+}
+
 __global__ void flat_to_grouped_kernel(
     const Complex* flat_input,
     Complex* grouped_output,
@@ -451,6 +534,22 @@ bool create_cuda_grouped_state_layout(
     return true;
 }
 
+// State-vector layout: identical descriptors to the density layout (the target/complement
+// decomposition is bra-agnostic), but the buffer holds D elements (a ket vector), not D^2.
+// Overriding only flat_size/grouped_size keeps the D-vs-D^2 distinction localized and lets the
+// vec relayout/contraction launchers read cuda_layout.flat_size like the density ones do.
+bool create_cuda_psi_grouped_state_layout(
+    const GroupedStateLayout& host_layout,
+    CudaGroupedStateLayout& cuda_layout)
+{
+    if (!create_cuda_grouped_state_layout(host_layout, cuda_layout)) {
+        return false;
+    }
+    cuda_layout.flat_size = host_layout.hilbert_dim;
+    cuda_layout.grouped_size = host_layout.hilbert_dim;
+    return true;
+}
+
 bool destroy_cuda_grouped_state_layout(
     CudaGroupedStateLayout& cuda_layout)
 {
@@ -559,6 +658,56 @@ bool launch_grouped_to_flat_batched_kernel(
         cuda_layout.grouped_size,
         total_grouped_size,
         cuda_layout.hilbert_dim, cuda_layout.target_dim, cuda_layout.complement_dim,
+        cuda_layout.d_target_desc, cuda_layout.num_target,
+        cuda_layout.d_complement_desc, cuda_layout.num_complement);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_flat_to_grouped_vec_batched_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    Index batch_size,
+    const void* d_flat_input,
+    void* d_grouped_output,
+    cudaStream_t stream)
+{
+    constexpr int block_size = 256;
+    const Index total_flat_size = batch_size * cuda_layout.flat_size;
+    const int grid_size =
+        static_cast<int>((total_flat_size + block_size - 1) / block_size);
+
+    flat_to_grouped_vec_batched_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const Complex*>(d_flat_input),
+        reinterpret_cast<Complex*>(d_grouped_output),
+        cuda_layout.flat_size,
+        cuda_layout.grouped_size,
+        total_flat_size,
+        cuda_layout.complement_dim,
+        cuda_layout.d_target_desc, cuda_layout.num_target,
+        cuda_layout.d_complement_desc, cuda_layout.num_complement);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_grouped_to_flat_vec_batched_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream)
+{
+    constexpr int block_size = 256;
+    const Index total_grouped_size = batch_size * cuda_layout.grouped_size;
+    const int grid_size =
+        static_cast<int>((total_grouped_size + block_size - 1) / block_size);
+
+    grouped_to_flat_vec_batched_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const Complex*>(d_grouped_input),
+        reinterpret_cast<Complex*>(d_flat_output),
+        cuda_layout.flat_size,
+        cuda_layout.grouped_size,
+        total_grouped_size,
+        cuda_layout.complement_dim,
         cuda_layout.d_target_desc, cuda_layout.num_target,
         cuda_layout.d_complement_desc, cuda_layout.num_complement);
 

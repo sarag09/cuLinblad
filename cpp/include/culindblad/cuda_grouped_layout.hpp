@@ -33,6 +33,12 @@ bool create_cuda_grouped_state_layout(
     const GroupedStateLayout& host_layout,
     CudaGroupedStateLayout& cuda_layout);
 
+// State-vector (ket-only) layout: same descriptors as the density layout, but flat_size =
+// grouped_size = hilbert_dim (D), not D^2. Use the *_vec_* launchers below with this layout.
+bool create_cuda_psi_grouped_state_layout(
+    const GroupedStateLayout& host_layout,
+    CudaGroupedStateLayout& cuda_layout);
+
 bool destroy_cuda_grouped_state_layout(
     CudaGroupedStateLayout& cuda_layout);
 
@@ -56,6 +62,22 @@ bool launch_flat_to_grouped_batched_kernel(
     cudaStream_t stream);
 
 bool launch_grouped_to_flat_batched_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream);
+
+// State-vector (ket-only, D-sized) relayout. Use with a layout from
+// create_cuda_psi_grouped_state_layout; flat IS ket_full, grouped is g = ket_t*comp + ket_c.
+bool launch_flat_to_grouped_vec_batched_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    Index batch_size,
+    const void* d_flat_input,
+    void* d_grouped_output,
+    cudaStream_t stream);
+
+bool launch_grouped_to_flat_vec_batched_kernel(
     const CudaGroupedStateLayout& cuda_layout,
     Index batch_size,
     const void* d_grouped_input,
