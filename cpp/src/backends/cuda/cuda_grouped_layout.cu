@@ -600,6 +600,13 @@ __global__ void batched_grouped_dense_jump_to_flat_kernel(
                 cuCmul(cuCmul(l_ik, grouped_input[rho_idx]), cuConj(l_jl)));
         }
     }
+    // L rho L^dag is sparse: for a single super-diagonal jump (relaxation a) only ~16/81 of the
+    // target block has any surviving (k,l) term, so most threads have acc==0. Skipping the flat
+    // read-modify-write (adding 0 is a no-op) is bit-identical and cuts the dominant traffic of
+    // this kernel; it also skips the grouped_to_flat index decode for the zero threads.
+    if (acc.x == 0.0 && acc.y == 0.0) {
+        return;
+    }
     const Index f = grouped_to_flat_index(local, D, target_hilbert_dim, complement_dim,
                                           tdesc, num_t, cdesc, num_c);
     const Index out = batch * flat_size + f;
