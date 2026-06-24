@@ -549,20 +549,14 @@ PetscErrorCode create_grouped_rhs_scratch_buffers(
         return 0;
     }
 
-    // d_grouped_term is the scratch for the GENERAL cuTENSOR fallback only. The structured
-    // tunable-coupler path (diagonal / sparse / dense fast paths) never touches it, so it is
-    // allocated lazily (ensure_grouped_term_buffer, on first cuTENSOR use) instead of up
-    // front -- saving one full grouped buffer (~D^2 per state) on the production path.
-    if (cudaMalloc(&rhs_ctx.grouped_scratch.d_grouped_input, max_grouped_bytes) != cudaSuccess ||
-        cudaMalloc(&rhs_ctx.grouped_scratch.d_grouped_accum, max_grouped_bytes) != cudaSuccess) {
-        if (rhs_ctx.grouped_scratch.d_grouped_accum != nullptr) {
-            cudaFree(rhs_ctx.grouped_scratch.d_grouped_accum);
-            rhs_ctx.grouped_scratch.d_grouped_accum = nullptr;
-        }
-        if (rhs_ctx.grouped_scratch.d_grouped_input != nullptr) {
-            cudaFree(rhs_ctx.grouped_scratch.d_grouped_input);
-            rhs_ctx.grouped_scratch.d_grouped_input = nullptr;
-        }
+    // Both d_grouped_term (cuTENSOR fallback) and d_grouped_accum (the accumulate-then-flatten
+    // path) are allocated LAZILY: the fully-fused production path (-tc_fused_diagonal 1
+    // -tc_fuse_coupling 1) writes f directly via the to-flat kernels and never touches either, so
+    // each stays unallocated (~0.64 GiB/state apiece saved; ~25 -> ~30 density matrices on 96 GiB).
+    // ensure_grouped_term_buffer / ensure_grouped_accum_buffer allocate them on demand only when a
+    // layer falls through. Only d_grouped_input (the per-layer regroup target) is needed up front.
+    if (cudaMalloc(&rhs_ctx.grouped_scratch.d_grouped_input, max_grouped_bytes) != cudaSuccess) {
+        rhs_ctx.grouped_scratch.d_grouped_input = nullptr;
         rhs_ctx.grouped_scratch.grouped_bytes = 0;
         return PETSC_ERR_MEM;
     }

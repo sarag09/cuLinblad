@@ -482,6 +482,27 @@ PetscErrorCode ensure_grouped_term_buffer(GroupedRhsScratchBuffers& scratch)
     return 0;
 }
 
+// Lazily allocate d_grouped_accum (one full grouped buffer, ~D^2 per state). Under the fully-fused
+// production path (-tc_fused_diagonal 1 -tc_fuse_coupling 1) every layer writes f directly via the
+// to-flat kernels, so the accumulator is never touched and stays unallocated -- ~0.64 GiB/state
+// saved (~25 -> ~30 density matrices on a 96 GiB GPU). Allocated on demand only when a layer falls
+// through to an accumulate-then-flatten path (the fused-diagonal accum branch or the non-fused /
+// cuTENSOR-fallback path). Idempotent.
+PetscErrorCode ensure_grouped_accum_buffer(GroupedRhsScratchBuffers& scratch)
+{
+    if (scratch.d_grouped_accum != nullptr) {
+        return 0;
+    }
+    if (scratch.grouped_bytes == 0) {
+        return PETSC_ERR_ARG_WRONGSTATE;
+    }
+    if (cudaMalloc(&scratch.d_grouped_accum, scratch.grouped_bytes) != cudaSuccess) {
+        scratch.d_grouped_accum = nullptr;
+        return PETSC_ERR_MEM;
+    }
+    return 0;
+}
+
 PetscErrorCode accumulate_grouped_layout_term(
     const PetscCudaTsRhsContext& rhs_ctx,
     CachedGroupedLayoutEntry& layout_entry,
@@ -834,6 +855,7 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
                 return 0;
             }
             // Default: accumulate into the grouped buffer, then flatten into f.
+            PetscCall(ensure_grouped_accum_buffer(rhs_ctx.grouped_scratch));
             if (!launch_batched_grouped_fused_diagonal_kernel(
                     layout_entry.d_dynamic_diagonal,
                     norm_ptr,
@@ -935,6 +957,11 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             }
         }
     }
+
+    // Fall-through (non-fused / cuTENSOR) path: this layer accumulates into the grouped buffer
+    // before a flatten, so the accumulator must exist (lazily allocated; never touched on the
+    // fully-fused production path, where it stays unallocated to save ~0.64 GiB/state).
+    PetscCall(ensure_grouped_accum_buffer(rhs_ctx.grouped_scratch));
 
     // The commutator (first term, applied by an overwriting fast-path kernel) initializes
     // the accumulator for this layer, so the explicit per-layer zeroing is only needed when
