@@ -817,6 +817,38 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // ---- MPI one-rank-per-GPU binding (state-sharding) ---------------------------------------
+    // Each rank binds to GPU (rank % ndev) so its raw cudaMalloc/cuTENSOR AND PETSc VECCUDA all
+    // land on the same physical device. cudaSetDevice MUST precede the first CUDA call of any kind
+    // (every cudaMalloc, cudaStreamCreate, cuTENSOR/cublas init, and the first VECCUDA Vec), so
+    // this block sits immediately after PetscInitialize. No-op for single-process (rank0 -> dev0),
+    // so all existing single-process behavior is byte-for-byte unchanged. rank/size/device come
+    // from PETSC_COMM_WORLD; the per-rank solver stays on PETSC_COMM_SELF (independent, bit-exact).
+    PetscMPIInt mpi_rank = 0;
+    PetscMPIInt mpi_size = 1;
+    PetscCallMPIAbort(PETSC_COMM_WORLD, MPI_Comm_rank(PETSC_COMM_WORLD, &mpi_rank));
+    PetscCallMPIAbort(PETSC_COMM_WORLD, MPI_Comm_size(PETSC_COMM_WORLD, &mpi_size));
+    {
+        int ndev = 0;
+        const cudaError_t cerr = cudaGetDeviceCount(&ndev);
+        if (cerr != cudaSuccess || ndev <= 0) {
+            std::cerr << "cudaGetDeviceCount failed (" << cudaGetErrorString(cerr)
+                      << ") or no GPU visible." << std::endl;
+            PetscFinalize();
+            return 1;
+        }
+        const int my_dev = static_cast<int>(mpi_rank) % ndev;
+        if (cudaSetDevice(my_dev) != cudaSuccess) {
+            std::cerr << "cudaSetDevice(" << my_dev << ") failed." << std::endl;
+            PetscFinalize();
+            return 1;
+        }
+        // Pin PETSc's lazily-initialized VECCUDA device to the same GPU as the app's raw CUDA,
+        // rather than relying on PETSc's own (coincidentally matching) rank%ndev default.
+        PetscCallAbort(PETSC_COMM_SELF,
+            PetscOptionsSetValue(nullptr, "-device_select", std::to_string(my_dev).c_str()));
+    }
+
     PetscBool psi_selftest = PETSC_FALSE;
     PetscOptionsGetBool(nullptr, nullptr, "-psi_selftest", &psi_selftest, nullptr);
     if (psi_selftest == PETSC_TRUE) {
