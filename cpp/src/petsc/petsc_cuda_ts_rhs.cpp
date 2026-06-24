@@ -411,6 +411,25 @@ PetscErrorCode zero_grouped_layout_accumulator(
     return zero_ok ? 0 : PETSC_ERR_LIB;
 }
 
+// Lazily allocate d_grouped_term, the scratch used ONLY by the general cuTENSOR fallback.
+// The structured tunable-coupler path never reaches that fallback, so this is never called
+// there and d_grouped_term stays unallocated (one full grouped buffer, ~D^2 per state,
+// saved). A non-structured model allocates it on first cuTENSOR use.
+PetscErrorCode ensure_grouped_term_buffer(GroupedRhsScratchBuffers& scratch)
+{
+    if (scratch.d_grouped_term != nullptr) {
+        return 0;
+    }
+    if (scratch.grouped_bytes == 0) {
+        return PETSC_ERR_ARG_WRONGSTATE;
+    }
+    if (cudaMalloc(&scratch.d_grouped_term, scratch.grouped_bytes) != cudaSuccess) {
+        scratch.d_grouped_term = nullptr;
+        return PETSC_ERR_MEM;
+    }
+    return 0;
+}
+
 PetscErrorCode accumulate_grouped_layout_term(
     const PetscCudaTsRhsContext& rhs_ctx,
     CachedGroupedLayoutEntry& layout_entry,
@@ -670,6 +689,7 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             // here first. Dead for the structured tunable-coupler model; kept correct.
             PetscCall(zero_grouped_layout_accumulator(
                 rhs_ctx, layout_entry, rhs_ctx.batch_size, s));
+            PetscCall(ensure_grouped_term_buffer(rhs_ctx.grouped_scratch));
             PetscCall(apply_grouped_commutator_cuda_buffer(
                 solver,
                 effective_term_label,
@@ -736,6 +756,7 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
         } else {
             const ScopedNvtxRange jump_range(
                 make_nvtx_label("rhs_dissipator_jump", d_aux.name));
+            PetscCall(ensure_grouped_term_buffer(rhs_ctx.grouped_scratch));
             PetscCall(apply_grouped_dissipator_jump_cuda_buffer(
                 solver,
                 d_aux.name,
@@ -782,6 +803,7 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
                 return PETSC_ERR_LIB;
             }
         } else {
+            PetscCall(ensure_grouped_term_buffer(rhs_ctx.grouped_scratch));
             PetscCall(apply_grouped_anti_commutator_cuda_buffer(
                 solver,
                 dissipator_norm_label,

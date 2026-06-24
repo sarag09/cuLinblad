@@ -527,16 +527,15 @@ PetscErrorCode create_grouped_rhs_scratch_buffers(
         return 0;
     }
 
+    // d_grouped_term is the scratch for the GENERAL cuTENSOR fallback only. The structured
+    // tunable-coupler path (diagonal / sparse / dense fast paths) never touches it, so it is
+    // allocated lazily (ensure_grouped_term_buffer, on first cuTENSOR use) instead of up
+    // front -- saving one full grouped buffer (~D^2 per state) on the production path.
     if (cudaMalloc(&rhs_ctx.grouped_scratch.d_grouped_input, max_grouped_bytes) != cudaSuccess ||
-        cudaMalloc(&rhs_ctx.grouped_scratch.d_grouped_term, max_grouped_bytes) != cudaSuccess ||
         cudaMalloc(&rhs_ctx.grouped_scratch.d_grouped_accum, max_grouped_bytes) != cudaSuccess) {
         if (rhs_ctx.grouped_scratch.d_grouped_accum != nullptr) {
             cudaFree(rhs_ctx.grouped_scratch.d_grouped_accum);
             rhs_ctx.grouped_scratch.d_grouped_accum = nullptr;
-        }
-        if (rhs_ctx.grouped_scratch.d_grouped_term != nullptr) {
-            cudaFree(rhs_ctx.grouped_scratch.d_grouped_term);
-            rhs_ctx.grouped_scratch.d_grouped_term = nullptr;
         }
         if (rhs_ctx.grouped_scratch.d_grouped_input != nullptr) {
             cudaFree(rhs_ctx.grouped_scratch.d_grouped_input);
