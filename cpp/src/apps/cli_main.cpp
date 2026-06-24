@@ -1069,6 +1069,20 @@ int main(int argc, char** argv)
                 MPI_Abort(PETSC_COMM_WORLD, 1);
             }
 
+            // Guard the empty-shard misconfiguration (more ranks than states): a 0-length slice
+            // makes the density path throw and the Schrodinger path SILENTLY regenerate the full
+            // set. Abort with a clear message rather than corrupt the merge.
+            if (mpi_size > 1 &&
+                static_cast<std::size_t>(mpi_size) >
+                    tc_config.state_selection.selected_state_indices.size()) {
+                if (mpi_rank == 0) {
+                    std::cerr << "too many ranks (" << mpi_size << ") for "
+                              << tc_config.state_selection.selected_state_indices.size()
+                              << " computational states -- use <= that many ranks" << std::endl;
+                }
+                MPI_Abort(PETSC_COMM_WORLD, 1);
+            }
+
             // MPI state-sharding: each rank evolves a disjoint contiguous slice of the selected
             // computational states (identity for single-process). The solver/run-entry are
             // unchanged -- they size the batch to the (now per-rank) selected_state_indices.
