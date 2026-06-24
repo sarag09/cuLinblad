@@ -20,8 +20,11 @@ struct ModelEvolutionSpec {
 };
 
 struct ModelInitialStates {
-    std::string encoding = "computational";  // currently only "computational"
-    int num_states = 0;                      // 2^n_qubits for closed
+    std::string encoding = "computational";  // "computational" | "explicit"
+    int num_states = 0;                      // 2^n_qubits for "computational"
+    // "explicit": M state vectors (each length hilbert_dim D), e.g. the dressed computational kets
+    // exported from Julia (sys.kets_dressed). Closed evolves these as |psi>; open evolves |k><k|.
+    std::vector<std::vector<Complex>> explicit_states;
 };
 
 // A deserialized handoff model: the matrix-free Model plus the run metadata the solver needs.

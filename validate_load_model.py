@@ -80,5 +80,29 @@ psis = run({
 check(abs(psis[0][0] - 1) < 1e-6 and abs(psis[1][1] - np.exp(-1j * Phi)) < 1e-7,
       "time-dependent sine drive vs analytic exp(-i.integral f)")
 
+# 4) EXPLICIT closed: inject (|0>+|1>)/sqrt2 into H=pi*n0 -> (|0>-|1>)/sqrt2 at t=1 (|1> phases by -1).
+sq = 1.0 / np.sqrt(2.0)
+psis = run({
+    "device": {"local_dims": [2], "n_qubits": 1, "n_couplers": 0}, "system": "closed",
+    "hamiltonian_terms": [{"name": "pn", "sites": [0], "row_dim": 2, "col_dim": 2, "matrix": mat([0, 0, 0, PI])}],
+    "dissipator_terms": [], "time_dependent_terms": [],
+    "evolution": {"tfinal": 1.0, "num_steps": 2000},
+    "initial_states": {"encoding": "explicit", "states": {"real": [[sq, sq]], "imag": [[0.0, 0.0]]}}})
+check(len(psis) == 1 and abs(psis[0][0] - sq) < 1e-6 and abs(psis[0][1] + sq) < 1e-6,
+      "explicit closed: (|0>+|1>)/sqrt2 under pi*n0 -> (|0>-|1>)/sqrt2")
+
+# 5) EXPLICIT open cross-check preview: same ket as |+><+|, tiny dissipator -> rho ~ |psi_closed><psi_closed|.
+# closed final = [sq, -sq] -> |psi><psi| (row-major D^2=4) = [0.5, -0.5, -0.5, 0.5].
+rhos = run({
+    "device": {"local_dims": [2], "n_qubits": 1, "n_couplers": 0}, "system": "open",
+    "hamiltonian_terms": [{"name": "pn", "sites": [0], "row_dim": 2, "col_dim": 2, "matrix": mat([0, 0, 0, PI])}],
+    "dissipator_terms": [{"name": "tiny", "sites": [0], "row_dim": 2, "col_dim": 2, "matrix": mat([0, 1e-4, 0, 0])}],
+    "time_dependent_terms": [], "evolution": {"tfinal": 1.0, "num_steps": 2000},
+    "initial_states": {"encoding": "explicit", "states": {"real": [[sq, sq]], "imag": [[0.0, 0.0]]}}})
+r = rhos[0]
+exp_rho = np.array([0.5, -0.5, -0.5, 0.5], dtype=complex)
+check(len(rhos) == 1 and abs((r[0] + r[3]) - 1) < 1e-3 and np.max(np.abs(r - exp_rho)) < 1e-3,
+      "explicit open |+><+| ~ closed |psi><psi| (tiny dissipator, cross-check preview)")
+
 print("validate_load_model: %s" % ("ALL PASS" if fails == 0 else "%d FAILED" % fails))
 sys.exit(0 if fails == 0 else 1)

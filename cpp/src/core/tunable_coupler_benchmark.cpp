@@ -936,18 +936,27 @@ std::vector<Index> computational_density_indices_for_dims(
 // usual -tc_integrator dispatch inside evolve_*_batch_cuda_ts (use -tc_integrator 1 for custom RK4).
 TransmonChainBenchmarkTiming evolve_loaded_model_schrodinger(
     const Model& model_in, const std::vector<Index>& selected_indices,
+    const std::vector<std::vector<Complex>>& explicit_states,
     double t0, double tfinal, int num_steps)
 {
     Model model = model_in;
     model.dissipator_terms.clear();  // closed system: Schrodinger equation only
     const Solver solver = make_solver(model);
-    const std::vector<std::vector<Complex>> initial =
-        make_selected_basis_state_vectors(solver, selected_indices);
+    // Explicit states (e.g. dressed comp kets) take precedence over the computational-index basis.
+    std::vector<std::vector<Complex>> initial = explicit_states.empty()
+        ? make_selected_basis_state_vectors(solver, selected_indices)
+        : explicit_states;
+    const std::size_t D = static_cast<std::size_t>(solver.layout.hilbert_dim);
+    for (const std::vector<Complex>& v : initial) {
+        if (v.size() != D) {
+            throw std::invalid_argument("evolve_loaded_model_schrodinger: initial state length != hilbert_dim");
+        }
+    }
     CudaBatchExecutionContext ctx{};
     PetscCallAbort(PETSC_COMM_SELF,
-        create_cuda_state_vector_execution_context(solver, selected_indices.size(), ctx));
+        create_cuda_state_vector_execution_context(solver, initial.size(), ctx));
     TransmonChainBenchmarkTiming timing;
-    timing.num_evolved_states = selected_indices.size();
+    timing.num_evolved_states = initial.size();
     timing.final_states =
         evolve_state_vector_batch_cuda_ts(solver, initial, t0, tfinal, num_steps, ctx);
     PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
@@ -956,14 +965,33 @@ TransmonChainBenchmarkTiming evolve_loaded_model_schrodinger(
 
 TransmonChainBenchmarkTiming evolve_loaded_model_liouvillian(
     const Model& model, const std::vector<Index>& selected_density_indices,
+    const std::vector<std::vector<Complex>>& explicit_kets,
     double t0, double tfinal, int num_steps)
 {
     const Solver solver = make_solver(model);
-    const std::vector<std::vector<Complex>> initial =
-        make_selected_basis_density_states(solver, selected_density_indices);
+    const std::size_t D = static_cast<std::size_t>(solver.layout.hilbert_dim);
+    std::vector<std::vector<Complex>> initial;
+    if (explicit_kets.empty()) {
+        initial = make_selected_basis_density_states(solver, selected_density_indices);
+    } else {
+        // Build each |k><k| density matrix (row-major rho[i*D+j] = ket[i]*conj(ket[j])) from a ket.
+        initial.reserve(explicit_kets.size());
+        for (const std::vector<Complex>& ket : explicit_kets) {
+            if (ket.size() != D) {
+                throw std::invalid_argument("evolve_loaded_model_liouvillian: ket length != hilbert_dim");
+            }
+            std::vector<Complex> rho(D * D);
+            for (std::size_t i = 0; i < D; ++i) {
+                for (std::size_t j = 0; j < D; ++j) {
+                    rho[i * D + j] = ket[i] * std::conj(ket[j]);
+                }
+            }
+            initial.push_back(std::move(rho));
+        }
+    }
     CudaBatchExecutionContext ctx{};
     PetscCallAbort(PETSC_COMM_SELF,
-        create_cuda_batch_execution_context(solver, selected_density_indices.size(), ctx));
+        create_cuda_batch_execution_context(solver, initial.size(), ctx));
     PetscCallAbort(PETSC_COMM_SELF, TSSetType(ctx.ts, TSRK));
     PetscCallAbort(PETSC_COMM_SELF, TSRKSetType(ctx.ts, TSRK4));
     TSAdapt adapt = nullptr;
@@ -975,7 +1003,7 @@ TransmonChainBenchmarkTiming evolve_loaded_model_liouvillian(
     PetscCallAbort(PETSC_COMM_SELF, TSSetExactFinalTime(ctx.ts, TS_EXACTFINALTIME_MATCHSTEP));
     PetscCallAbort(PETSC_COMM_SELF, TSSetFromOptions(ctx.ts));
     TransmonChainBenchmarkTiming timing;
-    timing.num_evolved_states = selected_density_indices.size();
+    timing.num_evolved_states = initial.size();
     timing.final_states =
         evolve_state_batch_cuda_ts(solver, initial, t0, tfinal, num_steps, ctx);
     PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));

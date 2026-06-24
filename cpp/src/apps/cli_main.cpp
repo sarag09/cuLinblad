@@ -963,17 +963,25 @@ int run_loaded_model(const std::string& model_path, const std::string& results_p
                   << ", num_steps=" << num_steps
                   << ", terms=" << lm.model.hamiltonian_terms.size() << "+"
                   << lm.model.time_dependent_hamiltonian_terms.size() << "td" << std::endl;
+        const std::vector<std::vector<Complex>>& explicit_states = lm.initial_states.explicit_states;
+        const bool use_explicit = !explicit_states.empty();
+        if (use_explicit) {
+            std::cerr << "[load_model] explicit initial states: " << explicit_states.size()
+                      << " (e.g. dressed comp kets)" << std::endl;
+        }
         if (lm.is_open) {
-            const std::vector<Index> idx =
-                computational_density_indices_for_dims(lm.model.local_dims, lm.num_qubits);
+            const std::vector<Index> idx = use_explicit
+                ? std::vector<Index>{}
+                : computational_density_indices_for_dims(lm.model.local_dims, lm.num_qubits);
             const TransmonChainBenchmarkTiming timing = evolve_loaded_model_liouvillian(
-                lm.model, idx, lm.evolution.t0, lm.evolution.tfinal, num_steps);
+                lm.model, idx, explicit_states, lm.evolution.t0, lm.evolution.tfinal, num_steps);
             dump_loaded_model_result(*out, lm, timing, "lindblad");
         } else {
-            const std::vector<Index> idx =
-                computational_state_indices_for_dims(lm.model.local_dims, lm.num_qubits);
+            const std::vector<Index> idx = use_explicit
+                ? std::vector<Index>{}
+                : computational_state_indices_for_dims(lm.model.local_dims, lm.num_qubits);
             const TransmonChainBenchmarkTiming timing = evolve_loaded_model_schrodinger(
-                lm.model, idx, lm.evolution.t0, lm.evolution.tfinal, num_steps);
+                lm.model, idx, explicit_states, lm.evolution.t0, lm.evolution.tfinal, num_steps);
             dump_loaded_model_result(*out, lm, timing, "schrodinger");
         }
         return 0;

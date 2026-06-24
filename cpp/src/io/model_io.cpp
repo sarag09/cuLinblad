@@ -207,6 +207,33 @@ LoadedModel load_model_from_json(const std::string& path) {
     lm.initial_states.encoding = is.value("encoding", std::string("computational"));
     lm.initial_states.num_states = is.value("num_states", 0);
 
+    if (lm.initial_states.encoding == "explicit") {
+        // M state vectors (each length D = prod(local_dims)) as parallel real/imag arrays-of-arrays.
+        std::size_t D = 1;
+        for (const Index d : lm.model.local_dims) D *= static_cast<std::size_t>(d);
+        const json& st = is.at("states");
+        const json& re = st.at("real");
+        const json& im = st.at("imag");
+        if (!re.is_array() || !im.is_array() || re.size() != im.size() || re.empty()) {
+            throw std::runtime_error("model_io: initial_states.explicit needs equal-length non-empty real/imag");
+        }
+        lm.initial_states.explicit_states.resize(re.size());
+        for (std::size_t s = 0; s < re.size(); ++s) {
+            if (re[s].size() != D || im[s].size() != D) {
+                throw std::runtime_error("model_io: explicit state " + std::to_string(s) + " length "
+                                         + std::to_string(re[s].size()) + " != hilbert_dim " + std::to_string(D));
+            }
+            std::vector<Complex>& v = lm.initial_states.explicit_states[s];
+            v.resize(D);
+            for (std::size_t i = 0; i < D; ++i) {
+                v[i] = Complex(re[s][i].get<double>(), im[s][i].get<double>());
+            }
+        }
+        lm.initial_states.num_states = static_cast<int>(lm.initial_states.explicit_states.size());
+    } else if (lm.initial_states.encoding != "computational") {
+        throw std::runtime_error("model_io: initial_states.encoding must be 'computational' or 'explicit'");
+    }
+
     return lm;
 }
 

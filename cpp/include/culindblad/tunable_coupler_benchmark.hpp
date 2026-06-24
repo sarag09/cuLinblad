@@ -100,13 +100,17 @@ std::vector<Index> computational_density_indices_for_dims(
     const std::vector<Index>& local_dims, Index num_qubits);
 
 // Evolve a deserialized handoff Model in the LAB frame (matches the Julia reference; closed = |psi>
-// Schrodinger, open = rho Lindblad). Initial states are the selected computational kets / density
-// columns. Uses the -tc_integrator dispatch (pass -tc_integrator 1 for the custom RK4).
+// Schrodinger, open = rho Lindblad). If explicit_states is non-empty it is used as the initial states
+// (e.g. the dressed comp kets exported from Julia): closed evolves them as |psi>, open evolves the
+// outer products |k><k|. Otherwise the selected computational kets / density columns are used.
+// Uses the -tc_integrator dispatch (pass -tc_integrator 1 for the custom RK4).
 TransmonChainBenchmarkTiming evolve_loaded_model_schrodinger(
     const Model& model, const std::vector<Index>& selected_indices,
+    const std::vector<std::vector<Complex>>& explicit_states,
     double t0, double tfinal, int num_steps);
 TransmonChainBenchmarkTiming evolve_loaded_model_liouvillian(
     const Model& model, const std::vector<Index>& selected_density_indices,
+    const std::vector<std::vector<Complex>>& explicit_kets,
     double t0, double tfinal, int num_steps);
 
 Model build_tunable_coupler_model(const TunableCouplerBenchmarkConfig& config);
