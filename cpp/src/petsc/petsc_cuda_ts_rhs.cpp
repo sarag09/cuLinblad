@@ -529,6 +529,14 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
         PetscOptionsGetInt(nullptr, nullptr, "-tc_fused_diagonal", &fused_opt, nullptr);
         s_fused_diagonal = (fused_opt != 0) ? 1 : 0;
     }
+    // -tc_fuse_coupling also routes the single-site fused-diagonal result straight into f
+    // (skipping the grouped accumulator + flatten), in addition to the coupling fusion below.
+    static int s_fuse_coupling = -1;
+    if (s_fuse_coupling < 0) {
+        PetscInt fuse_opt = 0;
+        PetscOptionsGetInt(nullptr, nullptr, "-tc_fuse_coupling", &fuse_opt, nullptr);
+        s_fuse_coupling = (fuse_opt != 0) ? 1 : 0;
+    }
     if (s_fused_diagonal == 1 && has_effective_hamiltonian) {
         const Index matrix_dim = static_cast<Index>(std::llround(std::sqrt(
             static_cast<double>(effective_hamiltonian.size()))));
@@ -585,11 +593,41 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
             }
             const ScopedNvtxRange fused_range(make_nvtx_label(
                 "rhs_fused_diagonal", make_sites_cache_suffix(layout_entry.sites)));
+            const void* norm_ptr =
+                layout_entry.static_dissipator_norm_sum.empty()
+                    ? nullptr
+                    : layout_entry.d_static_dissipator_norm_diagonal;
+            int n_diag_jumps = 0;
+            for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx.cached_static_dissipators) {
+                if (same_sites(layout_entry.sites, d_aux.sites) && !d_aux.jump_diagonal.empty()) {
+                    ++n_diag_jumps;
+                }
+            }
+            // Fuse-to-flat: write the single-site contribution (fused diagonal + relax dense
+            // jumps) straight into f, skipping the grouped accumulator + the flatten. Only
+            // when there is no extra diagonal jump (the fused kernel folds in exactly one;
+            // there is no diagonal-jump-to-flat variant).
+            if (s_fuse_coupling == 1 && n_diag_jumps <= 1) {
+                PetscCall(apply_grouped_fused_diagonal_to_petsc_vec(
+                    layout_entry.cuda_grouped_layout,
+                    layout_entry.d_dynamic_diagonal, norm_ptr, fused_jump,
+                    rhs_ctx.grouped_scratch.d_grouped_input,
+                    f, rhs_ctx.batch_size, s));
+                for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx.cached_static_dissipators) {
+                    if (same_sites(layout_entry.sites, d_aux.sites) &&
+                        d_aux.jump_diagonal.empty() && d_aux.d_l_op != nullptr) {
+                        PetscCall(apply_grouped_dense_jump_to_petsc_vec(
+                            layout_entry.cuda_grouped_layout, d_aux.d_l_op,
+                            rhs_ctx.grouped_scratch.d_grouped_input,
+                            f, rhs_ctx.batch_size, s));
+                    }
+                }
+                return 0;
+            }
+            // Default: accumulate into the grouped buffer, then flatten into f.
             if (!launch_batched_grouped_fused_diagonal_kernel(
                     layout_entry.d_dynamic_diagonal,
-                    (layout_entry.static_dissipator_norm_sum.empty()
-                         ? nullptr
-                         : layout_entry.d_static_dissipator_norm_diagonal),
+                    norm_ptr,
                     fused_jump,
                     rhs_ctx.grouped_scratch.d_grouped_input,
                     rhs_ctx.grouped_scratch.d_grouped_accum,
@@ -641,12 +679,6 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
     // A pure 2-site coupling layer has the sparse commutator as its SOLE contributor (no
     // dissipator). Apply -i[H,rho] straight into f, skipping the grouped accumulator write +
     // the separate flatten pass (removes one full grouped-buffer round-trip per coupling).
-    static int s_fuse_coupling = -1;
-    if (s_fuse_coupling < 0) {
-        PetscInt fuse_opt = 0;
-        PetscOptionsGetInt(nullptr, nullptr, "-tc_fuse_coupling", &fuse_opt, nullptr);
-        s_fuse_coupling = (fuse_opt != 0) ? 1 : 0;
-    }
     if (s_fuse_coupling == 1 && has_effective_hamiltonian &&
         layout_entry.sites.size() == 2 &&
         layout_entry.static_dissipator_norm_sum.empty()) {

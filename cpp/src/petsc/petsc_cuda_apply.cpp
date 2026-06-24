@@ -1469,6 +1469,41 @@ PetscErrorCode apply_grouped_sparse_commutator_to_petsc_vec(
     return ok ? 0 : PETSC_ERR_LIB;
 }
 
+PetscErrorCode apply_grouped_fused_diagonal_to_petsc_vec(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    const void* h_diag,
+    const void* norm_diag,
+    const void* jump_diag,
+    const void* d_grouped_input,
+    Vec y,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    void* d_flat_output = nullptr;
+    PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
+    const bool ok = launch_grouped_fused_diagonal_to_flat_kernel(
+        cuda_grouped_layout, h_diag, norm_diag, jump_diag,
+        batch_size, d_grouped_input, d_flat_output, stream);
+    PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+    return ok ? 0 : PETSC_ERR_LIB;
+}
+
+PetscErrorCode apply_grouped_dense_jump_to_petsc_vec(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    const void* l_op,
+    const void* d_grouped_input,
+    Vec y,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    void* d_flat_output = nullptr;
+    PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
+    const bool ok = launch_grouped_dense_jump_to_flat_kernel(
+        cuda_grouped_layout, l_op, batch_size, d_grouped_input, d_flat_output, stream);
+    PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+    return ok ? 0 : PETSC_ERR_LIB;
+}
+
 PetscErrorCode apply_grouped_commutator_cuda_buffer(
     const Solver& solver,
     const std::string& term_label,

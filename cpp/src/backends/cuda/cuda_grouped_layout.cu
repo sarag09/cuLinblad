@@ -244,6 +244,119 @@ __global__ void batched_grouped_sparse_commutator_to_flat_kernel(
     flat_output[out] = cuCadd(flat_output[out], val);
 }
 
+// Fused single-site diagonal (commutator + anti-commutator + one diagonal jump) accumulated
+// straight into f. Mirrors batched_grouped_fused_diagonal_kernel (cuda_elementwise.cu) but
+// scatters into the flat RHS instead of the grouped accumulator.
+__global__ void batched_grouped_fused_diagonal_to_flat_kernel(
+    const cuDoubleComplex* h_diag,
+    const cuDoubleComplex* norm_diag,
+    const cuDoubleComplex* jump_diag,
+    const cuDoubleComplex* grouped_input,
+    cuDoubleComplex* flat_output,
+    Index flat_size,
+    Index grouped_size,
+    Index target_hilbert_dim,
+    Index complement_dim,
+    Index batch_size,
+    Index D,
+    const Index* tdesc, Index num_t, const Index* cdesc, Index num_c)
+{
+    const Index total = batch_size * grouped_size;
+    const Index idx =
+        static_cast<Index>(blockIdx.x) * static_cast<Index>(blockDim.x) +
+        static_cast<Index>(threadIdx.x);
+    if (idx >= total) {
+        return;
+    }
+    const Index batch = idx / grouped_size;
+    const Index local = idx % grouped_size;
+    const Index bra_comp = local % complement_dim;
+    Index t = local / complement_dim;
+    const Index bra_target = t % target_hilbert_dim;
+    t /= target_hilbert_dim;
+    const Index ket_comp = t % complement_dim;
+    const Index ket_target = t / complement_dim;
+    (void)bra_comp;
+    (void)ket_comp;
+
+    cuDoubleComplex factor = make_cuDoubleComplex(0.0, 0.0);
+    if (h_diag != nullptr) {
+        const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
+        factor = cuCadd(factor,
+            cuCmul(minus_i, cuCsub(h_diag[ket_target], h_diag[bra_target])));
+    }
+    if (norm_diag != nullptr) {
+        const cuDoubleComplex minus_half = make_cuDoubleComplex(-0.5, 0.0);
+        factor = cuCadd(factor,
+            cuCmul(minus_half, cuCadd(norm_diag[ket_target], norm_diag[bra_target])));
+    }
+    if (jump_diag != nullptr) {
+        factor = cuCadd(factor,
+            cuCmul(jump_diag[ket_target], cuConj(jump_diag[bra_target])));
+    }
+    const cuDoubleComplex val = cuCmul(factor, grouped_input[idx]);
+    const Index f = grouped_to_flat_index(local, D, target_hilbert_dim, complement_dim,
+                                          tdesc, num_t, cdesc, num_c);
+    const Index out = batch * flat_size + f;
+    flat_output[out] = cuCadd(flat_output[out], val);
+}
+
+// Single-site dense jump L rho L^dag accumulated straight into f. Mirrors
+// batched_grouped_dense_jump_kernel (cuda_elementwise.cu) but scatters into the flat RHS.
+__global__ void batched_grouped_dense_jump_to_flat_kernel(
+    const cuDoubleComplex* l_op,
+    const cuDoubleComplex* grouped_input,
+    cuDoubleComplex* flat_output,
+    Index flat_size,
+    Index grouped_size,
+    Index target_hilbert_dim,
+    Index complement_dim,
+    Index batch_size,
+    Index D,
+    const Index* tdesc, Index num_t, const Index* cdesc, Index num_c)
+{
+    const Index total = batch_size * grouped_size;
+    const Index idx =
+        static_cast<Index>(blockIdx.x) * static_cast<Index>(blockDim.x) +
+        static_cast<Index>(threadIdx.x);
+    if (idx >= total) {
+        return;
+    }
+    const Index batch = idx / grouped_size;
+    const Index local = idx % grouped_size;
+    const Index bra_comp = local % complement_dim;
+    Index t = local / complement_dim;
+    const Index bra_target = t % target_hilbert_dim;
+    t /= target_hilbert_dim;
+    const Index ket_comp = t % complement_dim;
+    const Index ket_target = t / complement_dim;
+
+    const Index base = batch * grouped_size;
+    cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
+    for (Index k = 0; k < target_hilbert_dim; ++k) {
+        const cuDoubleComplex l_ik = l_op[ket_target * target_hilbert_dim + k];
+        if (l_ik.x == 0.0 && l_ik.y == 0.0) {
+            continue;
+        }
+        for (Index l = 0; l < target_hilbert_dim; ++l) {
+            const cuDoubleComplex l_jl = l_op[bra_target * target_hilbert_dim + l];
+            if (l_jl.x == 0.0 && l_jl.y == 0.0) {
+                continue;
+            }
+            const Index rho_idx =
+                base +
+                ((k * complement_dim + ket_comp) * target_hilbert_dim + l) * complement_dim +
+                bra_comp;
+            acc = cuCadd(acc,
+                cuCmul(cuCmul(l_ik, grouped_input[rho_idx]), cuConj(l_jl)));
+        }
+    }
+    const Index f = grouped_to_flat_index(local, D, target_hilbert_dim, complement_dim,
+                                          tdesc, num_t, cdesc, num_c);
+    const Index out = batch * flat_size + f;
+    flat_output[out] = cuCadd(flat_output[out], acc);
+}
+
 } // namespace
 
 bool create_cuda_grouped_state_layout(
@@ -497,6 +610,66 @@ bool launch_grouped_sparse_commutator_to_flat_kernel(
         reinterpret_cast<const Index*>(sparse_rows),
         reinterpret_cast<const Index*>(sparse_cols),
         sparse_nnz,
+        reinterpret_cast<const cuDoubleComplex*>(d_grouped_input),
+        reinterpret_cast<cuDoubleComplex*>(d_flat_output),
+        cuda_layout.flat_size,
+        cuda_layout.grouped_size,
+        cuda_layout.target_dim,
+        cuda_layout.complement_dim,
+        batch_size,
+        cuda_layout.hilbert_dim,
+        cuda_layout.d_target_desc, cuda_layout.num_target,
+        cuda_layout.d_complement_desc, cuda_layout.num_complement);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_grouped_fused_diagonal_to_flat_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    const void* h_diag,
+    const void* norm_diag,
+    const void* jump_diag,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream)
+{
+    constexpr int block_size = 256;
+    const Index total = batch_size * cuda_layout.grouped_size;
+    const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
+
+    batched_grouped_fused_diagonal_to_flat_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const cuDoubleComplex*>(h_diag),
+        reinterpret_cast<const cuDoubleComplex*>(norm_diag),
+        reinterpret_cast<const cuDoubleComplex*>(jump_diag),
+        reinterpret_cast<const cuDoubleComplex*>(d_grouped_input),
+        reinterpret_cast<cuDoubleComplex*>(d_flat_output),
+        cuda_layout.flat_size,
+        cuda_layout.grouped_size,
+        cuda_layout.target_dim,
+        cuda_layout.complement_dim,
+        batch_size,
+        cuda_layout.hilbert_dim,
+        cuda_layout.d_target_desc, cuda_layout.num_target,
+        cuda_layout.d_complement_desc, cuda_layout.num_complement);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_grouped_dense_jump_to_flat_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    const void* l_op,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream)
+{
+    constexpr int block_size = 256;
+    const Index total = batch_size * cuda_layout.grouped_size;
+    const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
+
+    batched_grouped_dense_jump_to_flat_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const cuDoubleComplex*>(l_op),
         reinterpret_cast<const cuDoubleComplex*>(d_grouped_input),
         reinterpret_cast<cuDoubleComplex*>(d_flat_output),
         cuda_layout.flat_size,

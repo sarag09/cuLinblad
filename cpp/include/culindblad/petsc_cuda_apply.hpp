@@ -101,6 +101,25 @@ PetscErrorCode apply_grouped_sparse_commutator_to_petsc_vec(
     Index batch_size,
     cudaStream_t stream);
 
+// Single-site fused diagonal / dense jump applied straight into the flat RHS vector y.
+PetscErrorCode apply_grouped_fused_diagonal_to_petsc_vec(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    const void* h_diag,
+    const void* norm_diag,
+    const void* jump_diag,
+    const void* d_grouped_input,
+    Vec y,
+    Index batch_size,
+    cudaStream_t stream);
+
+PetscErrorCode apply_grouped_dense_jump_to_petsc_vec(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    const void* l_op,
+    const void* d_grouped_input,
+    Vec y,
+    Index batch_size,
+    cudaStream_t stream);
+
 PetscErrorCode apply_grouped_commutator_cuda_buffer(
     const Solver& solver,
     const std::string& term_label,

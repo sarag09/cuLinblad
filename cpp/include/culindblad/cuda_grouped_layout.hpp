@@ -84,4 +84,23 @@ bool launch_grouped_sparse_commutator_to_flat_kernel(
     void* d_flat_output,
     cudaStream_t stream);
 
+// Single-site fused diagonal / dense jump accumulated straight into the flat output f.
+bool launch_grouped_fused_diagonal_to_flat_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    const void* h_diag,
+    const void* norm_diag,
+    const void* jump_diag,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream);
+
+bool launch_grouped_dense_jump_to_flat_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    const void* l_op,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream);
+
 } // namespace culindblad
