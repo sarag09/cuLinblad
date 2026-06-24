@@ -343,14 +343,18 @@ std::vector<Complex> evolve_single_state_cpu_ts(
 // ---------------------------------------------------------------------------
 enum class CustomIntegrator { TsRk4 = 0, Rk4Custom = 1, ExpmvMidpoint = 2 };
 
-// f = L(t) x via the full-model matrix-free Liouvillian (TS arg unused -> nullptr).
-inline void apply_liouvillian(
-    CudaBatchExecutionContext& ctx, double t, Vec in, Vec out, long& matvecs)
+using TcRhsFn = PetscErrorCode (*)(TS, PetscReal, Vec, Vec, void*);
+
+// f = RHS(t) x via the chosen matrix-free RHS (TS arg unused -> nullptr). Defaults to the full
+// Liouvillian; the Schrodinger solver passes ts_rhs_function_cuda_full_model_schrodinger so the
+// same low-overhead custom stepper drives |psi> (where PETSc TS bookkeeping is a bigger fraction
+// of the per-step cost than for the large density state).
+inline void apply_rhs(
+    CudaBatchExecutionContext& ctx, double t, Vec in, Vec out, long& matvecs, TcRhsFn rhs_fn)
 {
     PetscCallAbort(
         PETSC_COMM_SELF,
-        ts_rhs_function_cuda_full_model_liouvillian(
-            nullptr, static_cast<PetscReal>(t), in, out, &ctx.rhs_ctx));
+        rhs_fn(nullptr, static_cast<PetscReal>(t), in, out, &ctx.rhs_ctx));
     ++matvecs;
 }
 
@@ -360,7 +364,8 @@ void evolve_batch_custom(
     double tfinal,
     Index num_steps,
     CustomIntegrator kind,
-    int expmv_order)
+    int expmv_order,
+    TcRhsFn rhs_fn = ts_rhs_function_cuda_full_model_liouvillian)
 {
     Vec y = ctx.x;  // evolved in place
     Vec a = nullptr;
@@ -378,16 +383,16 @@ void evolve_batch_custom(
         const double t = t0 + static_cast<double>(step) * dt;
         if (kind == CustomIntegrator::Rk4Custom) {
             // Classic RK4: a = weighted accumulator, b = stage input, c = stage k.
-            apply_liouvillian(ctx, t, y, c, matvecs);
+            apply_rhs(ctx, t, y, c, matvecs, rhs_fn);
             PetscCallAbort(PETSC_COMM_SELF, VecCopy(c, a));                 // a = k1
             PetscCallAbort(PETSC_COMM_SELF, VecWAXPY(b, dt * 0.5, c, y));   // b = y + dt/2 k1
-            apply_liouvillian(ctx, t + dt * 0.5, b, c, matvecs);
+            apply_rhs(ctx, t + dt * 0.5, b, c, matvecs, rhs_fn);
             PetscCallAbort(PETSC_COMM_SELF, VecAXPY(a, 2.0, c));            // a += 2 k2
             PetscCallAbort(PETSC_COMM_SELF, VecWAXPY(b, dt * 0.5, c, y));   // b = y + dt/2 k2
-            apply_liouvillian(ctx, t + dt * 0.5, b, c, matvecs);
+            apply_rhs(ctx, t + dt * 0.5, b, c, matvecs, rhs_fn);
             PetscCallAbort(PETSC_COMM_SELF, VecAXPY(a, 2.0, c));            // a += 2 k3
             PetscCallAbort(PETSC_COMM_SELF, VecWAXPY(b, dt, c, y));         // b = y + dt k3
-            apply_liouvillian(ctx, t + dt, b, c, matvecs);
+            apply_rhs(ctx, t + dt, b, c, matvecs, rhs_fn);
             PetscCallAbort(PETSC_COMM_SELF, VecAXPY(a, 1.0, c));            // a += k4
             PetscCallAbort(PETSC_COMM_SELF, VecAXPY(y, dt / 6.0, a));       // y += dt/6 a
         } else {
@@ -397,7 +402,7 @@ void evolve_batch_custom(
             PetscCallAbort(PETSC_COMM_SELF, VecCopy(y, a));  // result = y
             PetscCallAbort(PETSC_COMM_SELF, VecCopy(y, b));  // term   = y
             for (int k = 1; k <= expmv_order; ++k) {
-                apply_liouvillian(ctx, tm, b, c, matvecs);            // c = L term
+                apply_rhs(ctx, tm, b, c, matvecs, rhs_fn);            // c = L term
                 PetscCallAbort(PETSC_COMM_SELF, VecCopy(c, b));
                 PetscCallAbort(
                     PETSC_COMM_SELF, VecScale(b, dt / static_cast<double>(k)));  // term = dt/k L term
@@ -561,19 +566,31 @@ std::vector<std::vector<Complex>> evolve_state_vector_batch_cuda_ts(
     }
     PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
 
-    const double dt = (tfinal - t0) / static_cast<double>(num_steps);
-    PetscCallAbort(PETSC_COMM_SELF, TSSetType(ctx.ts, TSRK));
-    PetscCallAbort(PETSC_COMM_SELF, TSRKSetType(ctx.ts, TSRK4));
-    TSAdapt adapt = nullptr;
-    PetscCallAbort(PETSC_COMM_SELF, TSGetAdapt(ctx.ts, &adapt));
-    PetscCallAbort(PETSC_COMM_SELF, TSAdaptSetType(adapt, TSADAPTNONE));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ctx.ts, t0));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ctx.ts, 0));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ctx.ts, dt));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ctx.ts, static_cast<PetscInt>(num_steps)));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxTime(ctx.ts, tfinal));
-    PetscCallAbort(PETSC_COMM_SELF, TSSetExactFinalTime(ctx.ts, TS_EXACTFINALTIME_MATCHSTEP));
-    PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
+    // -tc_integrator: 0 = PETSc TSRK4, 1 = custom low-overhead classic RK4 driving the
+    // Schrodinger RHS. The custom stepper removes the PETSc TS per-step bookkeeping, which is a
+    // larger fraction of the cost for the tiny |psi> state than for the density state. Both are
+    // fixed-step classic RK4 and agree to rounding level.
+    PetscInt integrator = 0;
+    PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetInt(
+        nullptr, nullptr, "-tc_integrator", &integrator, nullptr));
+    if (integrator == 0) {
+        const double dt = (tfinal - t0) / static_cast<double>(num_steps);
+        PetscCallAbort(PETSC_COMM_SELF, TSSetType(ctx.ts, TSRK));
+        PetscCallAbort(PETSC_COMM_SELF, TSRKSetType(ctx.ts, TSRK4));
+        TSAdapt adapt = nullptr;
+        PetscCallAbort(PETSC_COMM_SELF, TSGetAdapt(ctx.ts, &adapt));
+        PetscCallAbort(PETSC_COMM_SELF, TSAdaptSetType(adapt, TSADAPTNONE));
+        PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ctx.ts, t0));
+        PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ctx.ts, 0));
+        PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ctx.ts, dt));
+        PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ctx.ts, static_cast<PetscInt>(num_steps)));
+        PetscCallAbort(PETSC_COMM_SELF, TSSetMaxTime(ctx.ts, tfinal));
+        PetscCallAbort(PETSC_COMM_SELF, TSSetExactFinalTime(ctx.ts, TS_EXACTFINALTIME_MATCHSTEP));
+        PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
+    } else {
+        evolve_batch_custom(ctx, t0, tfinal, num_steps, CustomIntegrator::Rk4Custom, 0,
+                            ts_rhs_function_cuda_full_model_schrodinger);
+    }
 
     PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
     std::vector<std::vector<Complex>> final_states(
