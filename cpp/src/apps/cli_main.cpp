@@ -1,9 +1,11 @@
 #include <algorithm>
 #include <complex>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <iostream>
+#include <ostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -499,29 +501,30 @@ void tc_dump_one_propagator(
     const culindblad::TunableCouplerBenchmarkConfig& config,
     const culindblad::Solver& solver,
     const culindblad::TransmonChainBenchmarkTiming& timing,
-    culindblad::Index batch_size)
+    culindblad::Index batch_size,
+    std::ostream& out = std::cout)
 {
-    std::cout << "PROPAGATOR_DUMP_BEGIN backend=" << backend
-              << " num_qubits=" << config.num_qubits
-              << " num_couplers=" << config.num_couplers
-              << " cutoff_dim=" << config.cutoff_dim
-              << " hilbert_dim=" << solver.layout.hilbert_dim
-              << " density_dim=" << solver.layout.density_dim
-              << " steps=" << config.batched_num_steps
-              << " batch_size=" << batch_size
-              << " num_states=" << timing.final_states.size() << "\n";
-    const std::streamsize old_prec = std::cout.precision();
-    std::cout << std::setprecision(17);
+    out << "PROPAGATOR_DUMP_BEGIN backend=" << backend
+        << " num_qubits=" << config.num_qubits
+        << " num_couplers=" << config.num_couplers
+        << " cutoff_dim=" << config.cutoff_dim
+        << " hilbert_dim=" << solver.layout.hilbert_dim
+        << " density_dim=" << solver.layout.density_dim
+        << " steps=" << config.batched_num_steps
+        << " batch_size=" << batch_size
+        << " num_states=" << timing.final_states.size() << "\n";
+    const std::streamsize old_prec = out.precision();
+    out << std::setprecision(17);
     for (std::size_t s = 0; s < timing.final_states.size(); ++s) {
-        std::cout << "STATE " << s << "\n";
+        out << "STATE " << s << "\n";
         const std::vector<Complex>& rho = timing.final_states[s];
         for (std::size_t i = 0; i < rho.size(); ++i) {
-            std::cout << rho[i].real() << " " << rho[i].imag() << "\n";
+            out << rho[i].real() << " " << rho[i].imag() << "\n";
         }
     }
-    std::cout << std::setprecision(old_prec);
-    std::cout << "PROPAGATOR_DUMP_END backend=" << backend
-              << " batch_size=" << batch_size << "\n";
+    out << std::setprecision(old_prec);
+    out << "PROPAGATOR_DUMP_END backend=" << backend
+        << " batch_size=" << batch_size << "\n";
 }
 
 // MPI state-sharding: keep only rank r's contiguous slice of the selected-index list (low ranks
@@ -547,7 +550,10 @@ std::vector<culindblad::Index> shard_indices(
 // evolve_all_states, otherwise the listed indices, e.g. computational states).
 void tc_dump_states(
     const culindblad::TunableCouplerBenchmarkConfig& config,
-    bool run_cpu)
+    bool run_cpu,
+    int mpi_rank = 0,
+    int mpi_size = 1,
+    const std::string& tag = "")
 {
     using namespace culindblad;
     const Model model = build_tunable_coupler_model(config);
@@ -555,6 +561,25 @@ void tc_dump_states(
 
     const TransmonChainBenchmarkTiming gpu_timing =
         run_tunable_coupler_cuda_benchmark(config);
+
+    // Multi-rank: each rank writes its shard to its own file (avoids stdout interleave) with STATE
+    // numbered LOCALLY 0..cnt-1; merge_ranks.py concatenates rank files in rank order and renumbers
+    // to the global 0..N-1, reconstructing the single-process ordering bit-identically.
+    if (mpi_size > 1) {
+        const std::string fname =
+            "propcheck/" + tag + "_rank" + std::to_string(mpi_rank) + ".txt";
+        std::ofstream f(fname);
+        if (!f.is_open()) {
+            std::cerr << "[rank " << mpi_rank << "] cannot open " << fname << std::endl;
+            return;
+        }
+        tc_dump_one_propagator("gpu", config, solver, gpu_timing,
+                               gpu_timing.final_states.size(), f);
+        std::cerr << "[rank " << mpi_rank << "] wrote " << fname << " ("
+                  << gpu_timing.final_states.size() << " states)" << std::endl;
+        return;  // CPU reference + stdout dump are single-process only
+    }
+
     tc_dump_one_propagator("gpu", config, solver, gpu_timing,
                            gpu_timing.final_states.size());
 
@@ -963,6 +988,11 @@ int main(int argc, char** argv)
                 nullptr, nullptr, "-dump_batch_sizes",
                 tc_batch_buf, sizeof(tc_batch_buf), &tc_batch_set));
 
+            // Per-rank dump tag (multi-rank writes propcheck/<tag>_rank<r>.txt).
+            char tc_tag_buf[128] = "tc_shard";
+            PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetString(
+                nullptr, nullptr, "-dump_tag", tc_tag_buf, sizeof(tc_tag_buf), nullptr));
+
             // Computational-subspace states (qubits in {0,1}, couplers in |0>) vs the
             // full propagator (all density_dim basis states).
             if (tc_comp == PETSC_TRUE) {
@@ -999,7 +1029,9 @@ int main(int argc, char** argv)
                 PetscBool dump_cpu = PETSC_FALSE;
                 PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetBool(
                     nullptr, nullptr, "-dump_propagator_cpu", &dump_cpu, nullptr));
-                tc_dump_states(tc_config, dump_cpu == PETSC_TRUE);
+                tc_dump_states(tc_config, dump_cpu == PETSC_TRUE,
+                               static_cast<int>(mpi_rank), static_cast<int>(mpi_size),
+                               std::string(tc_tag_buf));
             }
             PetscFinalize();
             return 0;
