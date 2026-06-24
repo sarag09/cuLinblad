@@ -594,7 +594,10 @@ void tc_dump_states(
 // Closed-system (Schrodinger) dump: each STATE is a length-hilbert_dim |psi(T)> vector. Tagged
 // mode=schrodinger / state_len=hilbert_dim so the parser reads D entries, not D^2.
 void tc_dump_states_schrodinger(
-    const culindblad::TunableCouplerBenchmarkConfig& config)
+    const culindblad::TunableCouplerBenchmarkConfig& config,
+    int mpi_rank = 0,
+    int mpi_size = 1,
+    const std::string& tag = "")
 {
     using namespace culindblad;
     const Model model = build_tunable_coupler_model(config);
@@ -602,25 +605,45 @@ void tc_dump_states_schrodinger(
     const TransmonChainBenchmarkTiming timing =
         run_tunable_coupler_schrodinger_cuda_benchmark(config);
 
-    std::cout << "PROPAGATOR_DUMP_BEGIN backend=gpu mode=schrodinger"
-              << " num_qubits=" << config.num_qubits
-              << " num_couplers=" << config.num_couplers
-              << " cutoff_dim=" << config.cutoff_dim
-              << " hilbert_dim=" << solver.layout.hilbert_dim
-              << " state_len=" << solver.layout.hilbert_dim
-              << " steps=" << config.batched_num_steps
-              << " num_states=" << timing.final_states.size() << "\n";
-    const std::streamsize old_prec = std::cout.precision();
-    std::cout << std::setprecision(17);
-    for (std::size_t s = 0; s < timing.final_states.size(); ++s) {
-        std::cout << "STATE " << s << "\n";
-        const std::vector<Complex>& psi = timing.final_states[s];
-        for (std::size_t i = 0; i < psi.size(); ++i) {
-            std::cout << psi[i].real() << " " << psi[i].imag() << "\n";
+    // Rank-aware (mirrors tc_dump_states): per-rank file when size>1, std::cout unchanged for
+    // size==1. STATE numbered locally; merge_ranks.py reconstructs the global order.
+    std::ofstream rank_file;
+    if (mpi_size > 1) {
+        const std::string fname =
+            "propcheck/" + tag + "_rank" + std::to_string(mpi_rank) + ".txt";
+        rank_file.open(fname);
+        if (!rank_file.is_open()) {
+            std::cerr << "[rank " << mpi_rank << "] cannot open " << fname << std::endl;
+            return;
         }
     }
-    std::cout << std::setprecision(old_prec);
-    std::cout << "PROPAGATOR_DUMP_END backend=gpu mode=schrodinger\n";
+    std::ostream& out = (mpi_size > 1) ? rank_file : std::cout;
+
+    out << "PROPAGATOR_DUMP_BEGIN backend=gpu mode=schrodinger"
+        << " num_qubits=" << config.num_qubits
+        << " num_couplers=" << config.num_couplers
+        << " cutoff_dim=" << config.cutoff_dim
+        << " hilbert_dim=" << solver.layout.hilbert_dim
+        << " state_len=" << solver.layout.hilbert_dim
+        << " steps=" << config.batched_num_steps
+        << " batch_size=" << timing.final_states.size()
+        << " num_states=" << timing.final_states.size() << "\n";
+    const std::streamsize old_prec = out.precision();
+    out << std::setprecision(17);
+    for (std::size_t s = 0; s < timing.final_states.size(); ++s) {
+        out << "STATE " << s << "\n";
+        const std::vector<Complex>& psi = timing.final_states[s];
+        for (std::size_t i = 0; i < psi.size(); ++i) {
+            out << psi[i].real() << " " << psi[i].imag() << "\n";
+        }
+    }
+    out << std::setprecision(old_prec);
+    out << "PROPAGATOR_DUMP_END backend=gpu mode=schrodinger batch_size="
+        << timing.final_states.size() << "\n";
+    if (mpi_size > 1) {
+        std::cerr << "[rank " << mpi_rank << "] wrote propcheck/" << tag << "_rank"
+                  << mpi_rank << ".txt (" << timing.final_states.size() << " states)" << std::endl;
+    }
 }
 
 void tc_dump_batch_sweep(
@@ -1022,7 +1045,9 @@ int main(int argc, char** argv)
                       << " state(s)" << std::endl;
 
             if (tc_schrod == PETSC_TRUE) {
-                tc_dump_states_schrodinger(tc_config);
+                tc_dump_states_schrodinger(tc_config,
+                                           static_cast<int>(mpi_rank), static_cast<int>(mpi_size),
+                                           std::string(tc_tag_buf));
             } else if (tc_batch_set == PETSC_TRUE && tc_comp != PETSC_TRUE) {
                 tc_dump_batch_sweep(tc_config, parse_batch_sizes_csv(tc_batch_buf));
             } else {
