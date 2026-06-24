@@ -87,6 +87,19 @@ bool launch_batched_grouped_diagonal_commutator_kernel(
     Index batch_size,
     cudaStream_t stream);
 
+// Fused single-site diagonal Liouvillian (commutator + anti-commutator + one diagonal
+// jump) in a single overwriting pass; null args skip the corresponding term.
+bool launch_batched_grouped_fused_diagonal_kernel(
+    const void* h_diag,
+    const void* norm_diag,
+    const void* jump_diag,
+    const void* grouped_input,
+    void* grouped_output,
+    Index target_hilbert_dim,
+    Index complement_dim,
+    Index batch_size,
+    cudaStream_t stream);
+
 bool launch_batched_grouped_diagonal_anti_commutator_kernel(
     const void* diagonal_op,
     const void* grouped_input,

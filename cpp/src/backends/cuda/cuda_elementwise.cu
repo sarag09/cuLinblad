@@ -710,6 +710,98 @@ __global__ void batched_grouped_dense_jump_kernel(
     grouped_output[idx] = cuCadd(grouped_output[idx], acc);
 }
 
+// Fused single-site DIAGONAL Liouvillian: combines the commutator, the anti-commutator,
+// and one diagonal dissipator jump into a single elementwise pass that OVERWRITES the
+// accumulator. factor = -i(H_ket - H_bra) - 1/2(N_ket + N_bra) + J_ket*conj(J_bra); any of
+// h_diag/norm_diag/jump_diag == nullptr skips that term. Mathematically identical to
+// applying the three diagonal kernels in sequence (only the float summation order differs,
+// so rounding-level not bit-identical). The non-diagonal relaxation jump is applied after.
+__global__ void batched_grouped_fused_diagonal_kernel(
+    const cuDoubleComplex* h_diag,
+    const cuDoubleComplex* norm_diag,
+    const cuDoubleComplex* jump_diag,
+    const cuDoubleComplex* grouped_input,
+    cuDoubleComplex* grouped_output,
+    std::size_t target_hilbert_dim,
+    std::size_t complement_dim,
+    std::size_t batch_size)
+{
+    const std::size_t per_state_size =
+        target_hilbert_dim * complement_dim * target_hilbert_dim * complement_dim;
+    const std::size_t total_elements = per_state_size * batch_size;
+    const std::size_t idx =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total_elements) {
+        return;
+    }
+    const std::size_t state_offset = idx % per_state_size;
+    const std::size_t bra_comp = state_offset % complement_dim;
+    const std::size_t tmp0 = state_offset / complement_dim;
+    const std::size_t bra_target = tmp0 % target_hilbert_dim;
+    const std::size_t tmp1 = tmp0 / target_hilbert_dim;
+    const std::size_t ket_comp = tmp1 % complement_dim;
+    const std::size_t ket_target = tmp1 / complement_dim;
+    (void)bra_comp;
+    (void)ket_comp;
+
+    cuDoubleComplex factor = make_cuDoubleComplex(0.0, 0.0);
+    if (h_diag != nullptr) {
+        const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
+        factor = cuCadd(
+            factor,
+            cuCmul(minus_i, cuCsub(h_diag[ket_target], h_diag[bra_target])));
+    }
+    if (norm_diag != nullptr) {
+        const cuDoubleComplex minus_half = make_cuDoubleComplex(-0.5, 0.0);
+        factor = cuCadd(
+            factor,
+            cuCmul(minus_half, cuCadd(norm_diag[ket_target], norm_diag[bra_target])));
+    }
+    if (jump_diag != nullptr) {
+        factor = cuCadd(
+            factor,
+            cuCmul(jump_diag[ket_target], cuConj(jump_diag[bra_target])));
+    }
+    grouped_output[idx] = cuCmul(factor, grouped_input[idx]);
+}
+
+bool launch_batched_grouped_fused_diagonal_kernel(
+    const void* h_diag,
+    const void* norm_diag,
+    const void* jump_diag,
+    const void* grouped_input,
+    void* grouped_output,
+    Index target_hilbert_dim,
+    Index complement_dim,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    if (grouped_input == nullptr || grouped_output == nullptr ||
+        target_hilbert_dim <= 0 || complement_dim <= 0 || batch_size <= 0) {
+        return false;
+    }
+    const std::size_t per_state_size =
+        static_cast<std::size_t>(target_hilbert_dim) *
+        static_cast<std::size_t>(complement_dim) *
+        static_cast<std::size_t>(target_hilbert_dim) *
+        static_cast<std::size_t>(complement_dim);
+    const std::size_t total_elements =
+        per_state_size * static_cast<std::size_t>(batch_size);
+    constexpr int threads_per_block = 256;
+    const int blocks =
+        static_cast<int>((total_elements + threads_per_block - 1) / threads_per_block);
+    batched_grouped_fused_diagonal_kernel<<<blocks, threads_per_block, 0, stream>>>(
+        static_cast<const cuDoubleComplex*>(h_diag),
+        static_cast<const cuDoubleComplex*>(norm_diag),
+        static_cast<const cuDoubleComplex*>(jump_diag),
+        static_cast<const cuDoubleComplex*>(grouped_input),
+        static_cast<cuDoubleComplex*>(grouped_output),
+        target_hilbert_dim,
+        complement_dim,
+        batch_size);
+    return cudaGetLastError() == cudaSuccess;
+}
+
 bool launch_batched_grouped_left_diagonal_kernel(
     const void* diagonal_op,
     const void* grouped_input,

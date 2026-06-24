@@ -477,6 +477,127 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
         has_dynamic_hamiltonian = true;
     }
 
+    // ---- Fused single-site diagonal fast path (opt-in via -tc_fused_diagonal) ----
+    // For layers whose effective Hamiltonian is diagonal (single-site bare terms;
+    // couplings are sparse and fall through), combine the commutator, the anti-commutator,
+    // and one diagonal dissipator jump into a single OVERWRITING pass, then apply the
+    // remaining (relaxation dense / extra diagonal) jumps. Saves ~2 full-state passes per
+    // single-site layer. Not bit-identical (float summation order); validated vs the
+    // separate path (run with -tc_fused_diagonal 0) and QuTiP.
+    static int s_fused_diagonal = -1;
+    if (s_fused_diagonal < 0) {
+        PetscInt fused_opt = 0;
+        PetscOptionsGetInt(nullptr, nullptr, "-tc_fused_diagonal", &fused_opt, nullptr);
+        s_fused_diagonal = (fused_opt != 0) ? 1 : 0;
+    }
+    if (s_fused_diagonal == 1 && has_effective_hamiltonian) {
+        const Index matrix_dim = static_cast<Index>(std::llround(std::sqrt(
+            static_cast<double>(effective_hamiltonian.size()))));
+        std::vector<Complex> h_diagonal;
+        bool fusable =
+            matrix_dim > 0 &&
+            layout_entry.grouped_layout.hilbert_dim % matrix_dim == 0 &&
+            try_extract_local_diagonal(effective_hamiltonian, matrix_dim, h_diagonal);
+        // A present dissipator-norm must be diagonal, and every dissipator on the layer must
+        // be structured (diagonal jump or dense single-site) -- else fall back to the
+        // separate path (which can use the cuTENSOR contraction).
+        if (fusable && !layout_entry.static_dissipator_norm_sum.empty() &&
+            (layout_entry.static_dissipator_norm_diagonal.empty() ||
+             layout_entry.d_static_dissipator_norm_diagonal == nullptr)) {
+            fusable = false;
+        }
+        if (fusable) {
+            for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx.cached_static_dissipators) {
+                if (same_sites(layout_entry.sites, d_aux.sites) &&
+                    d_aux.jump_diagonal.empty() && d_aux.d_l_op == nullptr) {
+                    fusable = false;
+                    break;
+                }
+            }
+        }
+        if (fusable) {
+            const Index complement_dim =
+                layout_entry.grouped_layout.hilbert_dim / matrix_dim;
+            // Upload the effective Hamiltonian diagonal (static or dynamic) -> d_dynamic_diagonal.
+            const std::size_t bytes = h_diagonal.size() * sizeof(Complex);
+            if (layout_entry.dynamic_diagonal_capacity < h_diagonal.size()) {
+                if (layout_entry.d_dynamic_diagonal != nullptr) {
+                    cudaFree(layout_entry.d_dynamic_diagonal);
+                    layout_entry.d_dynamic_diagonal = nullptr;
+                }
+                if (cudaMalloc(&layout_entry.d_dynamic_diagonal, bytes) != cudaSuccess) {
+                    layout_entry.d_dynamic_diagonal = nullptr;
+                    layout_entry.dynamic_diagonal_capacity = 0;
+                    return PETSC_ERR_LIB;
+                }
+                layout_entry.dynamic_diagonal_capacity = h_diagonal.size();
+            }
+            if (cudaMemcpyAsync(layout_entry.d_dynamic_diagonal, h_diagonal.data(), bytes,
+                                cudaMemcpyHostToDevice, s) != cudaSuccess) {
+                return PETSC_ERR_LIB;
+            }
+            // First diagonal-jump dissipator is folded into the fused kernel.
+            const void* fused_jump = nullptr;
+            for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx.cached_static_dissipators) {
+                if (same_sites(layout_entry.sites, d_aux.sites) && !d_aux.jump_diagonal.empty()) {
+                    fused_jump = d_aux.d_jump_diagonal;
+                    break;
+                }
+            }
+            const ScopedNvtxRange fused_range(make_nvtx_label(
+                "rhs_fused_diagonal", make_sites_cache_suffix(layout_entry.sites)));
+            if (!launch_batched_grouped_fused_diagonal_kernel(
+                    layout_entry.d_dynamic_diagonal,
+                    (layout_entry.static_dissipator_norm_sum.empty()
+                         ? nullptr
+                         : layout_entry.d_static_dissipator_norm_diagonal),
+                    fused_jump,
+                    rhs_ctx.grouped_scratch.d_grouped_input,
+                    rhs_ctx.grouped_scratch.d_grouped_accum,
+                    matrix_dim, complement_dim, rhs_ctx.batch_size, s)) {
+                return PETSC_ERR_LIB;
+            }
+            // Apply remaining dissipators: relaxation dense jumps + any extra diagonal jumps.
+            bool fused_jump_seen = false;
+            for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx.cached_static_dissipators) {
+                if (!same_sites(layout_entry.sites, d_aux.sites)) {
+                    continue;
+                }
+                if (!d_aux.jump_diagonal.empty()) {
+                    if (!fused_jump_seen && d_aux.d_jump_diagonal == fused_jump) {
+                        fused_jump_seen = true;
+                        continue;  // already folded into the fused kernel
+                    }
+                    const Index tdim = static_cast<Index>(d_aux.jump_diagonal.size());
+                    const Index cdim = layout_entry.grouped_layout.hilbert_dim / tdim;
+                    if (!launch_batched_grouped_diagonal_dissipator_jump_kernel(
+                            d_aux.d_jump_diagonal,
+                            rhs_ctx.grouped_scratch.d_grouped_input,
+                            rhs_ctx.grouped_scratch.d_grouped_accum,
+                            tdim, cdim, rhs_ctx.batch_size, s)) {
+                        return PETSC_ERR_LIB;
+                    }
+                } else if (d_aux.d_l_op != nullptr) {
+                    const Index tdim = static_cast<Index>(std::llround(std::sqrt(
+                        static_cast<double>(d_aux.l_op.size()))));
+                    const Index cdim = layout_entry.grouped_layout.hilbert_dim / tdim;
+                    if (!launch_batched_grouped_dense_jump_kernel(
+                            d_aux.d_l_op,
+                            rhs_ctx.grouped_scratch.d_grouped_input,
+                            rhs_ctx.grouped_scratch.d_grouped_accum,
+                            tdim, cdim, rhs_ctx.batch_size, s)) {
+                        return PETSC_ERR_LIB;
+                    }
+                }
+            }
+            PetscCall(flatten_grouped_buffer_accumulate_into_petsc_cuda_vec(
+                layout_entry.cuda_grouped_layout,
+                rhs_ctx.grouped_scratch.d_grouped_accum,
+                f, rhs_ctx.batch_size, s));
+            return 0;
+        }
+    }
+
     // The commutator (first term, applied by an overwriting fast-path kernel) initializes
     // the accumulator for this layer, so the explicit per-layer zeroing is only needed when
     // no commutator is present (e.g. a dissipator-only layer). This removes a full-buffer
