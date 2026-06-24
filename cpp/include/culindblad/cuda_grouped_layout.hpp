@@ -117,6 +117,19 @@ bool launch_grouped_diagonal_left_to_flat_kernel(
     void* d_flat_output,
     cudaStream_t stream);
 
+// Fused single-site diagonal: f[b*D+k] += -i*(sum_s site_diags[off_s+(k/stride_s)%dim_s])*psi,
+// building the diagonal on the GPU from the tiny per-site diagonals + descriptor (no host
+// D-loop). No layout / no regroup.
+bool launch_psi_fused_diagonal_kernel(
+    const void* site_diags,
+    const void* site_desc,
+    Index num_folded,
+    const void* psi_flat,
+    void* flat_output,
+    Index hilbert_dim,
+    Index batch_size,
+    cudaStream_t stream);
+
 // Accumulating variant: flat_output[f] += grouped_input[g] (flat_output not overwritten).
 bool launch_grouped_to_flat_accumulate_batched_kernel(
     const CudaGroupedStateLayout& cuda_layout,

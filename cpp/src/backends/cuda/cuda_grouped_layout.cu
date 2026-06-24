@@ -243,6 +243,42 @@ __global__ void batched_grouped_sparse_left_csr_to_flat_kernel(
     flat_output[out] = cuCadd(flat_output[out], val);
 }
 
+// Fused single-site diagonal: one regroup-free flat pass folding ALL single-site diagonals,
+// building the full-Hilbert diagonal ON THE GPU (no host D-loop). Each thread sums the per-site
+// diagonals d_total[k] = sum_s site_diags[off_s + (k/stride_s)%dim_s] (descriptor packed as
+// [offset, full_stride, dim] per folded site) and applies f[b*D+k] += -i*d_total*psi[b*D+k].
+// site_diags is tiny (sum of per-site dims, L1-resident); the only per-stage host work is the
+// small effective-diagonal assembly, so this wins at every batch size (unlike a host-built
+// d_total whose fixed cost dominates at small batch).
+__global__ void batched_psi_fused_diagonal_kernel(
+    const cuDoubleComplex* site_diags,
+    const Index* site_desc,
+    Index num_folded,
+    const cuDoubleComplex* psi_flat,
+    cuDoubleComplex* flat_output,
+    Index hilbert_dim,
+    Index batch_size)
+{
+    const Index total = batch_size * hilbert_dim;
+    const Index idx =
+        static_cast<Index>(blockIdx.x) * static_cast<Index>(blockDim.x) +
+        static_cast<Index>(threadIdx.x);
+    if (idx >= total) {
+        return;
+    }
+    const Index k = idx % hilbert_dim;
+    cuDoubleComplex d = make_cuDoubleComplex(0.0, 0.0);
+    for (Index sfold = 0; sfold < num_folded; ++sfold) {
+        const Index off = site_desc[3 * sfold];
+        const Index stride = site_desc[3 * sfold + 1];
+        const Index dim = site_desc[3 * sfold + 2];
+        d = cuCadd(d, site_diags[off + (k / stride) % dim]);
+    }
+    const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
+    const cuDoubleComplex val = cuCmul(minus_i, cuCmul(d, psi_flat[idx]));
+    flat_output[idx] = cuCadd(flat_output[idx], val);
+}
+
 // One-sided left action -i*H_diag|psi> for a single-site diagonal term (h_diag indexed by the
 // target-site occupation), accumulated into the flat RHS f.
 __global__ void batched_grouped_diagonal_left_to_flat_kernel(
@@ -931,6 +967,32 @@ bool launch_grouped_diagonal_left_to_flat_kernel(
         batch_size,
         cuda_layout.d_target_desc, cuda_layout.num_target,
         cuda_layout.d_complement_desc, cuda_layout.num_complement);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_psi_fused_diagonal_kernel(
+    const void* site_diags,
+    const void* site_desc,
+    Index num_folded,
+    const void* psi_flat,
+    void* flat_output,
+    Index hilbert_dim,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    constexpr int block_size = 256;
+    const Index total = batch_size * hilbert_dim;
+    const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
+
+    batched_psi_fused_diagonal_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const cuDoubleComplex*>(site_diags),
+        reinterpret_cast<const Index*>(site_desc),
+        num_folded,
+        reinterpret_cast<const cuDoubleComplex*>(psi_flat),
+        reinterpret_cast<cuDoubleComplex*>(flat_output),
+        hilbert_dim,
+        batch_size);
 
     return cudaGetLastError() == cudaSuccess;
 }

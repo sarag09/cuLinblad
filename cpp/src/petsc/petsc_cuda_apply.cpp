@@ -1542,6 +1542,30 @@ PetscErrorCode apply_grouped_sparse_left_csr_to_psi_vec(
     return ok ? 0 : PETSC_ERR_LIB;
 }
 
+// Fused single-site diagonal: -i*(GPU-built diagonal)|psi> straight from x into y (no regroup).
+// Reads x's device array and y's (read-write so the running f sum is preserved) simultaneously.
+PetscErrorCode apply_psi_fused_diagonal_to_petsc_vec(
+    const void* site_diags,
+    const void* site_desc,
+    Index num_folded,
+    Vec x,
+    Vec y,
+    Index hilbert_dim,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    const void* d_psi = nullptr;
+    PetscCall(get_petsc_vec_device_read_ptr(x, d_psi));
+    void* d_flat_output = nullptr;
+    PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
+    const bool ok = launch_psi_fused_diagonal_kernel(
+        site_diags, site_desc, num_folded, d_psi, d_flat_output,
+        hilbert_dim, batch_size, stream);
+    PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+    PetscCall(restore_petsc_vec_device_read_ptr(x, d_psi));
+    return ok ? 0 : PETSC_ERR_LIB;
+}
+
 PetscErrorCode apply_grouped_fused_diagonal_to_petsc_vec(
     const CudaGroupedStateLayout& cuda_grouped_layout,
     const void* h_diag,

@@ -77,6 +77,12 @@ struct GroupedRhsScratchBuffers {
     // the D^2 buffers above are left null for a state-vector context.
     void* d_psi_grouped = nullptr;
     std::size_t psi_grouped_bytes = 0;
+    // Fused single-site diagonal pre-pass (-tc_fused_psi_diagonal): the tiny concatenated per-site
+    // diagonals (sum of folded dims) + their packed [offset,stride,dim] descriptor. The full-D
+    // diagonal is built on the GPU from these, so no host D-loop / no D-sized upload.
+    void* d_psi_site_diags = nullptr;
+    Index* d_psi_site_desc = nullptr;
+    std::size_t psi_site_diags_bytes = 0;
 };
 
 struct PetscCudaTsRhsContext {

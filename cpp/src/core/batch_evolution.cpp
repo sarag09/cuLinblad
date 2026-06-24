@@ -590,6 +590,28 @@ PetscErrorCode create_psi_rhs_scratch_buffers(
         rhs_ctx.grouped_scratch.psi_grouped_bytes = 0;
         return PETSC_ERR_MEM;
     }
+    // Fused-diagonal pre-pass scratch: per-site diagonals (sum of local_dims, generous upper
+    // bound) + their [offset,stride,dim] descriptor (3 per site). Tiny.
+    std::size_t total_local_dims = 0;
+    for (Index dlen : solver.model.local_dims) {
+        total_local_dims += static_cast<std::size_t>(dlen);
+    }
+    const std::size_t diags_bytes = std::max<std::size_t>(1, total_local_dims) * sizeof(Complex);
+    const std::size_t desc_bytes =
+        std::max<std::size_t>(1, 3 * solver.model.local_dims.size()) * sizeof(Index);
+    if (cudaMalloc(&rhs_ctx.grouped_scratch.d_psi_site_diags, diags_bytes) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&rhs_ctx.grouped_scratch.d_psi_site_desc),
+                   desc_bytes) != cudaSuccess) {
+        if (rhs_ctx.grouped_scratch.d_psi_site_diags != nullptr) {
+            cudaFree(rhs_ctx.grouped_scratch.d_psi_site_diags);
+            rhs_ctx.grouped_scratch.d_psi_site_diags = nullptr;
+        }
+        cudaFree(rhs_ctx.grouped_scratch.d_psi_grouped);
+        rhs_ctx.grouped_scratch.d_psi_grouped = nullptr;
+        rhs_ctx.grouped_scratch.psi_grouped_bytes = 0;
+        return PETSC_ERR_MEM;
+    }
+    rhs_ctx.grouped_scratch.psi_site_diags_bytes = diags_bytes;
     return 0;
 }
 
@@ -601,6 +623,15 @@ void destroy_grouped_rhs_scratch_buffers(
         rhs_ctx.grouped_scratch.d_psi_grouped = nullptr;
     }
     rhs_ctx.grouped_scratch.psi_grouped_bytes = 0;
+    if (rhs_ctx.grouped_scratch.d_psi_site_diags != nullptr) {
+        cudaFree(rhs_ctx.grouped_scratch.d_psi_site_diags);
+        rhs_ctx.grouped_scratch.d_psi_site_diags = nullptr;
+    }
+    if (rhs_ctx.grouped_scratch.d_psi_site_desc != nullptr) {
+        cudaFree(rhs_ctx.grouped_scratch.d_psi_site_desc);
+        rhs_ctx.grouped_scratch.d_psi_site_desc = nullptr;
+    }
+    rhs_ctx.grouped_scratch.psi_site_diags_bytes = 0;
     if (rhs_ctx.grouped_scratch.d_grouped_accum != nullptr) {
         cudaFree(rhs_ctx.grouped_scratch.d_grouped_accum);
         rhs_ctx.grouped_scratch.d_grouped_accum = nullptr;

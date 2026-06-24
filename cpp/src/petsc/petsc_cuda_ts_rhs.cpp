@@ -611,6 +611,81 @@ PetscErrorCode apply_grouped_layout_terms_to_psi_rhs(
     return PETSC_ERR_SUP;  // general cuTENSOR fallback not implemented for |psi> yet
 }
 
+// Fused single-site diagonal pre-pass: fold every single-site layer's effective diagonal into one
+// full-Hilbert diagonal d_total[k] = sum_s h_s[occ_s(k)] (occ_s(k) = (k/full_stride[s])%dim[s]),
+// then apply f += -i*d_total*|psi> in ONE regroup-free flat pass -- replacing N single-site
+// regroups + N diagonal-left kernels. The per-layer loop must skip single-site layers when this
+// runs. Single-site terms are diagonal by construction (omega*n + alpha*n(n-1) + drive*n).
+PetscErrorCode apply_fused_psi_diagonal_prepass(
+    const Solver& solver,
+    PetscCudaTsRhsContext& rhs_ctx,
+    Vec x,
+    Vec f,
+    PetscReal t)
+{
+    cudaStream_t s = rhs_ctx.elementwise_stream;
+    const Index D = solver.layout.hilbert_dim;
+    const std::vector<Index>& dims = solver.model.local_dims;
+    const Index n = dims.size();
+    std::vector<Index> full_stride(n, 1);
+    for (Index i = n; i-- > 1;) {
+        full_stride[i - 1] = full_stride[i] * dims[i];
+    }
+
+    // Gather only the tiny per-site diagonals + their [offset, full_stride, dim] descriptor; the
+    // full-D diagonal is summed on the GPU (no host D-loop).
+    std::vector<Complex> site_diags;
+    std::vector<Index> site_desc;
+    for (CachedGroupedLayoutEntry& entry : rhs_ctx.cached_grouped_layouts) {
+        if (entry.sites.size() != 1) {
+            continue;
+        }
+        std::vector<Complex> effective_hamiltonian = entry.static_hamiltonian_sum;
+        bool has_effective_hamiltonian = !effective_hamiltonian.empty();
+        for (const TimeDependentTerm& td_term : solver.model.time_dependent_hamiltonian_terms) {
+            if (!same_sites(entry.sites, td_term.sites)) {
+                continue;
+            }
+            accumulate_operator_scaled(
+                td_term.matrix,
+                evaluate_time_dependent_coefficient(td_term, static_cast<double>(t)),
+                effective_hamiltonian);
+            has_effective_hamiltonian = true;
+        }
+        if (!has_effective_hamiltonian) {
+            continue;
+        }
+        const Index matrix_dim = static_cast<Index>(std::llround(std::sqrt(
+            static_cast<double>(effective_hamiltonian.size()))));
+        std::vector<Complex> diagonal;
+        if (!try_extract_local_diagonal(effective_hamiltonian, matrix_dim, diagonal)) {
+            continue;  // single-site is diagonal by construction; defensive skip
+        }
+        const Index site = entry.sites[0];
+        site_desc.push_back(static_cast<Index>(site_diags.size()));
+        site_desc.push_back(full_stride[site]);
+        site_desc.push_back(dims[site]);
+        site_diags.insert(site_diags.end(), diagonal.begin(), diagonal.end());
+    }
+    const Index num_folded = static_cast<Index>(site_desc.size() / 3);
+    if (num_folded == 0) {
+        return 0;
+    }
+    if (cudaMemcpyAsync(rhs_ctx.grouped_scratch.d_psi_site_diags, site_diags.data(),
+                        site_diags.size() * sizeof(Complex),
+                        cudaMemcpyHostToDevice, s) != cudaSuccess ||
+        cudaMemcpyAsync(rhs_ctx.grouped_scratch.d_psi_site_desc, site_desc.data(),
+                        site_desc.size() * sizeof(Index),
+                        cudaMemcpyHostToDevice, s) != cudaSuccess) {
+        return PETSC_ERR_LIB;
+    }
+    PetscCall(apply_psi_fused_diagonal_to_petsc_vec(
+        rhs_ctx.grouped_scratch.d_psi_site_diags,
+        rhs_ctx.grouped_scratch.d_psi_site_desc,
+        num_folded, x, f, D, rhs_ctx.batch_size, s));
+    return 0;
+}
+
 PetscErrorCode apply_grouped_layout_terms_to_rhs(
     const Solver& solver,
     PetscCudaTsRhsContext& rhs_ctx,
@@ -1266,7 +1341,22 @@ PetscErrorCode ts_rhs_function_cuda_full_model_schrodinger(
     const Index total_hilbert_dim = rhs_total_hilbert_dim(*rhs_ctx);
     PetscCall(zero_petsc_cuda_vec(f, total_hilbert_dim, s));
 
+    // Fused single-site diagonal pre-pass (opt-in): one flat multiply replaces N single-site
+    // regroups + diagonal kernels. The per-layer loop then skips single-site layers.
+    static int s_fused_psi_diagonal = -1;
+    if (s_fused_psi_diagonal < 0) {
+        PetscInt fused_opt = 0;
+        PetscOptionsGetInt(nullptr, nullptr, "-tc_fused_psi_diagonal", &fused_opt, nullptr);
+        s_fused_psi_diagonal = (fused_opt != 0) ? 1 : 0;
+    }
+    if (s_fused_psi_diagonal == 1) {
+        PetscCall(apply_fused_psi_diagonal_prepass(solver, *rhs_ctx, x, f, t));
+    }
+
     for (CachedGroupedLayoutEntry& layout_entry : rhs_ctx->cached_grouped_layouts) {
+        if (s_fused_psi_diagonal == 1 && layout_entry.sites.size() == 1) {
+            continue;  // handled by the fused diagonal pre-pass
+        }
         PetscCall(apply_grouped_layout_terms_to_psi_rhs(
             solver, *rhs_ctx, x, f, layout_entry, t));
     }
