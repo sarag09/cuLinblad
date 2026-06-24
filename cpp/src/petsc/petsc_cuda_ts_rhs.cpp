@@ -136,6 +136,68 @@ void accumulate_operator_scaled(
 // per-layout device scratch. Returns true if a fast path was used; false => caller falls
 // back to the general cuTENSOR commutator. Correctness is identical to the cuTENSOR path
 // (same operator, same kernels already validated for the static case).
+// Build the sparse pattern of a (matrix_dim x matrix_dim) 2-site effective Hamiltonian and
+// upload it to the layout's dynamic-sparse device buffers (lazy-(re)allocated). Returns nnz
+// via out_nnz; false if empty or an allocation/copy fails. Shared by the dynamic structured
+// commutator and the fused sparse-commutator-to-flat coupling path.
+bool upload_dynamic_sparse_hamiltonian(
+    CachedGroupedLayoutEntry& layout_entry,
+    const std::vector<Complex>& effective_hamiltonian,
+    Index matrix_dim,
+    std::size_t& out_nnz,
+    cudaStream_t stream)
+{
+    std::vector<Complex> values;
+    std::vector<Index> rows;
+    std::vector<Index> cols;
+    for (Index row = 0; row < matrix_dim; ++row) {
+        for (Index col = 0; col < matrix_dim; ++col) {
+            const Complex value = effective_hamiltonian[row * matrix_dim + col];
+            if (std::abs(value) == 0.0) {
+                continue;
+            }
+            rows.push_back(row);
+            cols.push_back(col);
+            values.push_back(value);
+        }
+    }
+    if (values.empty()) {
+        return false;
+    }
+    const std::size_t nnz = values.size();
+    if (layout_entry.dynamic_sparse_capacity < nnz) {
+        if (layout_entry.d_dynamic_sparse_values != nullptr) {
+            cudaFree(layout_entry.d_dynamic_sparse_values);
+        }
+        if (layout_entry.d_dynamic_sparse_rows != nullptr) {
+            cudaFree(layout_entry.d_dynamic_sparse_rows);
+        }
+        if (layout_entry.d_dynamic_sparse_cols != nullptr) {
+            cudaFree(layout_entry.d_dynamic_sparse_cols);
+        }
+        layout_entry.d_dynamic_sparse_values = nullptr;
+        layout_entry.d_dynamic_sparse_rows = nullptr;
+        layout_entry.d_dynamic_sparse_cols = nullptr;
+        layout_entry.dynamic_sparse_capacity = 0;
+        if (cudaMalloc(&layout_entry.d_dynamic_sparse_values, nnz * sizeof(Complex)) != cudaSuccess ||
+            cudaMalloc(reinterpret_cast<void**>(&layout_entry.d_dynamic_sparse_rows), nnz * sizeof(Index)) != cudaSuccess ||
+            cudaMalloc(reinterpret_cast<void**>(&layout_entry.d_dynamic_sparse_cols), nnz * sizeof(Index)) != cudaSuccess) {
+            return false;
+        }
+        layout_entry.dynamic_sparse_capacity = nnz;
+    }
+    if (cudaMemcpyAsync(layout_entry.d_dynamic_sparse_values, values.data(),
+                        nnz * sizeof(Complex), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+        cudaMemcpyAsync(layout_entry.d_dynamic_sparse_rows, rows.data(),
+                        nnz * sizeof(Index), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+        cudaMemcpyAsync(layout_entry.d_dynamic_sparse_cols, cols.data(),
+                        nnz * sizeof(Index), cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+        return false;
+    }
+    out_nnz = nnz;
+    return true;
+}
+
 bool try_apply_dynamic_structured_commutator(
     CachedGroupedLayoutEntry& layout_entry,
     const std::vector<Complex>& effective_hamiltonian,
@@ -189,51 +251,9 @@ bool try_apply_dynamic_structured_commutator(
     if (layout_entry.sites.size() != 2) {
         return false;
     }
-    std::vector<Complex> values;
-    std::vector<Index> rows;
-    std::vector<Index> cols;
-    for (Index row = 0; row < matrix_dim; ++row) {
-        for (Index col = 0; col < matrix_dim; ++col) {
-            const Complex value = effective_hamiltonian[row * matrix_dim + col];
-            if (std::abs(value) == 0.0) {
-                continue;
-            }
-            rows.push_back(row);
-            cols.push_back(col);
-            values.push_back(value);
-        }
-    }
-    if (values.empty()) {
-        return false;
-    }
-    const std::size_t nnz = values.size();
-    if (layout_entry.dynamic_sparse_capacity < nnz) {
-        if (layout_entry.d_dynamic_sparse_values != nullptr) {
-            cudaFree(layout_entry.d_dynamic_sparse_values);
-        }
-        if (layout_entry.d_dynamic_sparse_rows != nullptr) {
-            cudaFree(layout_entry.d_dynamic_sparse_rows);
-        }
-        if (layout_entry.d_dynamic_sparse_cols != nullptr) {
-            cudaFree(layout_entry.d_dynamic_sparse_cols);
-        }
-        layout_entry.d_dynamic_sparse_values = nullptr;
-        layout_entry.d_dynamic_sparse_rows = nullptr;
-        layout_entry.d_dynamic_sparse_cols = nullptr;
-        layout_entry.dynamic_sparse_capacity = 0;
-        if (cudaMalloc(&layout_entry.d_dynamic_sparse_values, nnz * sizeof(Complex)) != cudaSuccess ||
-            cudaMalloc(reinterpret_cast<void**>(&layout_entry.d_dynamic_sparse_rows), nnz * sizeof(Index)) != cudaSuccess ||
-            cudaMalloc(reinterpret_cast<void**>(&layout_entry.d_dynamic_sparse_cols), nnz * sizeof(Index)) != cudaSuccess) {
-            return false;
-        }
-        layout_entry.dynamic_sparse_capacity = nnz;
-    }
-    if (cudaMemcpyAsync(layout_entry.d_dynamic_sparse_values, values.data(),
-                        nnz * sizeof(Complex), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
-        cudaMemcpyAsync(layout_entry.d_dynamic_sparse_rows, rows.data(),
-                        nnz * sizeof(Index), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
-        cudaMemcpyAsync(layout_entry.d_dynamic_sparse_cols, cols.data(),
-                        nnz * sizeof(Index), cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+    std::size_t nnz = 0;
+    if (!upload_dynamic_sparse_hamiltonian(
+            layout_entry, effective_hamiltonian, matrix_dim, nnz, stream)) {
         return false;
     }
     return launch_batched_grouped_sparse_commutator_kernel(
@@ -614,6 +634,64 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
                 rhs_ctx.grouped_scratch.d_grouped_accum,
                 f, rhs_ctx.batch_size, s));
             return 0;
+        }
+    }
+
+    // ---- Fused coupling sparse-commutator-to-flat fast path (opt-in via -tc_fuse_coupling) ----
+    // A pure 2-site coupling layer has the sparse commutator as its SOLE contributor (no
+    // dissipator). Apply -i[H,rho] straight into f, skipping the grouped accumulator write +
+    // the separate flatten pass (removes one full grouped-buffer round-trip per coupling).
+    static int s_fuse_coupling = -1;
+    if (s_fuse_coupling < 0) {
+        PetscInt fuse_opt = 0;
+        PetscOptionsGetInt(nullptr, nullptr, "-tc_fuse_coupling", &fuse_opt, nullptr);
+        s_fuse_coupling = (fuse_opt != 0) ? 1 : 0;
+    }
+    if (s_fuse_coupling == 1 && has_effective_hamiltonian &&
+        layout_entry.sites.size() == 2 &&
+        layout_entry.static_dissipator_norm_sum.empty()) {
+        bool layer_has_dissipator = false;
+        for (const CachedDissipatorAuxiliaries& d_aux : rhs_ctx.cached_static_dissipators) {
+            if (same_sites(layout_entry.sites, d_aux.sites)) {
+                layer_has_dissipator = true;
+                break;
+            }
+        }
+        if (!layer_has_dissipator) {
+            const Index matrix_dim = static_cast<Index>(std::llround(std::sqrt(
+                static_cast<double>(effective_hamiltonian.size()))));
+            const void* sv = nullptr;
+            const void* sr = nullptr;
+            const void* sc = nullptr;
+            Index nnz = 0;
+            bool ready = false;
+            if (has_dynamic_hamiltonian) {
+                std::size_t dyn_nnz = 0;
+                if (upload_dynamic_sparse_hamiltonian(
+                        layout_entry, effective_hamiltonian, matrix_dim, dyn_nnz, s)) {
+                    sv = layout_entry.d_dynamic_sparse_values;
+                    sr = layout_entry.d_dynamic_sparse_rows;
+                    sc = layout_entry.d_dynamic_sparse_cols;
+                    nnz = static_cast<Index>(dyn_nnz);
+                    ready = true;
+                }
+            } else if (can_use_static_sparse_commutator(layout_entry, false)) {
+                sv = layout_entry.d_static_sparse_hamiltonian_values;
+                sr = layout_entry.d_static_sparse_hamiltonian_rows;
+                sc = layout_entry.d_static_sparse_hamiltonian_cols;
+                nnz = static_cast<Index>(layout_entry.static_sparse_hamiltonian_values.size());
+                ready = true;
+            }
+            if (ready) {
+                const ScopedNvtxRange fused_coupling_range(make_nvtx_label(
+                    "rhs_fused_coupling", make_sites_cache_suffix(layout_entry.sites)));
+                PetscCall(apply_grouped_sparse_commutator_to_petsc_vec(
+                    layout_entry.cuda_grouped_layout,
+                    sv, sr, sc, nnz,
+                    rhs_ctx.grouped_scratch.d_grouped_input,
+                    f, rhs_ctx.batch_size, s));
+                return 0;
+            }
         }
     }
 

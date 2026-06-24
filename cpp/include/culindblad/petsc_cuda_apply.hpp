@@ -88,6 +88,19 @@ PetscErrorCode flatten_grouped_buffer_accumulate_into_petsc_cuda_vec(
     Index batch_size,
     cudaStream_t stream);
 
+// Fused 2-site sparse commutator applied straight into the flat RHS vector y (accumulating),
+// skipping the grouped accumulator + the separate flatten. Sole-contributor coupling layers.
+PetscErrorCode apply_grouped_sparse_commutator_to_petsc_vec(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    const void* sparse_values,
+    const void* sparse_rows,
+    const void* sparse_cols,
+    Index sparse_nnz,
+    const void* d_grouped_input,
+    Vec y,
+    Index batch_size,
+    cudaStream_t stream);
+
 PetscErrorCode apply_grouped_commutator_cuda_buffer(
     const Solver& solver,
     const std::string& term_label,

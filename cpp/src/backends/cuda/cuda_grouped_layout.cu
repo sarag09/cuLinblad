@@ -170,6 +170,80 @@ __global__ void grouped_to_flat_accumulate_batched_kernel(
     fo[out] = cuCadd(fo[out], gi[idx]);
 }
 
+// Fused: compute -i[H_sparse, rho] for a 2-site sparse coupling and ACCUMULATE it straight
+// into the flat RHS vector f (f[g->flat] += val), skipping the grouped accumulator write +
+// the separate grouped_to_flat flatten pass. Used only when the sparse commutator is the
+// SOLE contributor on the layer (pure couplings, no dissipator). The commutator value is
+// computed exactly as batched_grouped_sparse_commutator_kernel (cuda_elementwise.cu) and the
+// grouped->flat index map is a bijection, so the result equals the separate-path result
+// (only the float-accumulation order across layers may differ -> rounding-level).
+__global__ void batched_grouped_sparse_commutator_to_flat_kernel(
+    const cuDoubleComplex* sparse_values,
+    const Index* sparse_rows,
+    const Index* sparse_cols,
+    Index sparse_nnz,
+    const cuDoubleComplex* grouped_input,
+    cuDoubleComplex* flat_output,
+    Index flat_size,
+    Index grouped_size,
+    Index target_hilbert_dim,
+    Index complement_dim,
+    Index batch_size,
+    Index D,
+    const Index* tdesc, Index num_t, const Index* cdesc, Index num_c)
+{
+    const Index total = batch_size * grouped_size;
+    const Index idx =
+        static_cast<Index>(blockIdx.x) * static_cast<Index>(blockDim.x) +
+        static_cast<Index>(threadIdx.x);
+    if (idx >= total) {
+        return;
+    }
+    const Index batch = idx / grouped_size;
+    const Index local = idx % grouped_size;
+
+    const Index bra_comp = local % complement_dim;
+    Index t = local / complement_dim;
+    const Index bra_target_out = t % target_hilbert_dim;
+    t /= target_hilbert_dim;
+    const Index ket_comp = t % complement_dim;
+    const Index ket_target_out = t / complement_dim;
+
+    const Index batch_offset = batch * grouped_size;
+    const Index left_base =
+        batch_offset +
+        (ket_comp * target_hilbert_dim + bra_target_out) * complement_dim + bra_comp;
+    const Index right_base =
+        batch_offset +
+        (ket_target_out * complement_dim + ket_comp) * target_hilbert_dim * complement_dim +
+        bra_comp;
+    const Index left_stride = complement_dim * target_hilbert_dim * complement_dim;
+    const Index right_stride = complement_dim;
+
+    cuDoubleComplex left_sum = make_cuDoubleComplex(0.0, 0.0);
+    cuDoubleComplex right_sum = make_cuDoubleComplex(0.0, 0.0);
+    for (Index nz = 0; nz < sparse_nnz; ++nz) {
+        const Index row = sparse_rows[nz];
+        const Index col = sparse_cols[nz];
+        const cuDoubleComplex value = sparse_values[nz];
+        if (row == ket_target_out) {
+            left_sum = cuCadd(left_sum,
+                cuCmul(value, grouped_input[left_base + col * left_stride]));
+        }
+        if (col == bra_target_out) {
+            right_sum = cuCadd(right_sum,
+                cuCmul(grouped_input[right_base + row * right_stride], value));
+        }
+    }
+    const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
+    const cuDoubleComplex val = cuCmul(minus_i, cuCsub(left_sum, right_sum));
+
+    const Index f = grouped_to_flat_index(local, D, target_hilbert_dim, complement_dim,
+                                          tdesc, num_t, cdesc, num_c);
+    const Index out = batch * flat_size + f;
+    flat_output[out] = cuCadd(flat_output[out], val);
+}
+
 } // namespace
 
 bool create_cuda_grouped_state_layout(
@@ -397,6 +471,40 @@ bool launch_grouped_to_flat_accumulate_batched_kernel(
         cuda_layout.grouped_size,
         total_grouped_size,
         cuda_layout.hilbert_dim, cuda_layout.target_dim, cuda_layout.complement_dim,
+        cuda_layout.d_target_desc, cuda_layout.num_target,
+        cuda_layout.d_complement_desc, cuda_layout.num_complement);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool launch_grouped_sparse_commutator_to_flat_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    const void* sparse_values,
+    const void* sparse_rows,
+    const void* sparse_cols,
+    Index sparse_nnz,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream)
+{
+    constexpr int block_size = 256;
+    const Index total = batch_size * cuda_layout.grouped_size;
+    const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
+
+    batched_grouped_sparse_commutator_to_flat_kernel<<<grid_size, block_size, 0, stream>>>(
+        reinterpret_cast<const cuDoubleComplex*>(sparse_values),
+        reinterpret_cast<const Index*>(sparse_rows),
+        reinterpret_cast<const Index*>(sparse_cols),
+        sparse_nnz,
+        reinterpret_cast<const cuDoubleComplex*>(d_grouped_input),
+        reinterpret_cast<cuDoubleComplex*>(d_flat_output),
+        cuda_layout.flat_size,
+        cuda_layout.grouped_size,
+        cuda_layout.target_dim,
+        cuda_layout.complement_dim,
+        batch_size,
+        cuda_layout.hilbert_dim,
         cuda_layout.d_target_desc, cuda_layout.num_target,
         cuda_layout.d_complement_desc, cuda_layout.num_complement);
 

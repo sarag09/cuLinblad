@@ -70,4 +70,18 @@ bool launch_grouped_to_flat_accumulate_batched_kernel(
     void* d_flat_output,
     cudaStream_t stream);
 
+// Fused 2-site sparse commutator -i[H,rho] accumulated straight into the flat output (f),
+// skipping the grouped accumulator + the separate flatten pass. For sole-contributor
+// coupling layers only.
+bool launch_grouped_sparse_commutator_to_flat_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    const void* sparse_values,
+    const void* sparse_rows,
+    const void* sparse_cols,
+    Index sparse_nnz,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream);
+
 } // namespace culindblad

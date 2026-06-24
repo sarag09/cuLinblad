@@ -1442,6 +1442,33 @@ PetscErrorCode flatten_grouped_buffer_accumulate_into_petsc_cuda_vec(
     return ok ? 0 : PETSC_ERR_LIB;
 }
 
+PetscErrorCode apply_grouped_sparse_commutator_to_petsc_vec(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    const void* sparse_values,
+    const void* sparse_rows,
+    const void* sparse_cols,
+    Index sparse_nnz,
+    const void* d_grouped_input,
+    Vec y,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    void* d_flat_output = nullptr;
+    PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
+    const bool ok = launch_grouped_sparse_commutator_to_flat_kernel(
+        cuda_grouped_layout,
+        sparse_values,
+        sparse_rows,
+        sparse_cols,
+        sparse_nnz,
+        batch_size,
+        d_grouped_input,
+        d_flat_output,
+        stream);
+    PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+    return ok ? 0 : PETSC_ERR_LIB;
+}
+
 PetscErrorCode apply_grouped_commutator_cuda_buffer(
     const Solver& solver,
     const std::string& term_label,
