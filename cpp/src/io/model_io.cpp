@@ -149,6 +149,33 @@ LoadedModel load_model_from_json(const std::string& path) {
         return e->second;
     };
 
+    // Coefficient spec -> TimeScalarFunction. Recursive: "rf" wraps a base coefficient with a
+    // cos/sin(freq*t) phase, which is how the rotating frame turns a coupling into the
+    // cos(D t)/sin(D t)/cos(S t)/sin(S t) modulation of the h1..h4 operators (D,S = w_i-+w_j).
+    std::function<TimeScalarFunction(const json&)> parse_coeff;
+    parse_coeff = [&](const json& coeff) -> TimeScalarFunction {
+        const std::string kind = coeff.at("kind").get<std::string>();
+        if (kind == "envelope") {
+            return lookup_env(coeff.at("key").get<std::string>());
+        } else if (kind == "product_sqrt") {
+            std::vector<TimeScalarFunction> fns;
+            for (const json& k : coeff.at("keys")) fns.push_back(lookup_env(k.get<std::string>()));
+            return [fns](double t) { double r = 1.0; for (const TimeScalarFunction& f : fns) r *= std::sqrt(f(t)); return r; };
+        } else if (kind == "constant") {
+            const double c = coeff.at("value").get<double>();
+            return [c](double) { return c; };
+        } else if (kind == "rf") {
+            TimeScalarFunction base = parse_coeff(coeff.at("base"));
+            const double freq = coeff.at("freq").get<double>();
+            const double sign = coeff.value("sign", 1.0);
+            const bool is_cos = coeff.at("phase").get<std::string>() == std::string("cos");
+            return [base, freq, sign, is_cos](double t) {
+                return sign * base(t) * (is_cos ? std::cos(freq * t) : std::sin(freq * t));
+            };
+        }
+        throw std::runtime_error("model_io: unknown coefficient kind '" + kind + "'");
+    };
+
     // Time-dependent Hamiltonian terms: H(t) = H0 + sum_i coeff_i(t) * H_i.
     if (!j.contains("time_dependent_terms")) {
         throw std::runtime_error("model_io: missing 'time_dependent_terms' (may be [])");
@@ -169,23 +196,7 @@ LoadedModel load_model_from_json(const std::string& path) {
         td.matrix = parse_matrix(t.at("matrix"),
                                  static_cast<std::size_t>(td.rows) * static_cast<std::size_t>(td.cols),
                                  where);
-        const json& coeff = t.at("coefficient");
-        const std::string kind = coeff.at("kind").get<std::string>();
-        if (kind == "envelope") {
-            td.coefficient = lookup_env(coeff.at("key").get<std::string>());
-        } else if (kind == "product_sqrt") {
-            std::vector<TimeScalarFunction> fns;
-            for (const json& k : coeff.at("keys")) {
-                fns.push_back(lookup_env(k.get<std::string>()));
-            }
-            td.coefficient = [fns](double t) {
-                double r = 1.0;
-                for (const TimeScalarFunction& f : fns) r *= std::sqrt(f(t));
-                return r;
-            };
-        } else {
-            throw std::runtime_error("model_io: " + where + " unknown coefficient kind '" + kind + "'");
-        }
+        td.coefficient = parse_coeff(t.at("coefficient"));
         lm.model.time_dependent_hamiltonian_terms.push_back(std::move(td));
     }
 

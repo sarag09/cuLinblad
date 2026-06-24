@@ -929,12 +929,45 @@ void dump_loaded_model_result(std::ostream& out, const culindblad::LoadedModel& 
         << " result_frame=" << lm.evolution.result_frame
         << " batch_size=" << timing.final_states.size()
         << " num_states=" << timing.final_states.size() << "\n";
+    // Rotating-frame back-transform to lab: |psi>_lab[k] = e^{-i E_k T} |psi>_R[k] (closed) and
+    // rho_lab[k,l] = e^{-i (E_k - E_l) T} rho_R[k,l] (open), with E_k = sum_s frame_omegas[s]*occ_s(k)
+    // (site-0-major) and T = tfinal - t0. No-op unless result_frame=="rotating".
+    std::vector<double> Efr;
+    if (lm.evolution.result_frame == "rotating" && !lm.evolution.frame_omegas.empty()) {
+        Efr.resize(static_cast<std::size_t>(D));
+        const std::vector<double>& fo = lm.evolution.frame_omegas;
+        const std::vector<Index>& dims = lm.model.local_dims;
+        for (Index k = 0; k < D; ++k) {
+            double e = 0.0; Index rem = k, stride = D;
+            for (std::size_t si = 0; si < dims.size(); ++si) {
+                stride /= dims[si];
+                e += fo[si] * static_cast<double>(rem / stride);
+                rem %= stride;
+            }
+            Efr[static_cast<std::size_t>(k)] = e;
+        }
+    }
+    const double Tbt = lm.evolution.tfinal - lm.evolution.t0;
     const std::streamsize old_prec = out.precision();
     out << std::setprecision(17);
     for (std::size_t s = 0; s < timing.final_states.size(); ++s) {
         out << "STATE " << s << "\n";
-        for (const Complex& z : timing.final_states[s]) {
-            out << z.real() << " " << z.imag() << "\n";
+        const std::vector<Complex>& st = timing.final_states[s];
+        if (Efr.empty()) {
+            for (const Complex& z : st) out << z.real() << " " << z.imag() << "\n";
+        } else if (mode == "schrodinger") {
+            for (Index k = 0; k < D; ++k) {
+                const double ph = -Efr[static_cast<std::size_t>(k)] * Tbt;
+                const Complex z = st[static_cast<std::size_t>(k)] * Complex(std::cos(ph), std::sin(ph));
+                out << z.real() << " " << z.imag() << "\n";
+            }
+        } else {  // lindblad: row-major D x D
+            for (Index k = 0; k < D; ++k)
+                for (Index l = 0; l < D; ++l) {
+                    const double ph = -(Efr[static_cast<std::size_t>(k)] - Efr[static_cast<std::size_t>(l)]) * Tbt;
+                    const Complex z = st[static_cast<std::size_t>(k * D + l)] * Complex(std::cos(ph), std::sin(ph));
+                    out << z.real() << " " << z.imag() << "\n";
+                }
         }
     }
     out << std::setprecision(old_prec);
