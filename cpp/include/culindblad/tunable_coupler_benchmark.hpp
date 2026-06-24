@@ -95,4 +95,9 @@ TransmonChainBenchmarkTiming run_tunable_coupler_cpu_benchmark(
 TransmonChainBenchmarkTiming run_tunable_coupler_cuda_benchmark(
     const TunableCouplerBenchmarkConfig& config);
 
+// Closed-system Schrodinger evolve self-test: evolves a random |psi> via the state-vector solver
+// and rho0=|psi><psi| via the (validated) closed density solver, then checks rho(T) == |psi(T)>
+// <psi(T)| and norm conservation. Returns 0 on PASS. Self-contained (no QuTiP).
+int run_psi_evolve_schrodinger_selftest();
+
 } // namespace culindblad

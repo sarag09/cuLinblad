@@ -2,7 +2,10 @@
 
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstdio>
+#include <iostream>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -518,6 +521,90 @@ std::vector<std::vector<Complex>> make_selected_basis_density_states(
     return states;
 }
 
+// State-vector evolve via PETSc TSRK4 on the registered Schrodinger RHS (memory is a non-issue
+// for |psi>, so the custom low-storage integrator is unnecessary). Mirrors evolve_state_batch_
+// cuda_ts but with hilbert_dim (D) stride and TSRK4 set internally.
+std::vector<std::vector<Complex>> evolve_state_vector_batch_cuda_ts(
+    const Solver& solver,
+    const std::vector<std::vector<Complex>>& initial_states,
+    double t0,
+    double tfinal,
+    Index num_steps,
+    CudaBatchExecutionContext& ctx)
+{
+    if (!ctx.initialized || ctx.ts == nullptr || ctx.x == nullptr) {
+        throw std::runtime_error(
+            "evolve_state_vector_batch_cuda_ts: context not initialized");
+    }
+    if (num_steps == 0) {
+        throw std::invalid_argument(
+            "evolve_state_vector_batch_cuda_ts: num_steps must be > 0");
+    }
+    if (initial_states.size() != ctx.rhs_ctx.batch_size) {
+        throw std::invalid_argument(
+            "evolve_state_vector_batch_cuda_ts: initial state count must match batch size");
+    }
+    const Index hd = solver.layout.hilbert_dim;
+
+    PetscCallAbort(PETSC_COMM_SELF, VecSet(ctx.x, 0.0));
+    PetscScalar* x_ptr = nullptr;
+    PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
+    for (Index batch = 0; batch < initial_states.size(); ++batch) {
+        if (initial_states[batch].size() != hd) {
+            PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
+            throw std::invalid_argument(
+                "evolve_state_vector_batch_cuda_ts: initial state size mismatch");
+        }
+        for (Index i = 0; i < hd; ++i) {
+            x_ptr[batch * hd + i] = initial_states[batch][i];
+        }
+    }
+    PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
+
+    const double dt = (tfinal - t0) / static_cast<double>(num_steps);
+    PetscCallAbort(PETSC_COMM_SELF, TSSetType(ctx.ts, TSRK));
+    PetscCallAbort(PETSC_COMM_SELF, TSRKSetType(ctx.ts, TSRK4));
+    TSAdapt adapt = nullptr;
+    PetscCallAbort(PETSC_COMM_SELF, TSGetAdapt(ctx.ts, &adapt));
+    PetscCallAbort(PETSC_COMM_SELF, TSAdaptSetType(adapt, TSADAPTNONE));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ctx.ts, t0));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ctx.ts, 0));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ctx.ts, dt));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ctx.ts, static_cast<PetscInt>(num_steps)));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetMaxTime(ctx.ts, tfinal));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetExactFinalTime(ctx.ts, TS_EXACTFINALTIME_MATCHSTEP));
+    PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
+
+    PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
+    std::vector<std::vector<Complex>> final_states(
+        initial_states.size(), std::vector<Complex>(hd, Complex{0.0, 0.0}));
+    for (Index batch = 0; batch < initial_states.size(); ++batch) {
+        for (Index i = 0; i < hd; ++i) {
+            final_states[batch][i] = x_ptr[batch * hd + i];
+        }
+    }
+    PetscCallAbort(PETSC_COMM_SELF, VecRestoreArray(ctx.x, &x_ptr));
+    return final_states;
+}
+
+std::vector<std::vector<Complex>> make_selected_basis_state_vectors(
+    const Solver& solver,
+    const std::vector<Index>& selected_state_indices)
+{
+    std::vector<std::vector<Complex>> states;
+    states.reserve(selected_state_indices.size());
+    for (Index state_index : selected_state_indices) {
+        if (state_index >= solver.layout.hilbert_dim) {
+            throw std::invalid_argument(
+                "make_selected_basis_state_vectors: selected state index out of range");
+        }
+        std::vector<Complex> psi(solver.layout.hilbert_dim, Complex{0.0, 0.0});
+        psi[state_index] = Complex{1.0, 0.0};
+        states.push_back(std::move(psi));
+    }
+    return states;
+}
+
 } // namespace
 
 Index tunable_coupler_num_elements(const TunableCouplerBenchmarkConfig& config)
@@ -850,6 +937,76 @@ TransmonChainBenchmarkTiming run_tunable_coupler_cuda_benchmark(
 
     PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
     return timing;
+}
+
+int run_psi_evolve_schrodinger_selftest()
+{
+    TunableCouplerBenchmarkConfig cfg{};
+    cfg.num_qubits = 2; cfg.num_couplers = 1; cfg.cutoff_dim = 3;
+    cfg.omega = {5.0, 5.2, 4.8}; cfg.alpha = {-0.2, -0.2, -0.2};
+    cfg.t1 = {1.0e4, 1.0e4, 1.0e4}; cfg.tphi = {1.0e4, 1.0e4, 1.0e4};
+    cfg.g = 0.02; cfg.t0 = 0.0; cfg.tfinal = 15.0;
+    cfg.enable_drives = true; cfg.driven_sites = {0};
+    cfg.drive_amplitude = 0.1; cfg.drive_t_gate = 15.0;
+    cfg.enable_rotating_frame = true;  // small H -> well-resolved, tight psi-vs-density gap
+    const Model model = build_tunable_coupler_model(cfg);
+    const Index batch = 2;
+    const Index steps = 400;
+
+    // ---- |psi> side ----
+    const Solver solver = make_solver(model);
+    const Index D = solver.layout.hilbert_dim;
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<double> u(-1.0, 1.0);
+    std::vector<std::vector<Complex>> psi0(batch, std::vector<Complex>(D));
+    for (Index b = 0; b < batch; ++b) {
+        double n2 = 0.0;
+        for (Index i = 0; i < D; ++i) { psi0[b][i] = Complex(u(rng), u(rng)); n2 += std::norm(psi0[b][i]); }
+        const double inv = 1.0 / std::sqrt(n2);
+        for (Index i = 0; i < D; ++i) psi0[b][i] *= inv;
+    }
+    CudaBatchExecutionContext ctx_psi{};
+    PetscCallAbort(PETSC_COMM_SELF,
+        create_cuda_state_vector_execution_context(solver, batch, ctx_psi));
+    const std::vector<std::vector<Complex>> psiT =
+        evolve_state_vector_batch_cuda_ts(solver, psi0, cfg.t0, cfg.tfinal, steps, ctx_psi);
+    PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx_psi));
+
+    // ---- closed-density oracle: rho0 = |psi0><psi0|, evolve with the validated density solver ----
+    Model closed = model; closed.dissipator_terms.clear();
+    const Solver solver_rho = make_solver(closed);
+    std::vector<std::vector<Complex>> rho0(batch, std::vector<Complex>(D * D, Complex{0.0, 0.0}));
+    for (Index b = 0; b < batch; ++b)
+        for (Index r = 0; r < D; ++r)
+            for (Index c = 0; c < D; ++c)
+                rho0[b][r * D + c] = psi0[b][r] * std::conj(psi0[b][c]);
+    CudaBatchExecutionContext ctx_rho{};
+    PetscCallAbort(PETSC_COMM_SELF,
+        create_cuda_batch_execution_context(solver_rho, batch, ctx_rho));
+    PetscCallAbort(PETSC_COMM_SELF, TSSetType(ctx_rho.ts, TSRK));
+    PetscCallAbort(PETSC_COMM_SELF, TSRKSetType(ctx_rho.ts, TSRK4));
+    TSAdapt adapt = nullptr;
+    PetscCallAbort(PETSC_COMM_SELF, TSGetAdapt(ctx_rho.ts, &adapt));
+    PetscCallAbort(PETSC_COMM_SELF, TSAdaptSetType(adapt, TSADAPTNONE));
+    const std::vector<std::vector<Complex>> rhoT =
+        evolve_state_batch_cuda_ts(solver_rho, rho0, cfg.t0, cfg.tfinal, steps, ctx_rho);
+    PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx_rho));
+
+    double worst = 0.0, worst_norm = 0.0;
+    for (Index b = 0; b < batch; ++b) {
+        double n2 = 0.0;
+        for (Index i = 0; i < D; ++i) n2 += std::norm(psiT[b][i]);
+        worst_norm = std::max(worst_norm, std::abs(n2 - 1.0));
+        for (Index r = 0; r < D; ++r)
+            for (Index c = 0; c < D; ++c)
+                worst = std::max(worst,
+                    std::abs(rhoT[b][r * D + c] - psiT[b][r] * std::conj(psiT[b][c])));
+    }
+    const bool pass = (worst < 1.0e-3) && (worst_norm < 1.0e-4);
+    std::cout << "PSI EVOLVE SELFTEST (2Q1C rotating, 400 steps): |psi(T)| drift=" << worst_norm
+              << "  |rho_closed - |psi><psi||=" << worst
+              << (pass ? "   PASS" : "   FAIL") << std::endl;
+    return pass ? 0 : 1;
 }
 
 } // namespace culindblad

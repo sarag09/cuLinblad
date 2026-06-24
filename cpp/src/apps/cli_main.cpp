@@ -790,8 +790,9 @@ int main(int argc, char** argv)
     if (psi_selftest == PETSC_TRUE) {
         const int rc_kernel = run_psi_kernel_selftest();
         const int rc_rhs = run_psi_rhs_selftest();
+        const int rc_evolve = culindblad::run_psi_evolve_schrodinger_selftest();
         PetscFinalize();
-        return (rc_kernel == 0 && rc_rhs == 0) ? 0 : 1;
+        return (rc_kernel == 0 && rc_rhs == 0 && rc_evolve == 0) ? 0 : 1;
     }
 
     try {
