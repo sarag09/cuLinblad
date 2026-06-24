@@ -660,16 +660,20 @@ Model build_tunable_coupler_model(const TunableCouplerBenchmarkConfig& config)
                     [g_of_t, detuning](double t) {
                         return g_of_t(t) * std::sin(detuning * t);
                     }});
-                time_dependent_terms.push_back(TimeDependentTerm{
-                    "rf_coup_h3_" + tag, {i, j}, rot.h3, dd, dd,
-                    [g_of_t, sum_freq](double t) {
-                        return -g_of_t(t) * std::cos(sum_freq * t);
-                    }});
-                time_dependent_terms.push_back(TimeDependentTerm{
-                    "rf_coup_h4_" + tag, {i, j}, rot.h4, dd, dd,
-                    [g_of_t, sum_freq](double t) {
-                        return -g_of_t(t) * std::sin(sum_freq * t);
-                    }});
+                // Counter-rotating terms (sum frequency omega_i+omega_j): fast but g-small.
+                // Dropping them is the rotating-wave approximation.
+                if (!config.drop_counter_rotating) {
+                    time_dependent_terms.push_back(TimeDependentTerm{
+                        "rf_coup_h3_" + tag, {i, j}, rot.h3, dd, dd,
+                        [g_of_t, sum_freq](double t) {
+                            return -g_of_t(t) * std::cos(sum_freq * t);
+                        }});
+                    time_dependent_terms.push_back(TimeDependentTerm{
+                        "rf_coup_h4_" + tag, {i, j}, rot.h4, dd, dd,
+                        [g_of_t, sum_freq](double t) {
+                            return -g_of_t(t) * std::sin(sum_freq * t);
+                        }});
+                }
             }
         }
     } else {

@@ -66,6 +66,13 @@ struct TunableCouplerBenchmarkConfig {
     // cancels in L rho L^dag and L^dag L). The reference frequencies are config.omega.
     bool enable_rotating_frame = false;
 
+    // Rotating-wave approximation: in the rotating frame, drop the counter-rotating coupling
+    // terms (H3,H4, oscillating at the sum frequency omega_i+omega_j ~ 2*omega ~ 10). They are
+    // g-small but FAST, so dropping them lets the fixed-step integrator take much larger steps
+    // -- at the cost of an O((g/Sigma)^2) ~ 1e-4 physics error. Only meaningful with
+    // enable_rotating_frame. Used to measure the step reduction from RWA.
+    bool drop_counter_rotating = false;
+
     BenchmarkStateSelection state_selection;
     Index batched_num_steps = 500;
 };

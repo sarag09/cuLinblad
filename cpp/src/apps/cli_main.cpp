@@ -629,6 +629,9 @@ int main(int argc, char** argv)
             PetscBool tc_rotating = PETSC_FALSE;
             PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetBool(
                 nullptr, nullptr, "-tc_rotating_frame", &tc_rotating, nullptr));
+            PetscBool tc_drop_cr = PETSC_FALSE;
+            PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetBool(
+                nullptr, nullptr, "-tc_drop_counter_rotating", &tc_drop_cr, nullptr));
             PetscBool tc_realistic = PETSC_FALSE;
             PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetBool(
                 nullptr, nullptr, "-tc_realistic_freqs", &tc_realistic, nullptr));
@@ -642,6 +645,7 @@ int main(int argc, char** argv)
                     steps,
                     tc_drives == PETSC_TRUE);
             tc_config.enable_rotating_frame = (tc_rotating == PETSC_TRUE);
+            tc_config.drop_counter_rotating = (tc_drop_cr == PETSC_TRUE);
 
             char tc_batch_buf[256] = {};
             PetscBool tc_batch_set = PETSC_FALSE;
