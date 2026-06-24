@@ -24,4 +24,11 @@ struct EnvelopeSpec {
 // (SineEnv / FlatTopEnv / FlatTopGaussianEnv / SlepianEnv). Throws on an unknown shape or bad grid.
 TimeScalarFunction make_envelope(const EnvelopeSpec& spec);
 
+// GRAPE foundation (roadmap step 4): the analytic partial derivative d c(t)/d param of an envelope's
+// coefficient w.r.t. an amplitude parameter, for the adjoint gradient. `param` in {"a","b"}. Mirrors
+// make_envelope's formulas differentiated in closed form. Throws for params whose derivative is not
+// yet implemented (the structural tr/t0/tau/sigma and the slepian lambda chain rule). Validated
+// against central finite differences of make_envelope (see -load_model_selftest).
+TimeScalarFunction make_envelope_dparam(const EnvelopeSpec& spec, const std::string& param);
+
 } // namespace culindblad

@@ -80,4 +80,51 @@ TimeScalarFunction make_envelope(const EnvelopeSpec& s) {
     throw std::runtime_error("make_envelope: unknown shape '" + s.shape + "'");
 }
 
+TimeScalarFunction make_envelope_dparam(const EnvelopeSpec& s, const std::string& param) {
+    const bool is_a = (param == "a");
+    const bool is_b = (param == "b");
+    if (!is_a && !is_b) {
+        throw std::runtime_error("make_envelope_dparam: derivative w.r.t. '" + param
+                                 + "' not implemented (only amplitude a/b; structural + slepian-lambda TODO)");
+    }
+    // For shapes of the form c(t) = b + (a-b)*shape(t):  dc/da = shape(t),  dc/db = 1 - shape(t).
+    if (s.shape == "sine") {
+        const double T = s.T;
+        return [T, is_a](double t) {
+            const double sh = (0.0 < t && t < T) ? std::sin(kPi * t / T) : 0.0;
+            return is_a ? sh : 1.0 - sh;
+        };
+    }
+    if (s.shape == "flattop") {
+        const double T = s.T, tr = s.tr;
+        return [T, tr, is_a](double t) {
+            double sh;
+            if (t <= 0.0 || t >= T) {
+                sh = 0.0;
+            } else if (t < tr) {
+                const double q = std::sin(kPi * t / (2.0 * tr));
+                sh = q * q;
+            } else if (t > T - tr) {
+                const double q = std::sin(kPi * (T - t) / (2.0 * tr));
+                sh = q * q;
+            } else {
+                sh = 1.0;
+            }
+            return is_a ? sh : 1.0 - sh;
+        };
+    }
+    if (s.shape == "flat_top_gaussian") {
+        const double t0 = s.t0, tau = s.tau, sigma = s.sigma;
+        return [t0, tau, sigma, is_a](double t) {
+            const double sc = 1.0 / (std::sqrt(2.0) * sigma);
+            const double sh = 0.5 * (std::erf((t0 + tau - t) * sc) - std::erf((t0 - t) * sc));
+            return is_a ? sh : 1.0 - sh;
+        };
+    }
+    // slepian: omega_c is NOT of the b+(a-b)*shape form; its parameters are the lambda vector (chain
+    // rule through theta(s) -> omega_c) -- deferred (see GRAPE_DESIGN.md segment 1).
+    throw std::runtime_error("make_envelope_dparam: shape '" + s.shape
+                             + "' amplitude-derivative not defined (slepian lambda chain rule TODO)");
+}
+
 } // namespace culindblad

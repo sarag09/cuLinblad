@@ -875,6 +875,35 @@ int run_pulse_factory_selftest() {
         }
         std::remove(p.c_str());
     }
+    // GRAPE seg1: analytic d c/d{a,b} matches central finite differences of make_envelope to ~1e-6.
+    auto check_dparam = [&](EnvelopeSpec s, const std::string& p, double t) {
+        const double dlt = 1e-5;
+        EnvelopeSpec sp = s, sm = s;
+        if (p == "a") { sp.a += dlt; sm.a -= dlt; } else { sp.b += dlt; sm.b -= dlt; }
+        const double fd = (make_envelope(sp)(t) - make_envelope(sm)(t)) / (2.0 * dlt);
+        const double an = make_envelope_dparam(s, p)(t);
+        if (std::abs(an - fd) > 1e-6) {
+            std::cerr << "  [pulse_factory_selftest] FAIL dparam " << s.shape << "/" << p
+                      << " @t=" << t << ": analytic " << std::setprecision(12) << an
+                      << " vs FD " << fd << std::endl;
+            ++fails;
+        }
+    };
+    { EnvelopeSpec s; s.shape = "sine"; s.a = 2; s.b = 1; s.T = 10;
+      check_dparam(s, "a", 2.5); check_dparam(s, "b", 2.5); check_dparam(s, "a", 7.0); }
+    { EnvelopeSpec s; s.shape = "flattop"; s.a = 2; s.b = 1; s.T = 10; s.tr = 2;
+      check_dparam(s, "a", 1.0); check_dparam(s, "b", 5.0); check_dparam(s, "a", 9.0); }
+    { EnvelopeSpec s; s.shape = "flat_top_gaussian"; s.a = 2; s.b = 1; s.t0 = 3; s.tau = 4; s.sigma = 1;
+      check_dparam(s, "a", 5.0); check_dparam(s, "b", 5.0); }
+    // deferred derivatives must throw (not silently return wrong values)
+    { EnvelopeSpec s; s.shape = "sine"; s.a = 2; s.b = 1; s.T = 10;
+      bool threw = false; try { (void)make_envelope_dparam(s, "T"); } catch (...) { threw = true; }
+      if (!threw) { std::cerr << "  [pulse_factory_selftest] FAIL: dparam 'T' should throw\n"; ++fails; } }
+    { EnvelopeSpec s; s.shape = "slepian"; s.omega1 = 1; s.K = 1; s.cg = std::sqrt(2.0); s.T = 10;
+      s.omega_c_idle = 99; s.ugrid = {0.0, 1.0}; s.thetagrid = {0.6, 0.6};
+      bool threw = false; try { (void)make_envelope_dparam(s, "a"); } catch (...) { threw = true; }
+      if (!threw) { std::cerr << "  [pulse_factory_selftest] FAIL: slepian dparam should throw\n"; ++fails; } }
+
     if (fails == 0) std::cout << "  [pulse_factory_selftest] PASS" << std::endl;
     return fails == 0 ? 0 : 1;
 }
