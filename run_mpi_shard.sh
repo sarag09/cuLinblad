@@ -24,6 +24,8 @@ STEPS=${4:-200}
 MODE=${5:-validate}
 TAG="mpishard_${NQ}q${NC}c"
 D=$($PY -c "print(3**($NQ+$NC))")
+# Expected merged state count: computational density propagator = (2^NQ)^2 columns.
+N=$($PY -c "print((2**$NQ)**2)")
 
 FLAGS="-use_gpu_aware_mpi 0 -dump_tc 1 -tc_num_qubits $NQ -tc_num_couplers $NC \
 -dump_cutoff_dim 3 -tc_computational 1 -tc_rotating_frame 1 -tc_integrator 1 \
@@ -36,7 +38,7 @@ rm -f "propcheck/${TAG}_rank"*.txt
 
 # Multi-rank sharded evolve (each rank -> GPU rank%ndev, writes its own file)
 mpiexec -n "$NRANKS" ./build_local/run_sim $FLAGS -dump_tag "$TAG"
-$PY merge_ranks.py "propcheck/$TAG" "propcheck/${TAG}_merged.txt"
+$PY merge_ranks.py "propcheck/$TAG" "propcheck/${TAG}_merged.txt" "$NRANKS" "$N"
 
 if [ "$MODE" = "validate" ]; then
     # Bit-identical gate: single-process reference vs the merged shard (must be 0.0)

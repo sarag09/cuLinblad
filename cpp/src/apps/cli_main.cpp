@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <complex>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -9,6 +11,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <unistd.h>  // gethostname (per-rank device log)
 
 #include <petscts.h>
 
@@ -566,12 +570,15 @@ void tc_dump_states(
     // numbered LOCALLY 0..cnt-1; merge_ranks.py concatenates rank files in rank order and renumbers
     // to the global 0..N-1, reconstructing the single-process ordering bit-identically.
     if (mpi_size > 1) {
+        std::error_code ec;
+        std::filesystem::create_directories("propcheck", ec);
         const std::string fname =
             "propcheck/" + tag + "_rank" + std::to_string(mpi_rank) + ".txt";
         std::ofstream f(fname);
         if (!f.is_open()) {
+            // Hard-abort the whole job: a silently-missing shard would feed a wrong merged anchor.
             std::cerr << "[rank " << mpi_rank << "] cannot open " << fname << std::endl;
-            return;
+            MPI_Abort(PETSC_COMM_WORLD, 1);
         }
         tc_dump_one_propagator("gpu", config, solver, gpu_timing,
                                gpu_timing.final_states.size(), f);
@@ -609,12 +616,14 @@ void tc_dump_states_schrodinger(
     // size==1. STATE numbered locally; merge_ranks.py reconstructs the global order.
     std::ofstream rank_file;
     if (mpi_size > 1) {
+        std::error_code ec;
+        std::filesystem::create_directories("propcheck", ec);
         const std::string fname =
             "propcheck/" + tag + "_rank" + std::to_string(mpi_rank) + ".txt";
         rank_file.open(fname);
         if (!rank_file.is_open()) {
             std::cerr << "[rank " << mpi_rank << "] cannot open " << fname << std::endl;
-            return;
+            MPI_Abort(PETSC_COMM_WORLD, 1);
         }
     }
     std::ostream& out = (mpi_size > 1) ? rank_file : std::cout;
@@ -878,19 +887,25 @@ int main(int argc, char** argv)
 {
     using namespace culindblad;
 
+    // ---- MPI one-rank-per-GPU device binding (state-sharding) -------------------------------
+    // CORRECTNESS MECHANISM (verified against the PETSc source): PETSc captures its CUDA device
+    // ONCE, inside PetscInitialize (PetscDeviceInitializeFromOptions_Internal). For the default
+    // (PETSC_DECIDE) it uses MPI_Comm_rank(PETSC_COMM_WORLD)%ndev -- EXCEPT it first honors the
+    // env pair {TORCHELASTIC_RUN_ID, LOCAL_RANK}. The capture cannot be changed afterward (a later
+    // PetscOptionsSetValue("-device_select") is a no-op). So to make PETSc's VECCUDA land on the
+    // SAME physical GPU as the app's raw cudaMalloc/cuTENSOR, we (1) clear that env override BEFORE
+    // PetscInitialize so PETSc deterministically picks rank%ndev, and (2) call cudaSetDevice with
+    // the identical rank%ndev for the app's raw CUDA. Both then equal rank%ndev on PETSC_COMM_WORLD.
+    // No-op for single-process (rank0 -> dev0); single-process behavior is byte-for-byte unchanged.
+    unsetenv("LOCAL_RANK");
+    unsetenv("TORCHELASTIC_RUN_ID");
+
     PetscErrorCode ierr = PetscInitialize(&argc, &argv, nullptr, nullptr);
     if (ierr != 0) {
         std::cerr << "PetscInitialize failed." << std::endl;
         return 1;
     }
 
-    // ---- MPI one-rank-per-GPU binding (state-sharding) ---------------------------------------
-    // Each rank binds to GPU (rank % ndev) so its raw cudaMalloc/cuTENSOR AND PETSc VECCUDA all
-    // land on the same physical device. cudaSetDevice MUST precede the first CUDA call of any kind
-    // (every cudaMalloc, cudaStreamCreate, cuTENSOR/cublas init, and the first VECCUDA Vec), so
-    // this block sits immediately after PetscInitialize. No-op for single-process (rank0 -> dev0),
-    // so all existing single-process behavior is byte-for-byte unchanged. rank/size/device come
-    // from PETSC_COMM_WORLD; the per-rank solver stays on PETSC_COMM_SELF (independent, bit-exact).
     PetscMPIInt mpi_rank = 0;
     PetscMPIInt mpi_size = 1;
     PetscCallMPIAbort(PETSC_COMM_WORLD, MPI_Comm_rank(PETSC_COMM_WORLD, &mpi_rank));
@@ -899,21 +914,27 @@ int main(int argc, char** argv)
         int ndev = 0;
         const cudaError_t cerr = cudaGetDeviceCount(&ndev);
         if (cerr != cudaSuccess || ndev <= 0) {
-            std::cerr << "cudaGetDeviceCount failed (" << cudaGetErrorString(cerr)
-                      << ") or no GPU visible." << std::endl;
-            PetscFinalize();
-            return 1;
+            std::cerr << "[rank " << mpi_rank << "] cudaGetDeviceCount failed ("
+                      << cudaGetErrorString(cerr) << ") or no GPU visible." << std::endl;
+            MPI_Abort(PETSC_COMM_WORLD, 1);
         }
         const int my_dev = static_cast<int>(mpi_rank) % ndev;
         if (cudaSetDevice(my_dev) != cudaSuccess) {
-            std::cerr << "cudaSetDevice(" << my_dev << ") failed." << std::endl;
-            PetscFinalize();
-            return 1;
+            std::cerr << "[rank " << mpi_rank << "] cudaSetDevice(" << my_dev << ") failed."
+                      << std::endl;
+            MPI_Abort(PETSC_COMM_WORLD, 1);
         }
-        // Pin PETSc's lazily-initialized VECCUDA device to the same GPU as the app's raw CUDA,
-        // rather than relying on PETSc's own (coincidentally matching) rank%ndev default.
-        PetscCallAbort(PETSC_COMM_SELF,
-            PetscOptionsSetValue(nullptr, "-device_select", std::to_string(my_dev).c_str()));
+        // Per-rank device log so a real multi-GPU run can be verified to have landed on DISTINCT
+        // physical GPUs (rank%ndev is fragile under per-rank CUDA_VISIBLE_DEVICES masking).
+        if (mpi_size > 1) {
+            char pci[64] = "?";
+            cudaDeviceGetPCIBusId(pci, static_cast<int>(sizeof(pci)), my_dev);
+            char host[256] = {};
+            if (gethostname(host, sizeof(host) - 1) != 0) std::snprintf(host, sizeof(host), "?");
+            std::cerr << "[rank " << mpi_rank << "/" << mpi_size << "] host=" << host
+                      << " ndev=" << ndev << " -> GPU " << my_dev << " (PCI " << pci << ")"
+                      << std::endl;
+        }
     }
 
     PetscBool psi_selftest = PETSC_FALSE;
@@ -1035,14 +1056,29 @@ int main(int argc, char** argv)
                 tc_config.state_selection.selected_state_indices.clear();
             }
 
+            // MPI sharding only shards the EXPLICIT computational selection. The full-propagator
+            // (evolve_all_states) and batch-sweep paths regenerate their own index lists and would
+            // have every rank evolve the full set (duplicates) and dump to interleaved stdout.
+            // Reject them under multi-rank rather than silently corrupt the merged anchor.
+            if (mpi_size > 1 && tc_comp != PETSC_TRUE) {
+                if (mpi_rank == 0) {
+                    std::cerr << "multi-rank -dump_tc requires -tc_computational "
+                                 "(full-propagator / batch-sweep dumps are single-process only)"
+                              << std::endl;
+                }
+                MPI_Abort(PETSC_COMM_WORLD, 1);
+            }
+
             // MPI state-sharding: each rank evolves a disjoint contiguous slice of the selected
             // computational states (identity for single-process). The solver/run-entry are
             // unchanged -- they size the batch to the (now per-rank) selected_state_indices.
             tc_config.state_selection.selected_state_indices = shard_indices(
                 tc_config.state_selection.selected_state_indices, mpi_rank, mpi_size);
-            std::cerr << "[rank " << mpi_rank << "/" << mpi_size << "] evolving "
-                      << tc_config.state_selection.selected_state_indices.size()
-                      << " state(s)" << std::endl;
+            if (mpi_size > 1) {
+                std::cerr << "[rank " << mpi_rank << "/" << mpi_size << "] evolving "
+                          << tc_config.state_selection.selected_state_indices.size()
+                          << " state(s)" << std::endl;
+            }
 
             if (tc_schrod == PETSC_TRUE) {
                 tc_dump_states_schrodinger(tc_config,
