@@ -10,8 +10,14 @@
 
 #include <petscts.h>
 
+#include <cuda_runtime.h>
+#include <random>
+
+#include "culindblad/cuda_grouped_layout.hpp"
+#include "culindblad/grouped_state_layout.hpp"
 #include "culindblad/transmon_chain_benchmark.hpp"
 #include "culindblad/tunable_coupler_benchmark.hpp"
+#include "culindblad/types.hpp"
 
 namespace {
 
@@ -561,6 +567,146 @@ void tc_dump_batch_sweep(
 
 } // namespace
 
+// ---- State-vector kernel self-test (Schrodinger solver, segment 2). -----------------------
+// Validates the one-sided -i*H|psi> left-action kernels (sparse + diagonal) against a dense
+// brute-force reference that embeds the target-site operator into the full D-space by digit
+// decomposition -- independent of the grouped-layout index arithmetic the kernels use, so a
+// stride/packing bug shows up. Invoked with -psi_selftest; exits after reporting.
+namespace {
+using culindblad::Complex;
+using culindblad::Index;
+
+// Mixed-radix digit of `full` at global site s (site-0-major full strides given).
+inline Index site_digit(Index full, Index s, const std::vector<Index>& full_stride,
+                        const std::vector<Index>& dims) {
+    return (full / full_stride[s]) % dims[s];
+}
+// Pack the target/complement sub-index in build_desc convention (subset[0] most significant).
+inline Index pack_subset(Index full, const std::vector<Index>& subset,
+                         const std::vector<Index>& full_stride, const std::vector<Index>& dims) {
+    Index v = 0;
+    for (Index p = 0; p < subset.size(); ++p) {
+        v = v * dims[subset[p]] + site_digit(full, subset[p], full_stride, dims);
+    }
+    return v;
+}
+
+// Reference -i * (H embedded on target_sites, identity on complement) * psi, for one state.
+std::vector<Complex> brute_force_minus_i_H_psi(
+    const std::vector<Index>& dims, const std::vector<Index>& target_sites,
+    const std::vector<Complex>& target_op, Index target_dim, const std::vector<Complex>& psi) {
+    const Index n = dims.size();
+    Index D = 1; for (Index d : dims) D *= d;
+    std::vector<Index> full_stride(n, 1);
+    for (Index i = n; i-- > 1;) full_stride[i - 1] = full_stride[i] * dims[i];
+    std::vector<bool> is_t(n, false); for (Index s : target_sites) is_t[s] = true;
+    std::vector<Index> comp_sites; for (Index s = 0; s < n; ++s) if (!is_t[s]) comp_sites.push_back(s);
+    std::vector<Complex> out(D, Complex(0.0, 0.0));
+    const Complex minus_i(0.0, -1.0);
+    for (Index fr = 0; fr < D; ++fr) {
+        const Index tr = pack_subset(fr, target_sites, full_stride, dims);
+        const Index cr = pack_subset(fr, comp_sites, full_stride, dims);
+        Complex acc(0.0, 0.0);
+        for (Index fc = 0; fc < D; ++fc) {
+            if (pack_subset(fc, comp_sites, full_stride, dims) != cr) continue;  // identity on complement
+            const Index tc = pack_subset(fc, target_sites, full_stride, dims);
+            acc += target_op[tr * target_dim + tc] * psi[fc];
+        }
+        out[fr] = minus_i * acc;
+    }
+    return out;
+}
+
+int run_psi_kernel_selftest() {
+    using culindblad::CudaGroupedStateLayout;
+    using culindblad::GroupedStateLayout;
+    std::mt19937 rng(12345);
+    std::uniform_real_distribution<double> u(-1.0, 1.0);
+    auto rand_vec = [&](Index k) { std::vector<Complex> v(k);
+        for (auto& z : v) z = Complex(u(rng), u(rng)); return v; };
+
+    struct Case { std::vector<Index> dims; std::vector<Index> target; bool diagonal; };
+    const std::vector<Case> cases = {
+        {{3, 3, 3}, {0, 1}, false},   // 2-site sparse, complement {2} (comp_dim=3)
+        {{2, 2, 2}, {1, 2}, false},   // 2-site sparse, complement {0}
+        {{3, 3, 3}, {1, 2}, false},   // 2-site sparse, complement {0} (comp_dim=3)
+        {{3, 3}, {0}, true},          // single-site diagonal, complement {1}
+        {{2, 2, 2}, {1}, true},       // single-site diagonal, complement {0,2}
+    };
+    const Index batch = 2;
+    double worst = 0.0; bool ok = true;
+    for (const Case& c : cases) {
+        GroupedStateLayout host_layout = culindblad::make_grouped_state_layout(c.target, c.dims, false);
+        CudaGroupedStateLayout cuda_layout{};
+        if (!culindblad::create_cuda_psi_grouped_state_layout(host_layout, cuda_layout)) {
+            std::cerr << "  layout creation failed\n"; return 1;
+        }
+        const Index D = host_layout.hilbert_dim;
+        Index target_dim = 1; for (Index s : c.target) target_dim *= c.dims[s];
+
+        std::vector<Complex> psi = rand_vec(D * batch);
+        std::vector<Complex> target_op = rand_vec(target_dim * target_dim);
+        if (c.diagonal) {  // zero off-diagonals; the diagonal kernel only sees the diagonal
+            for (Index i = 0; i < target_dim; ++i)
+                for (Index j = 0; j < target_dim; ++j)
+                    if (i != j) target_op[i * target_dim + j] = Complex(0.0, 0.0);
+        }
+
+        Complex *d_psi = nullptr, *d_grp = nullptr, *d_f = nullptr;
+        cudaMalloc(&d_psi, D * batch * sizeof(Complex));
+        cudaMalloc(&d_grp, D * batch * sizeof(Complex));
+        cudaMalloc(&d_f, D * batch * sizeof(Complex));
+        cudaMemcpy(d_psi, psi.data(), D * batch * sizeof(Complex), cudaMemcpyHostToDevice);
+        cudaMemset(d_f, 0, D * batch * sizeof(Complex));
+        culindblad::launch_flat_to_grouped_vec_batched_kernel(cuda_layout, batch, d_psi, d_grp, 0);
+
+        if (c.diagonal) {
+            std::vector<Complex> h_diag(target_dim);
+            for (Index i = 0; i < target_dim; ++i) h_diag[i] = target_op[i * target_dim + i];
+            Complex* d_diag = nullptr; cudaMalloc(&d_diag, target_dim * sizeof(Complex));
+            cudaMemcpy(d_diag, h_diag.data(), target_dim * sizeof(Complex), cudaMemcpyHostToDevice);
+            culindblad::launch_grouped_diagonal_left_to_flat_kernel(cuda_layout, d_diag, batch, d_grp, d_f, 0);
+            cudaFree(d_diag);
+        } else {
+            std::vector<Complex> vals; std::vector<Index> rows, cols;
+            for (Index i = 0; i < target_dim; ++i)
+                for (Index j = 0; j < target_dim; ++j) {
+                    vals.push_back(target_op[i * target_dim + j]); rows.push_back(i); cols.push_back(j);
+                }
+            Complex* d_vals = nullptr; Index *d_rows = nullptr, *d_cols = nullptr;
+            cudaMalloc(&d_vals, vals.size() * sizeof(Complex));
+            cudaMalloc(&d_rows, rows.size() * sizeof(Index));
+            cudaMalloc(&d_cols, cols.size() * sizeof(Index));
+            cudaMemcpy(d_vals, vals.data(), vals.size() * sizeof(Complex), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_rows, rows.data(), rows.size() * sizeof(Index), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_cols, cols.data(), cols.size() * sizeof(Index), cudaMemcpyHostToDevice);
+            culindblad::launch_grouped_sparse_left_to_flat_kernel(
+                cuda_layout, d_vals, d_rows, d_cols, static_cast<Index>(vals.size()),
+                batch, d_grp, d_f, 0);
+            cudaFree(d_vals); cudaFree(d_rows); cudaFree(d_cols);
+        }
+        cudaDeviceSynchronize();
+        std::vector<Complex> f(D * batch);
+        cudaMemcpy(f.data(), d_f, D * batch * sizeof(Complex), cudaMemcpyDeviceToHost);
+        cudaFree(d_psi); cudaFree(d_grp); cudaFree(d_f);
+        culindblad::destroy_cuda_grouped_state_layout(cuda_layout);
+
+        for (Index b = 0; b < batch; ++b) {
+            std::vector<Complex> psi_b(psi.begin() + b * D, psi.begin() + (b + 1) * D);
+            std::vector<Complex> ref = brute_force_minus_i_H_psi(c.dims, c.target, target_op, target_dim, psi_b);
+            for (Index i = 0; i < D; ++i)
+                worst = std::max(worst, std::abs(f[b * D + i] - ref[i]));
+        }
+        std::cout << "  case dims=" << c.dims.size() << " target=" << c.target.size()
+                  << "site " << (c.diagonal ? "diag" : "sparse") << " D=" << D
+                  << " worst-so-far=" << worst << "\n";
+    }
+    std::cout << "PSI KERNEL SELFTEST worst |gpu - bruteforce| = " << worst
+              << (worst < 1e-12 ? "   PASS" : "   FAIL") << std::endl;
+    return worst < 1e-12 ? 0 : 1;
+}
+}  // namespace
+
 int main(int argc, char** argv)
 {
     using namespace culindblad;
@@ -569,6 +715,14 @@ int main(int argc, char** argv)
     if (ierr != 0) {
         std::cerr << "PetscInitialize failed." << std::endl;
         return 1;
+    }
+
+    PetscBool psi_selftest = PETSC_FALSE;
+    PetscOptionsGetBool(nullptr, nullptr, "-psi_selftest", &psi_selftest, nullptr);
+    if (psi_selftest == PETSC_TRUE) {
+        const int rc = run_psi_kernel_selftest();
+        PetscFinalize();
+        return rc;
     }
 
     try {

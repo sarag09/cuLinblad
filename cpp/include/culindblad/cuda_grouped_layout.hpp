@@ -84,6 +84,27 @@ bool launch_grouped_to_flat_vec_batched_kernel(
     void* d_flat_output,
     cudaStream_t stream);
 
+// One-sided left action -i*H|psi> accumulated into the flat RHS f (state-vector solver).
+// sparse: any k-site sparse term; diagonal: a single-site diagonal term (h_diag over the target).
+bool launch_grouped_sparse_left_to_flat_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    const void* sparse_values,
+    const void* sparse_rows,
+    const void* sparse_cols,
+    Index sparse_nnz,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream);
+
+bool launch_grouped_diagonal_left_to_flat_kernel(
+    const CudaGroupedStateLayout& cuda_layout,
+    const void* h_diag,
+    Index batch_size,
+    const void* d_grouped_input,
+    void* d_flat_output,
+    cudaStream_t stream);
+
 // Accumulating variant: flat_output[f] += grouped_input[g] (flat_output not overwritten).
 bool launch_grouped_to_flat_accumulate_batched_kernel(
     const CudaGroupedStateLayout& cuda_layout,

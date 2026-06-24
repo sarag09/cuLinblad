@@ -73,6 +73,33 @@ PetscErrorCode regroup_petsc_cuda_vec_to_grouped_buffer(
     Index batch_size,
     cudaStream_t stream);
 
+// State-vector (|psi>, D-sized) regroup + one-sided left actions for the Schrodinger solver.
+PetscErrorCode regroup_petsc_cuda_vec_to_psi_grouped_buffer(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    Vec x,
+    void* d_grouped_output,
+    Index batch_size,
+    cudaStream_t stream);
+
+PetscErrorCode apply_grouped_sparse_left_to_psi_vec(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    const void* sparse_values,
+    const void* sparse_rows,
+    const void* sparse_cols,
+    Index sparse_nnz,
+    const void* d_grouped_input,
+    Vec y,
+    Index batch_size,
+    cudaStream_t stream);
+
+PetscErrorCode apply_grouped_diagonal_left_to_psi_vec(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    const void* h_diag,
+    const void* d_grouped_input,
+    Vec y,
+    Index batch_size,
+    cudaStream_t stream);
+
 PetscErrorCode flatten_grouped_buffer_to_petsc_cuda_vec(
     const CudaGroupedStateLayout& cuda_grouped_layout,
     const void* d_grouped_input,

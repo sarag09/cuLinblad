@@ -1398,6 +1398,23 @@ PetscErrorCode regroup_petsc_cuda_vec_to_grouped_buffer(
     return regroup_ok ? 0 : PETSC_ERR_LIB;
 }
 
+// State-vector regroup: flat |psi> (D per batch element) -> grouped (D), via the ket-only kernel.
+PetscErrorCode regroup_petsc_cuda_vec_to_psi_grouped_buffer(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    Vec x,
+    void* d_grouped_output,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    const void* d_flat_input = nullptr;
+    PetscCall(get_petsc_vec_device_read_ptr(x, d_flat_input));
+    const bool regroup_ok =
+        launch_flat_to_grouped_vec_batched_kernel(
+            cuda_grouped_layout, batch_size, d_flat_input, d_grouped_output, stream);
+    PetscCall(restore_petsc_vec_device_read_ptr(x, d_flat_input));
+    return regroup_ok ? 0 : PETSC_ERR_LIB;
+}
+
 PetscErrorCode flatten_grouped_buffer_to_petsc_cuda_vec(
     const CudaGroupedStateLayout& cuda_grouped_layout,
     const void* d_grouped_input,
@@ -1465,6 +1482,43 @@ PetscErrorCode apply_grouped_sparse_commutator_to_petsc_vec(
         d_grouped_input,
         d_flat_output,
         stream);
+    PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+    return ok ? 0 : PETSC_ERR_LIB;
+}
+
+// State-vector left actions: -i*H|psi> accumulated into y (zeroed once per RHS step).
+PetscErrorCode apply_grouped_sparse_left_to_psi_vec(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    const void* sparse_values,
+    const void* sparse_rows,
+    const void* sparse_cols,
+    Index sparse_nnz,
+    const void* d_grouped_input,
+    Vec y,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    void* d_flat_output = nullptr;
+    PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
+    const bool ok = launch_grouped_sparse_left_to_flat_kernel(
+        cuda_grouped_layout, sparse_values, sparse_rows, sparse_cols, sparse_nnz,
+        batch_size, d_grouped_input, d_flat_output, stream);
+    PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
+    return ok ? 0 : PETSC_ERR_LIB;
+}
+
+PetscErrorCode apply_grouped_diagonal_left_to_psi_vec(
+    const CudaGroupedStateLayout& cuda_grouped_layout,
+    const void* h_diag,
+    const void* d_grouped_input,
+    Vec y,
+    Index batch_size,
+    cudaStream_t stream)
+{
+    void* d_flat_output = nullptr;
+    PetscCall(get_petsc_vec_device_write_ptr(y, d_flat_output));
+    const bool ok = launch_grouped_diagonal_left_to_flat_kernel(
+        cuda_grouped_layout, h_diag, batch_size, d_grouped_input, d_flat_output, stream);
     PetscCall(restore_petsc_vec_device_write_ptr(y, d_flat_output));
     return ok ? 0 : PETSC_ERR_LIB;
 }
