@@ -957,8 +957,11 @@ TransmonChainBenchmarkTiming evolve_loaded_model_schrodinger(
         create_cuda_state_vector_execution_context(solver, initial.size(), ctx));
     TransmonChainBenchmarkTiming timing;
     timing.num_evolved_states = initial.size();
+    const auto t_start = std::chrono::steady_clock::now();
     timing.final_states =
         evolve_state_vector_batch_cuda_ts(solver, initial, t0, tfinal, num_steps, ctx);
+    const auto t_end = std::chrono::steady_clock::now();
+    timing.wall_seconds = std::chrono::duration<double>(t_end - t_start).count();
     PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
     return timing;
 }
@@ -1004,8 +1007,11 @@ TransmonChainBenchmarkTiming evolve_loaded_model_liouvillian(
     PetscCallAbort(PETSC_COMM_SELF, TSSetFromOptions(ctx.ts));
     TransmonChainBenchmarkTiming timing;
     timing.num_evolved_states = initial.size();
+    const auto t_start = std::chrono::steady_clock::now();
     timing.final_states =
         evolve_state_batch_cuda_ts(solver, initial, t0, tfinal, num_steps, ctx);
+    const auto t_end = std::chrono::steady_clock::now();
+    timing.wall_seconds = std::chrono::duration<double>(t_end - t_start).count();
     PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));
     return timing;
 }

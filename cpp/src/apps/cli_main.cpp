@@ -1008,6 +1008,9 @@ int run_loaded_model(const std::string& model_path, const std::string& results_p
                 : computational_density_indices_for_dims(lm.model.local_dims, lm.num_qubits);
             const TransmonChainBenchmarkTiming timing = evolve_loaded_model_liouvillian(
                 lm.model, idx, explicit_states, lm.evolution.t0, lm.evolution.tfinal, num_steps);
+            std::cerr << "[load_model] evolution wall_seconds=" << timing.wall_seconds
+                      << " (states=" << timing.final_states.size() << ", steps=" << num_steps << ")"
+                      << std::endl;
             dump_loaded_model_result(*out, lm, timing, "lindblad");
         } else {
             const std::vector<Index> idx = use_explicit
@@ -1015,6 +1018,9 @@ int run_loaded_model(const std::string& model_path, const std::string& results_p
                 : computational_state_indices_for_dims(lm.model.local_dims, lm.num_qubits);
             const TransmonChainBenchmarkTiming timing = evolve_loaded_model_schrodinger(
                 lm.model, idx, explicit_states, lm.evolution.t0, lm.evolution.tfinal, num_steps);
+            std::cerr << "[load_model] evolution wall_seconds=" << timing.wall_seconds
+                      << " (states=" << timing.final_states.size() << ", steps=" << num_steps << ")"
+                      << std::endl;
             dump_loaded_model_result(*out, lm, timing, "schrodinger");
         }
         return 0;
