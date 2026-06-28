@@ -1187,18 +1187,93 @@ int main(int argc, char** argv)
 {
     using namespace culindblad;
 
-    // ---- MPI one-rank-per-GPU device binding (state-sharding) -------------------------------
-    // CORRECTNESS MECHANISM (verified against the PETSc source): PETSc captures its CUDA device
-    // ONCE, inside PetscInitialize (PetscDeviceInitializeFromOptions_Internal). For the default
-    // (PETSC_DECIDE) it uses MPI_Comm_rank(PETSC_COMM_WORLD)%ndev -- EXCEPT it first honors the
-    // env pair {TORCHELASTIC_RUN_ID, LOCAL_RANK}. The capture cannot be changed afterward (a later
-    // PetscOptionsSetValue("-device_select") is a no-op). So to make PETSc's VECCUDA land on the
-    // SAME physical GPU as the app's raw cudaMalloc/cuTENSOR, we (1) clear that env override BEFORE
-    // PetscInitialize so PETSc deterministically picks rank%ndev, and (2) call cudaSetDevice with
-    // the identical rank%ndev for the app's raw CUDA. Both then equal rank%ndev on PETSC_COMM_WORLD.
-    // No-op for single-process (rank0 -> dev0); single-process behavior is byte-for-byte unchanged.
-    unsetenv("LOCAL_RANK");
-    unsetenv("TORCHELASTIC_RUN_ID");
+    // ---- MPI NODE-LOCAL-rank-per-GPU device binding (multi-NODE state-sharding) --------------
+    // Each rank evolves a disjoint GLOBAL shard of the independent density matrices and binds ONE
+    // GPU. On a single node global_rank==local_rank, so this is byte-identical to the previous
+    // single-node path; ACROSS NODES each rank must bind its NODE-LOCAL GPU. The old global_rank%ndev
+    // breaks once ranks span nodes: on a 4-GPU/node A100 system (e.g. Argonne), global rank 5 lives on
+    // node 1 and must bind that node's LOCAL GPU 1 -- but global_rank%ndev sees ndev=4 on its own node
+    // and computes 5%4=1 only by coincidence of equal GPU counts; with uneven counts or any rank!=node*
+    // *ndev layout it lands on the wrong device. We derive the node-local rank PORTABLY from HOSTNAMES
+    // (MPI_Allgather hostnames, count same-host lower ranks; see below) -- launcher-independent (Argonne
+    // PBS mpiexec, single-node mpiexec, srun, and 1-process all work). PETSc captures its CUDA device ONCE
+    // inside PetscInitialize, honoring {TORCHELASTIC_RUN_ID, LOCAL_RANK} before its rank%ndev default; so
+    // we MPI_Init FIRST, compute the node-local device, export LOCAL_RANK=that device, THEN PetscInitialize
+    // -- making PETSc's VECCUDA and the app's raw cudaMalloc/cuTENSOR land on the SAME physical GPU
+    // (verified by the bit-identical-vs-single-process check: a PETSc/app device mismatch would fault).
+    // TEST KNOBS: TC_FAKE_RANKS_PER_NODE=R + TC_FAKE_GPUS_PER_NODE=G simulate an R-ranks/G-GPUs-per-node
+    // layout on ONE physical node, so the multi-node binding arithmetic is exercisable on a single GPU.
+    int local_dev = 0;
+    {
+        int mpi_inited = 0;
+        MPI_Initialized(&mpi_inited);
+        if (!mpi_inited) {
+            if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
+                std::cerr << "MPI_Init failed." << std::endl;
+                return 1;
+            }
+            // We own MPI's lifecycle now (PetscFinalize won't finalize an MPI it didn't start).
+            std::atexit([]() { int fin = 0; MPI_Finalized(&fin); if (!fin) MPI_Finalize(); });
+        }
+        int world_rank = 0, world_size = 1;
+        MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+        MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+        // Node-local rank by HOSTNAME (authoritative + launcher-independent). We deliberately do NOT
+        // use MPI_Comm_split_type(MPI_COMM_TYPE_SHARED): under per-rank sandboxing (e.g. Condor
+        // cgroups) it can fail to recognize co-located ranks and hand EVERY rank local_rank 0, which
+        // would pile a whole node's ranks onto GPU 0 (observed on qis4). Allgathering hostnames and
+        // counting same-host peers with a lower global rank is exact on every launcher (Argonne PBS
+        // mpiexec, single-node mpiexec, srun).
+        constexpr int HN = 256;
+        char myhost[HN] = {};
+        if (gethostname(myhost, HN - 1) != 0) std::snprintf(myhost, HN, "unknown-%d", world_rank);
+        std::vector<char> allhosts(static_cast<std::size_t>(world_size) * HN, 0);
+        MPI_Allgather(myhost, HN, MPI_CHAR, allhosts.data(), HN, MPI_CHAR, MPI_COMM_WORLD);
+        int local_rank = 0;
+        for (int r = 0; r < world_rank; ++r) {
+            if (std::string(&allhosts[static_cast<std::size_t>(r) * HN]) == std::string(myhost)) {
+                ++local_rank;
+            }
+        }
+        // Test override #1: pretend the world is laid out R-ranks-per-node on ONE physical node,
+        // so the node-local-rank arithmetic is exercisable WITHOUT real multiple nodes.
+        if (const char* rpn = std::getenv("TC_FAKE_RANKS_PER_NODE")) {
+            const int r = std::atoi(rpn);
+            if (r > 0) local_rank = world_rank % r;
+        }
+        int ndev = 0;
+        const cudaError_t cerr = cudaGetDeviceCount(&ndev);
+        if (cerr != cudaSuccess || ndev <= 0) {
+            std::cerr << "[rank " << world_rank << "] cudaGetDeviceCount failed ("
+                      << cudaGetErrorString(cerr) << ") or no GPU visible." << std::endl;
+            return 1;
+        }
+        // Test override #2: pretend each node has G GPUs, so the device a rank WOULD bind on a real
+        // G-GPU node is loggable even with only 1 physical GPU. The ACTUAL bind is clamped to the
+        // real ndev (and PETSc is told the real device) so a 1-GPU box never tries a nonexistent GPU.
+        int gpus_per_node = ndev;
+        if (const char* g = std::getenv("TC_FAKE_GPUS_PER_NODE")) {
+            const int gg = std::atoi(g);
+            if (gg > 0) gpus_per_node = gg;
+        }
+        const int intended_dev = local_rank % gpus_per_node;  // GPU on a real G-GPU/node system
+        local_dev = intended_dev % ndev;                      // actual VALID device on THIS node
+        // Steer PETSc's in-PetscInitialize device capture to the SAME (real) node-local device.
+        setenv("TORCHELASTIC_RUN_ID", "culindblad", 1);
+        setenv("LOCAL_RANK", std::to_string(local_dev).c_str(), 1);
+        // Per-rank device log: a real multi-NODE run is verified to land on DISTINCT physical GPUs
+        // ({host, PCI}); under the test knobs it shows the intended multi-GPU split on one GPU.
+        if (world_size > 1) {
+            char pci[64] = "?";
+            cudaDeviceGetPCIBusId(pci, static_cast<int>(sizeof(pci)), local_dev);
+            char host[256] = {};
+            if (gethostname(host, sizeof(host) - 1) != 0) std::snprintf(host, sizeof(host), "?");
+            std::cerr << "[rank " << world_rank << "/" << world_size << "] host=" << host
+                      << " local_rank=" << local_rank << " gpus/node=" << gpus_per_node
+                      << " -> intended GPU " << intended_dev << ", bound GPU " << local_dev
+                      << " of " << ndev << " real (PCI " << pci << ")" << std::endl;
+        }
+    }
 
     PetscErrorCode ierr = PetscInitialize(&argc, &argv, nullptr, nullptr);
     if (ierr != 0) {
@@ -1206,34 +1281,19 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    PetscMPIInt mpi_rank = 0;
-    PetscMPIInt mpi_size = 1;
+    PetscMPIInt mpi_rank = 0;   // GLOBAL rank/size on PETSC_COMM_WORLD -- drives sharding + file naming
+    PetscMPIInt mpi_size = 1;   // (already correct across nodes; do NOT replace with node-local here)
     PetscCallMPIAbort(PETSC_COMM_WORLD, MPI_Comm_rank(PETSC_COMM_WORLD, &mpi_rank));
     PetscCallMPIAbort(PETSC_COMM_WORLD, MPI_Comm_size(PETSC_COMM_WORLD, &mpi_size));
     {
-        int ndev = 0;
-        const cudaError_t cerr = cudaGetDeviceCount(&ndev);
-        if (cerr != cudaSuccess || ndev <= 0) {
-            std::cerr << "[rank " << mpi_rank << "] cudaGetDeviceCount failed ("
-                      << cudaGetErrorString(cerr) << ") or no GPU visible." << std::endl;
-            MPI_Abort(PETSC_COMM_WORLD, 1);
-        }
-        const int my_dev = static_cast<int>(mpi_rank) % ndev;
-        if (cudaSetDevice(my_dev) != cudaSuccess) {
-            std::cerr << "[rank " << mpi_rank << "] cudaSetDevice(" << my_dev << ") failed."
+        // Bind the app's raw CUDA to the node-local device decided above. This governs EVERY GPU path
+        // (PETSc TSRK4, the custom-RK4 whose VECCUDA registers + cuTENSOR matrix-free RHS both ride
+        // this current device, and Taylor) -- it is the ONLY cudaSetDevice in the process. PETSc
+        // already captured the same device inside PetscInitialize via the LOCAL_RANK we exported.
+        if (cudaSetDevice(local_dev) != cudaSuccess) {
+            std::cerr << "[rank " << mpi_rank << "] cudaSetDevice(" << local_dev << ") failed."
                       << std::endl;
             MPI_Abort(PETSC_COMM_WORLD, 1);
-        }
-        // Per-rank device log so a real multi-GPU run can be verified to have landed on DISTINCT
-        // physical GPUs (rank%ndev is fragile under per-rank CUDA_VISIBLE_DEVICES masking).
-        if (mpi_size > 1) {
-            char pci[64] = "?";
-            cudaDeviceGetPCIBusId(pci, static_cast<int>(sizeof(pci)), my_dev);
-            char host[256] = {};
-            if (gethostname(host, sizeof(host) - 1) != 0) std::snprintf(host, sizeof(host), "?");
-            std::cerr << "[rank " << mpi_rank << "/" << mpi_size << "] host=" << host
-                      << " ndev=" << ndev << " -> GPU " << my_dev << " (PCI " << pci << ")"
-                      << std::endl;
         }
     }
 

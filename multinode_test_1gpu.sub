@@ -1,0 +1,21 @@
+# 1-GPU batch validation of the multi-node node-local GPU binding (build + 3 checks on qis4).
+# request_gpus=1 (honors the interactive 1-GPU limit; the logic + bit-identical are GPU-count-independent).
+universe = vanilla
+executable = run_multinode_test.sh
+
+# qis4 = the only sm_120 (Blackwell) node the current build targets.
+requirements = (TARGET.IsOttenComputer =?= True) && (TARGET.Machine == "qis4.hep.wisc.edu")
+
+log = multinode_test.log
+error = multinode_test.err
+output = multinode_test.out
+
++WantGPULab = true
++GPUJobLength = "short"
+
+request_gpus = 1
+request_cpus = 8
+request_memory = 65536
+request_disk = 10000000
+
+queue
