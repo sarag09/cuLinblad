@@ -19,8 +19,9 @@
 # propcheck/golden_<tag>_comp{1000,16000}.txt (run freeze_golden.sh on a validated build).
 set -e
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$HERE/setup_env.sh" >/dev/null 2>&1
-PY=/nfs_scratch/kunnumbrath/qutip-venv/bin/python
+cd "$HERE/.."                               # repo root: propcheck/ and build_local/ are root-relative
+source "$HERE/../setup_env.sh" >/dev/null 2>&1
+PY=${PY:-python}   # override with PY=/path/to/qutip-venv/bin/python
 tag="$1"; NQ="$2"; NC="$3"; d="$4"
 D=$(( d ** (NQ + NC) ))
 
@@ -41,14 +42,14 @@ for s in 1000 16000; do
   g="propcheck/golden_${tag}_comp${s}.txt"
   if [ -f "$g" ]; then
     echo "[validate] golden regression @${s}:"
-    $PY "$HERE/golden_regression.py" "propcheck/${tag}_comp${s}.txt" "$g" "$D" || rc=1
+    $PY "$HERE/../validation/golden_regression.py" "propcheck/${tag}_comp${s}.txt" "$g" "$D" || rc=1
   else
     echo "[validate] (no golden for @${s}; skip — run freeze_golden.sh on a validated build)"
   fi
 done
 
 echo "[validate] QuTiP convergence + invariants:"
-$PY "$HERE/verify_tunable_coupler_driven.py" "$tag" "$NQ" "$NC" "$d" | sed -n '5,40p' || rc=1
+$PY "$HERE/../validation/verify_tunable_coupler_driven.py" "$tag" "$NQ" "$NC" "$d" | sed -n '5,40p' || rc=1
 
 [ $rc -eq 0 ] && echo "[validate] ===== PASS =====" || echo "[validate] ===== FAIL ====="
 exit $rc

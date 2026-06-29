@@ -134,7 +134,7 @@ site-0-major convention is the correct one.
 # environment (UW-HEP qis* GPU node)
 source setup_env.sh                      # PETSc + CUDA + sm_120
 ./build.sh                               # builds build_local/run_sim
-source /nfs_scratch/kunnumbrath/qutip-venv/bin/activate   # qutip 5.0.4
+source <venv>/bin/activate               # python -m venv <venv> && pip install qutip==5.0.4
 
 # per system <tag N d>: generate C++ dumps (GPU), QuTiP reference, and compare
 run() { ./build_local/run_sim -use_gpu_aware_mpi 0 "$@"; }
@@ -143,8 +143,8 @@ for s in "n2d2 2 2" "n2d3 2 3" "n4d2 4 2"; do set -- $s
   run -dump_propagator 1 -dump_num_transmons $2 -dump_cutoff_dim $3 -dump_batch_sizes 1,2,4,8 -dump_steps 16000 > propcheck/${1}_sweep16000.txt
   run -dump_propagator 1 -dump_num_transmons $2 -dump_cutoff_dim $3 -dump_steps 1000  > propcheck/${1}_full1000.txt
   run -dump_propagator 1 -dump_num_transmons $2 -dump_cutoff_dim $3 -dump_steps 16000 > propcheck/${1}_full16000.txt
-  python qutip_reference.py   $1 $2 $3
-  python compare_exhaustive.py $1 $2 $3
+  python validation/qutip_reference.py   $1 $2 $3
+  python validation/compare_exhaustive.py $1 $2 $3
 done
 ```
 

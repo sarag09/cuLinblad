@@ -39,7 +39,7 @@ Under the scheduler (PBS/`mpiexec` on Polaris-style A100, or srun), request `NOD
         -tc_fused_diagonal 1 -tc_fuse_coupling 1 -tc_fused_diag_prepass 1 \
         -dump_steps 12000 -dump_tag prod4q4c
     # each rank -> propcheck/prod4q4c_rank<g>.txt on the SHARED filesystem
-    python merge_ranks.py propcheck/prod4q4c propcheck/prod4q4c_merged.txt \
+    python validation/merge_ranks.py propcheck/prod4q4c propcheck/prod4q4c_merged.txt \
         $((NODES*GPUS_PER_NODE)) 256        # 256 = (2^4)^2 computational columns
 
 Requirements: (1) `propcheck/` on storage shared by all nodes; (2) `request_gpus`/`--gpus` ==

@@ -3,7 +3,9 @@
 # to confirm rank->GPU binding + bit-identical on two REAL GPUs (~minutes).
 # For the production 4Q4C 256-state anchor, change `arguments` to:  2 4 4 1000 run
 universe = vanilla
-executable = run_mpi_shard.sh
+# Submit from the repo root (`condor_submit cluster/mpi_shard.sub`) so the relative paths
+# inside run_mpi_shard.sh resolve. Edit `requirements`/`request_gpus` for your site/GPU arch.
+executable = cluster/run_mpi_shard.sh
 arguments = 2 3 2 200 validate
 
 # Pin to qis4 (binary compiled for sm_120 Blackwell).

@@ -8,7 +8,7 @@
 #           0,1,0,1 (real bound GPU 0 on this single device); 4-way merge still bit-identical 0.0.
 # The real 2-PHYSICAL-GPU distinct binding is a separate request_gpus=2 batch job (mpi_shard.sub).
 set -e
-cd /nfs_scratch/kunnumbrath/cuLinblad
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$REPO_ROOT"
 source setup_env.sh
 echo "############ BUILD (CUDA arch=$CULINDBLAD_CUDA_ARCH) ############"
 ./build.sh
@@ -17,13 +17,13 @@ nvidia-smi -L || true
 
 echo ""
 echo "############ T1+T2: 2 ranks share 1 GPU, 3Q2C 64-state shard, bit-identical vs single-process ############"
-./run_mpi_shard.sh 2 3 2 200 validate
+cluster/run_mpi_shard.sh 2 3 2 200 validate
 
 echo ""
 echo "############ T3: MULTI-NODE SIM -- fake 2 nodes x 2 GPUs (4 ranks) on this 1 GPU ############"
 echo "   EXPECT: per-rank log shows 'intended GPU 0,1,0,1' (bound GPU 0), and bit-identical == 0.000e+00"
 export TC_FAKE_RANKS_PER_NODE=2 TC_FAKE_GPUS_PER_NODE=2
-./run_mpi_shard.sh 4 3 2 200 validate
+cluster/run_mpi_shard.sh 4 3 2 200 validate
 unset TC_FAKE_RANKS_PER_NODE TC_FAKE_GPUS_PER_NODE
 echo ""
 echo "############ DONE -- all three checks above must read PASS / 0.000e+00 ############"

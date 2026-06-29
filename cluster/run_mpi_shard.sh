@@ -13,9 +13,9 @@
 #   ./run_mpi_shard.sh 2 3 2 200 validate    # 2-GPU bit-identical confirmation (fast, 3Q2C)
 #   ./run_mpi_shard.sh 2 4 4 1000 run        # the real 4Q4C 256-state anchor on 2 GPUs
 set -e
-cd /nfs_scratch/kunnumbrath/cuLinblad
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$REPO_ROOT"
 source setup_env.sh
-PY=/nfs_scratch/kunnumbrath/qutip-venv/bin/python
+PY=${PY:-python}   # override with PY=/path/to/qutip-venv/bin/python
 
 NRANKS=${1:-2}
 NQ=${2:-3}
@@ -38,12 +38,12 @@ rm -f "propcheck/${TAG}_rank"*.txt
 
 # Multi-rank sharded evolve (each rank -> GPU rank%ndev, writes its own file)
 mpiexec -n "$NRANKS" ./build_local/run_sim $FLAGS -dump_tag "$TAG"
-$PY merge_ranks.py "propcheck/$TAG" "propcheck/${TAG}_merged.txt" "$NRANKS" "$N"
+$PY validation/merge_ranks.py "propcheck/$TAG" "propcheck/${TAG}_merged.txt" "$NRANKS" "$N"
 
 if [ "$MODE" = "validate" ]; then
     # Bit-identical gate: single-process reference vs the merged shard (must be 0.0)
     ./build_local/run_sim $FLAGS > "propcheck/${TAG}_single.txt" 2>/dev/null
     echo "--- bit-identical check (merged vs single-process) ---"
-    $PY golden_regression.py "propcheck/${TAG}_merged.txt" "propcheck/${TAG}_single.txt" "$D"
+    $PY validation/golden_regression.py "propcheck/${TAG}_merged.txt" "propcheck/${TAG}_single.txt" "$D"
 fi
 echo "=== done: propcheck/${TAG}_merged.txt ==="

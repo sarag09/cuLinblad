@@ -8,7 +8,7 @@ import numpy as np
 
 w0, w1, g, T, N = 1.0, 0.7, 0.15, 8.0, 40000
 Df, Sf = w0 - w1, w0 + w1
-RS = "/nfs_scratch/kunnumbrath/cuLinblad/build_local/run_sim"
+RS = sys.argv[1] if len(sys.argv) > 1 else "./build_local/run_sim"  # run from repo root, or pass a path
 
 def m4(entries):
     re = [0.0]*16; im = [0.0]*16
