@@ -1,6 +1,8 @@
 # Design Doc — MPI multi-GPU state-sharding for the `-load_model` path
 
-Status: design only (no implementation). Branch context: `julia-handoff`. Target: mirror the proven `-dump_tc` shard onto `run_loaded_model` so the 256 independent 4Q4C density matrices evolve disjointly across N GPUs.
+Status: **IMPLEMENTED + validated** (branch `paper`). Target: mirror the proven `-dump_tc` shard onto `run_loaded_model` so the 256 independent 4Q4C density matrices evolve disjointly across N GPUs.
+
+**Implementation status (validated on qis4, RTX PRO 6000):** implemented in `cpp/src/apps/cli_main.cpp` (helper `shard_explicit_states`; `run_loaded_model` takes `mpi_rank/size/tag`, captures `N` before `shard_indices`, per-rank `propcheck/<tag>_rank<r>.txt` output; dispatch reads `-dump_tag`). Reusable harness: `cluster/run_mpi_shard_loadmodel.sh`. Bit-identical merged-vs-single verified on a 3Q2C open model (D=243, 200 steps): **computational** 64 states → 2-rank (32+32) & 3-rank (22+21+21) both `0.000e+00`; **explicit dressed-kets** 8 states → 2-rank (4+4) & 3-rank (3+3+2) both `0.000e+00`. Single-process (`mpi_size==1`) path unchanged. Not yet run at the 4Q4C N=256 anchor (needs multi-GPU + real model.json; validate there by sub-shard cross-check per §5, not a single-process golden).
 
 Review status: adversarially reviewed — verdict **SOUND-WITH-FIXES**. The four required fixes (capture `N` before sharding; scope the golden gate to lindblad; state the 4Q4C anchor is self-consistency-validated not bit-identical; re-cite the SELF-communicator proof) are folded in below, marked **Risk found in review**.
 

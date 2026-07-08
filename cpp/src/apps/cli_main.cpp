@@ -552,6 +552,23 @@ std::vector<culindblad::Index> shard_indices(
     return std::vector<culindblad::Index>(all.begin() + begin, all.begin() + begin + cnt);
 }
 
+// Same contiguous partition as shard_indices, for the explicit initial-state list (dressed kets on
+// the -load_model path). Identity for size<=1. Global order preserved by contiguity (merge relies on it).
+std::vector<std::vector<culindblad::Complex>> shard_explicit_states(
+    const std::vector<std::vector<culindblad::Complex>>& all, int rank, int size)
+{
+    if (size <= 1) {
+        return all;
+    }
+    const std::size_t n = all.size();
+    const std::size_t base = n / static_cast<std::size_t>(size);
+    const std::size_t rem = n % static_cast<std::size_t>(size);
+    const std::size_t r = static_cast<std::size_t>(rank);
+    const std::size_t begin = r * base + std::min<std::size_t>(r, rem);
+    const std::size_t cnt = base + (r < rem ? 1 : 0);
+    return std::vector<std::vector<culindblad::Complex>>(all.begin() + begin, all.begin() + begin + cnt);
+}
+
 // Dump the states selected by config.state_selection (full propagator if
 // evolve_all_states, otherwise the listed indices, e.g. computational states).
 void tc_dump_states(
@@ -976,14 +993,29 @@ void dump_loaded_model_result(std::ostream& out, const culindblad::LoadedModel& 
 
 // -load_model <json> [-results_out <path>]: deserialize a Julia-exported term-list model, evolve the
 // computational basis in the LAB frame (closed |psi> or open rho per the "system" field), and dump.
-int run_loaded_model(const std::string& model_path, const std::string& results_path) {
+int run_loaded_model(const std::string& model_path, const std::string& results_path,
+                     int mpi_rank, int mpi_size, const std::string& tag) {
     using namespace culindblad;
     try {
         const LoadedModel lm = load_model_from_json(model_path);
         const int num_steps = lm.evolution.num_steps > 0 ? lm.evolution.num_steps : 1000;
         std::ofstream fout;
         std::ostream* out = &std::cout;
-        if (!results_path.empty()) {
+        if (mpi_size > 1) {
+            // Multi-rank state-sharding: each rank writes its shard to propcheck/<tag>_rank<r>.txt with
+            // STATE numbered LOCALLY 0..cnt-1; validation/merge_ranks.py concatenates in rank order and
+            // renumbers to the global 0..N-1. -results_out is ignored under multi-rank (merge post-run).
+            std::error_code ec;
+            std::filesystem::create_directories("propcheck", ec);
+            const std::string fname = "propcheck/" + tag + "_rank" + std::to_string(mpi_rank) + ".txt";
+            fout.open(fname);
+            if (!fout.is_open()) {
+                // Hard-abort: a silently-missing shard would feed a wrong merged anchor.
+                std::cerr << "[rank " << mpi_rank << "] cannot open " << fname << std::endl;
+                MPI_Abort(PETSC_COMM_WORLD, 1);
+            }
+            out = &fout;
+        } else if (!results_path.empty()) {
             fout.open(results_path);
             if (!fout.is_open()) {
                 std::cerr << "[load_model] cannot open results file: " << results_path << std::endl;
@@ -1002,22 +1034,39 @@ int run_loaded_model(const std::string& model_path, const std::string& results_p
             std::cerr << "[load_model] explicit initial states: " << explicit_states.size()
                       << " (e.g. dressed comp kets)" << std::endl;
         }
+        // Build the full per-state index list (computational) or leave empty (explicit kets carry the states).
+        std::vector<Index> idx;
+        if (!use_explicit) {
+            idx = lm.is_open
+                ? computational_density_indices_for_dims(lm.model.local_dims, lm.num_qubits)
+                : computational_state_indices_for_dims(lm.model.local_dims, lm.num_qubits);
+        }
+        // MPI state-sharding: capture the GLOBAL count N BEFORE shard_indices overwrites idx (else the
+        // empty-shard guard would compare against the post-shard local count).
+        const std::size_t N = use_explicit ? explicit_states.size() : idx.size();
+        if (mpi_size > 1 && static_cast<std::size_t>(mpi_size) > N) {
+            if (mpi_rank == 0)
+                std::cerr << "[load_model] too many ranks (" << mpi_size << ") for " << N
+                          << " states -- use <= that many ranks" << std::endl;
+            MPI_Abort(PETSC_COMM_WORLD, 1);   // fires collectively (N,mpi_size identical on every rank)
+        }
+        const std::vector<std::vector<Complex>> states_slice =
+            shard_explicit_states(explicit_states, mpi_rank, mpi_size);
+        idx = shard_indices(idx, mpi_rank, mpi_size);   // identity for size<=1; safe AFTER N captured
+        if (mpi_size > 1)
+            std::cerr << "[rank " << mpi_rank << "/" << mpi_size << "] evolving "
+                      << (use_explicit ? states_slice.size() : idx.size()) << " state(s)" << std::endl;
+
         if (lm.is_open) {
-            const std::vector<Index> idx = use_explicit
-                ? std::vector<Index>{}
-                : computational_density_indices_for_dims(lm.model.local_dims, lm.num_qubits);
             const TransmonChainBenchmarkTiming timing = evolve_loaded_model_liouvillian(
-                lm.model, idx, explicit_states, lm.evolution.t0, lm.evolution.tfinal, num_steps);
+                lm.model, idx, states_slice, lm.evolution.t0, lm.evolution.tfinal, num_steps);
             std::cerr << "[load_model] evolution wall_seconds=" << timing.wall_seconds
                       << " (states=" << timing.final_states.size() << ", steps=" << num_steps << ")"
                       << std::endl;
             dump_loaded_model_result(*out, lm, timing, "lindblad");
         } else {
-            const std::vector<Index> idx = use_explicit
-                ? std::vector<Index>{}
-                : computational_state_indices_for_dims(lm.model.local_dims, lm.num_qubits);
             const TransmonChainBenchmarkTiming timing = evolve_loaded_model_schrodinger(
-                lm.model, idx, explicit_states, lm.evolution.t0, lm.evolution.tfinal, num_steps);
+                lm.model, idx, states_slice, lm.evolution.t0, lm.evolution.tfinal, num_steps);
             std::cerr << "[load_model] evolution wall_seconds=" << timing.wall_seconds
                       << " (states=" << timing.final_states.size() << ", steps=" << num_steps << ")"
                       << std::endl;
@@ -1325,9 +1374,15 @@ int main(int argc, char** argv)
         PetscBool results_set = PETSC_FALSE;
         PetscOptionsGetString(nullptr, nullptr, "-results_out",
                               results_buf, sizeof(results_buf), &results_set);
+        // Multi-rank (mpiexec -n N) shards the loaded model's states across ranks/GPUs and writes
+        // propcheck/<tag>_rank<r>.txt; merge with validation/merge_ranks.py. Single-process unchanged.
+        char lm_tag_buf[128] = "loadmodel_shard";
+        PetscOptionsGetString(nullptr, nullptr, "-dump_tag",
+                              lm_tag_buf, sizeof(lm_tag_buf), nullptr);
         const int rc = run_loaded_model(
             std::string(model_path_buf),
-            results_set == PETSC_TRUE ? std::string(results_buf) : std::string());
+            results_set == PETSC_TRUE ? std::string(results_buf) : std::string(),
+            static_cast<int>(mpi_rank), static_cast<int>(mpi_size), std::string(lm_tag_buf));
         PetscFinalize();
         return rc;
     }
