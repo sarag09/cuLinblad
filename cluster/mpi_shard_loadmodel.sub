@@ -1,0 +1,37 @@
+# Condor submit for the MPI multi-GPU OPEN-system state-sharding run via -load_model.
+# Runs cluster/run_mpi_shard_loadmodel.sh: shards the exported model.json's M² (dressed) density inputs
+# across NRANKS GPUs, merges the per-rank shards to global order, and (mode=validate) asserts
+# bit-identical vs a single-process run. For the real 4Q4C anchor use mode=run (single-process golden is
+# infeasible at D=6561, ~176 GB — validate by sub-shard cross-check instead).
+#
+# ONLY runs on qis4 (8x RTX PRO 6000, sm_120) — the sole node the binary targets; the T4 (sm_75) GPU
+# nodes cannot run it. So multi-GPU here means up to 8 GPUs on the SINGLE qis4 node.
+#
+# EDIT before submitting, then `condor_submit cluster/mpi_shard_loadmodel.sub` FROM THE REPO ROOT:
+#   - arguments:  <model.json>  <NRANKS>  <N_states>  <D>  <mode>
+#       N_states = (2^n_q)^2 for a computational/dressed open channel (256 for 4Q4C), or #explicit inputs.
+#       D = prod(local_dims) (6561 for 4Q4C, 243 for 3Q2C).
+#   - request_gpus MUST equal NRANKS (<= 8 on qis4).
+#   4Q4C anchor (8 GPUs):  arguments = /nfs_scratch/kunnumbrath/cuLinblad/model_4q4c_openchan.json 8 256 6561 run
+#                          request_gpus = 8
+universe = vanilla
+executable = cluster/run_mpi_shard_loadmodel.sh
+arguments = /nfs_scratch/kunnumbrath/cuLinblad/model_4q4c_openchan.json 8 256 6561 run
+
+# qis4 = the only sm_120 (Blackwell) node the binary targets.
+requirements = (TARGET.IsOttenComputer =?= True) && (TARGET.Machine == "qis4.hep.wisc.edu")
+
+log = mpi_shard_loadmodel.log
+error = mpi_shard_loadmodel.err
+output = mpi_shard_loadmodel.out
+
++WantGPULab = true
++GPUJobLength = "medium"
+
+# request_gpus MUST equal NRANKS (arguments field 2). request_cpus ~4 per GPU + headroom.
+request_gpus = 8
+request_cpus = 16
+request_memory = 524288
+request_disk = 20000000
+
+queue
