@@ -20,11 +20,15 @@ struct ModelEvolutionSpec {
 };
 
 struct ModelInitialStates {
-    std::string encoding = "computational";  // "computational" | "explicit"
+    std::string encoding = "computational";  // "computational" | "explicit" | "explicit_density"
     int num_states = 0;                      // 2^n_qubits for "computational"
     // "explicit": M state vectors (each length hilbert_dim D), e.g. the dressed computational kets
     // exported from Julia (sys.kets_dressed). Closed evolves these as |psi>; open evolves |k><k|.
     std::vector<std::vector<Complex>> explicit_states;
+    // "explicit_density" (OPEN only): M² density operators, each length D² (row-major rho[i*D+j]),
+    // evolved VERBATIM (no ket*ket†) — e.g. the dressed comp basis |D_a><D_b| from Julia, giving the
+    // rigorous dressed open channel (vs the bare |a><b| that "computational" injects).
+    std::vector<std::vector<Complex>> explicit_density_states;
 };
 
 // A deserialized handoff model: the matrix-free Model plus the run metadata the solver needs.

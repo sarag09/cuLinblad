@@ -241,8 +241,32 @@ LoadedModel load_model_from_json(const std::string& path) {
             }
         }
         lm.initial_states.num_states = static_cast<int>(lm.initial_states.explicit_states.size());
+    } else if (lm.initial_states.encoding == "explicit_density") {
+        // OPEN-only: M² density operators, each length D² (row-major rho[i*D+j]), evolved verbatim.
+        std::size_t D = 1;
+        for (const Index d : lm.model.local_dims) D *= static_cast<std::size_t>(d);
+        const std::size_t DD = D * D;
+        const json& st = is.at("states");
+        const json& re = st.at("real");
+        const json& im = st.at("imag");
+        if (!re.is_array() || !im.is_array() || re.size() != im.size() || re.empty()) {
+            throw std::runtime_error("model_io: initial_states.explicit_density needs equal-length non-empty real/imag");
+        }
+        lm.initial_states.explicit_density_states.resize(re.size());
+        for (std::size_t s = 0; s < re.size(); ++s) {
+            if (re[s].size() != DD || im[s].size() != DD) {
+                throw std::runtime_error("model_io: explicit_density state " + std::to_string(s) + " length "
+                                         + std::to_string(re[s].size()) + " != hilbert_dim^2 " + std::to_string(DD));
+            }
+            std::vector<Complex>& v = lm.initial_states.explicit_density_states[s];
+            v.resize(DD);
+            for (std::size_t i = 0; i < DD; ++i) {
+                v[i] = Complex(re[s][i].get<double>(), im[s][i].get<double>());
+            }
+        }
+        lm.initial_states.num_states = static_cast<int>(lm.initial_states.explicit_density_states.size());
     } else if (lm.initial_states.encoding != "computational") {
-        throw std::runtime_error("model_io: initial_states.encoding must be 'computational' or 'explicit'");
+        throw std::runtime_error("model_io: initial_states.encoding must be 'computational', 'explicit', or 'explicit_density'");
     }
 
     return lm;

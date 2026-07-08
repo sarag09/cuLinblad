@@ -111,6 +111,7 @@ TransmonChainBenchmarkTiming evolve_loaded_model_schrodinger(
 TransmonChainBenchmarkTiming evolve_loaded_model_liouvillian(
     const Model& model, const std::vector<Index>& selected_density_indices,
     const std::vector<std::vector<Complex>>& explicit_kets,
+    const std::vector<std::vector<Complex>>& explicit_density_states,
     double t0, double tfinal, int num_steps);
 
 Model build_tunable_coupler_model(const TunableCouplerBenchmarkConfig& config);

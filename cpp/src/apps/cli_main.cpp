@@ -1028,22 +1028,37 @@ int run_loaded_model(const std::string& model_path, const std::string& results_p
                   << ", num_steps=" << num_steps
                   << ", terms=" << lm.model.hamiltonian_terms.size() << "+"
                   << lm.model.time_dependent_hamiltonian_terms.size() << "td" << std::endl;
-        const std::vector<std::vector<Complex>>& explicit_states = lm.initial_states.explicit_states;
+        const std::vector<std::vector<Complex>>& explicit_states  = lm.initial_states.explicit_states;
+        const std::vector<std::vector<Complex>>& explicit_density = lm.initial_states.explicit_density_states;
+        const bool use_density  = !explicit_density.empty();
         const bool use_explicit = !explicit_states.empty();
-        if (use_explicit) {
+        if (use_density && use_explicit) {
+            std::cerr << "[load_model] error: both 'explicit' and 'explicit_density' initial states set" << std::endl;
+            return 1;
+        }
+        if (use_density && !lm.is_open) {
+            std::cerr << "[load_model] error: 'explicit_density' is open-only (closed uses |psi> kets)" << std::endl;
+            return 1;
+        }
+        if (use_density) {
+            std::cerr << "[load_model] explicit_density initial states: " << explicit_density.size()
+                      << " (dressed comp density basis |D_a><D_b| -- rigorous dressed channel)" << std::endl;
+        } else if (use_explicit) {
             std::cerr << "[load_model] explicit initial states: " << explicit_states.size()
                       << " (e.g. dressed comp kets)" << std::endl;
         }
-        // Build the full per-state index list (computational) or leave empty (explicit kets carry the states).
+        // Build the full per-state index list (computational) or leave empty (explicit inputs carry the states).
         std::vector<Index> idx;
-        if (!use_explicit) {
+        if (!use_explicit && !use_density) {
             idx = lm.is_open
                 ? computational_density_indices_for_dims(lm.model.local_dims, lm.num_qubits)
                 : computational_state_indices_for_dims(lm.model.local_dims, lm.num_qubits);
         }
         // MPI state-sharding: capture the GLOBAL count N BEFORE shard_indices overwrites idx (else the
         // empty-shard guard would compare against the post-shard local count).
-        const std::size_t N = use_explicit ? explicit_states.size() : idx.size();
+        const std::size_t N = use_density ? explicit_density.size()
+                            : use_explicit ? explicit_states.size()
+                            : idx.size();
         if (mpi_size > 1 && static_cast<std::size_t>(mpi_size) > N) {
             if (mpi_rank == 0)
                 std::cerr << "[load_model] too many ranks (" << mpi_size << ") for " << N
@@ -1052,14 +1067,17 @@ int run_loaded_model(const std::string& model_path, const std::string& results_p
         }
         const std::vector<std::vector<Complex>> states_slice =
             shard_explicit_states(explicit_states, mpi_rank, mpi_size);
+        const std::vector<std::vector<Complex>> density_slice =
+            shard_explicit_states(explicit_density, mpi_rank, mpi_size);
         idx = shard_indices(idx, mpi_rank, mpi_size);   // identity for size<=1; safe AFTER N captured
         if (mpi_size > 1)
             std::cerr << "[rank " << mpi_rank << "/" << mpi_size << "] evolving "
-                      << (use_explicit ? states_slice.size() : idx.size()) << " state(s)" << std::endl;
+                      << (use_density ? density_slice.size() : use_explicit ? states_slice.size() : idx.size())
+                      << " state(s)" << std::endl;
 
         if (lm.is_open) {
             const TransmonChainBenchmarkTiming timing = evolve_loaded_model_liouvillian(
-                lm.model, idx, states_slice, lm.evolution.t0, lm.evolution.tfinal, num_steps);
+                lm.model, idx, states_slice, density_slice, lm.evolution.t0, lm.evolution.tfinal, num_steps);
             std::cerr << "[load_model] evolution wall_seconds=" << timing.wall_seconds
                       << " (states=" << timing.final_states.size() << ", steps=" << num_steps << ")"
                       << std::endl;

@@ -969,12 +969,23 @@ TransmonChainBenchmarkTiming evolve_loaded_model_schrodinger(
 TransmonChainBenchmarkTiming evolve_loaded_model_liouvillian(
     const Model& model, const std::vector<Index>& selected_density_indices,
     const std::vector<std::vector<Complex>>& explicit_kets,
+    const std::vector<std::vector<Complex>>& explicit_density_states,
     double t0, double tfinal, int num_steps)
 {
     const Solver solver = make_solver(model);
     const std::size_t D = static_cast<std::size_t>(solver.layout.hilbert_dim);
     std::vector<std::vector<Complex>> initial;
-    if (explicit_kets.empty()) {
+    if (!explicit_density_states.empty()) {
+        // Rigorous DRESSED channel: evolve the provided density operators VERBATIM (row-major
+        // rho[i*D+j]), no ket*ket† outer product. Each must be length D². (e.g. dressed |D_a><D_b|.)
+        initial.reserve(explicit_density_states.size());
+        for (const std::vector<Complex>& rho : explicit_density_states) {
+            if (rho.size() != D * D) {
+                throw std::invalid_argument("evolve_loaded_model_liouvillian: explicit_density length != hilbert_dim^2");
+            }
+            initial.push_back(rho);
+        }
+    } else if (explicit_kets.empty()) {
         initial = make_selected_basis_density_states(solver, selected_density_indices);
     } else {
         // Build each |k><k| density matrix (row-major rho[i*D+j] = ket[i]*conj(ket[j])) from a ket.
