@@ -265,8 +265,32 @@ LoadedModel load_model_from_json(const std::string& path) {
             }
         }
         lm.initial_states.num_states = static_cast<int>(lm.initial_states.explicit_density_states.size());
+    } else if (lm.initial_states.encoding == "dressed_comp_kets") {
+        // OPEN-only: M dressed comp kets, each length D. C++ builds the M² |D_a><D_b| inputs + projects.
+        std::size_t D = 1;
+        for (const Index d : lm.model.local_dims) D *= static_cast<std::size_t>(d);
+        const json& st = is.at("states");
+        const json& re = st.at("real");
+        const json& im = st.at("imag");
+        if (!re.is_array() || !im.is_array() || re.size() != im.size() || re.empty()) {
+            throw std::runtime_error("model_io: initial_states.dressed_comp_kets needs equal-length non-empty real/imag");
+        }
+        lm.initial_states.dressed_kets.resize(re.size());
+        for (std::size_t s = 0; s < re.size(); ++s) {
+            if (re[s].size() != D || im[s].size() != D) {
+                throw std::runtime_error("model_io: dressed_comp_kets ket " + std::to_string(s) + " length "
+                                         + std::to_string(re[s].size()) + " != hilbert_dim " + std::to_string(D));
+            }
+            std::vector<Complex>& v = lm.initial_states.dressed_kets[s];
+            v.resize(D);
+            for (std::size_t i = 0; i < D; ++i) {
+                v[i] = Complex(re[s][i].get<double>(), im[s][i].get<double>());
+            }
+        }
+        const std::size_t Mk = lm.initial_states.dressed_kets.size();
+        lm.initial_states.num_states = static_cast<int>(Mk * Mk);
     } else if (lm.initial_states.encoding != "computational") {
-        throw std::runtime_error("model_io: initial_states.encoding must be 'computational', 'explicit', or 'explicit_density'");
+        throw std::runtime_error("model_io: initial_states.encoding must be 'computational', 'explicit', 'explicit_density', or 'dressed_comp_kets'");
     }
 
     return lm;

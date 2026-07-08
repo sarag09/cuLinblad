@@ -569,6 +569,36 @@ std::vector<std::vector<culindblad::Complex>> shard_explicit_states(
     return std::vector<std::vector<culindblad::Complex>>(all.begin() + begin, all.begin() + begin + cnt);
 }
 
+// Build THIS rank's contiguous slice of the M² dressed density inputs |D_a><D_b| (a-outer, s=a*M+b),
+// row-major rho[k*D+l] = kets[a][k]*conj(kets[b][l]). Shards the [0..M²-1] index range with the SAME
+// contiguous partition as shard_indices, so the merged dump reconstructs global s order. Only the
+// rank's slice is materialized (never all M² D×D matrices at once).
+std::vector<std::vector<culindblad::Complex>> build_dressed_density_slice(
+    const std::vector<std::vector<culindblad::Complex>>& kets, int rank, int size)
+{
+    using culindblad::Complex; using culindblad::Index;
+    const std::size_t M = kets.size();
+    const std::size_t D = (M > 0) ? kets[0].size() : 0;
+    const std::size_t N = M * M;
+    std::vector<Index> all(N);
+    for (std::size_t s = 0; s < N; ++s) all[s] = static_cast<Index>(s);
+    const std::vector<Index> mine = shard_indices(all, rank, size);
+    std::vector<std::vector<Complex>> out;
+    out.reserve(mine.size());
+    for (const Index sidx : mine) {
+        const std::size_t s = static_cast<std::size_t>(sidx);
+        const std::size_t a = s / M;   // a-outer
+        const std::size_t b = s % M;   // b-inner
+        std::vector<Complex> rho(D * D);
+        for (std::size_t k = 0; k < D; ++k) {
+            const Complex ka = kets[a][k];
+            for (std::size_t l = 0; l < D; ++l) rho[k * D + l] = ka * std::conj(kets[b][l]);
+        }
+        out.push_back(std::move(rho));
+    }
+    return out;
+}
+
 // Dump the states selected by config.state_selection (full propagator if
 // evolve_all_states, otherwise the listed indices, e.g. computational states).
 void tc_dump_states(
@@ -991,6 +1021,82 @@ void dump_loaded_model_result(std::ostream& out, const culindblad::LoadedModel& 
     out << "PROPAGATOR_DUMP_END backend=gpu mode=" << mode << "\n";
 }
 
+// Dump the DRESSED comp channel: project each evolved rho onto the M dressed kets and emit the M×M
+// block <D_i|rho_lab|D_j> per state (rotating->lab back-transform folded into phase-adjusted kets).
+// Emits num_states blocks of M*M complex (row-major i-outer,j-inner) -> the M²×M² channel, ~M⁴ numbers
+// total instead of num_states × D² (the compact, scalable rigorous path).
+void dump_loaded_model_channel(std::ostream& out, const culindblad::LoadedModel& lm,
+                               const culindblad::TransmonChainBenchmarkTiming& timing,
+                               const std::vector<std::vector<culindblad::Complex>>& dressed_kets) {
+    using namespace culindblad;
+    Index D = 1;
+    for (const Index d : lm.model.local_dims) D *= d;
+    const std::size_t Dz = static_cast<std::size_t>(D);
+    const std::size_t M = dressed_kets.size();
+    // E_k table for the rotating->lab back-transform (same convention as dump_loaded_model_result).
+    std::vector<double> Efr;
+    if (lm.evolution.result_frame == "rotating" && !lm.evolution.frame_omegas.empty()) {
+        Efr.resize(Dz);
+        const std::vector<double>& fo = lm.evolution.frame_omegas;
+        const std::vector<Index>& dims = lm.model.local_dims;
+        for (Index k = 0; k < D; ++k) {
+            double e = 0.0; Index rem = k, stride = D;
+            for (std::size_t si = 0; si < dims.size(); ++si) {
+                stride /= dims[si];
+                e += fo[si] * static_cast<double>(rem / stride);
+                rem %= stride;
+            }
+            Efr[static_cast<std::size_t>(k)] = e;
+        }
+    }
+    const double Tbt = lm.evolution.tfinal - lm.evolution.t0;
+    // <D_i|rho_lab|D_j> = sum_k conj(D_i[k]) e^{-iE_k T} ( sum_l rho_R[k,l] e^{+iE_l T} D_j[l] ).
+    // Fold the phases into the kets: P[j][l]=e^{+iE_l T}D_j[l] ; R[i][k]=conj(D_i[k]) e^{-iE_k T}.
+    std::vector<std::vector<Complex>> P(M, std::vector<Complex>(Dz)), R(M, std::vector<Complex>(Dz));
+    for (std::size_t j = 0; j < M; ++j) {
+        for (std::size_t l = 0; l < Dz; ++l) {
+            const double ph = Efr.empty() ? 0.0 : Efr[l] * Tbt;   // E_l * T
+            const Complex ep(std::cos(ph), std::sin(ph));          // e^{+iE_l T}
+            P[j][l] = dressed_kets[j][l] * ep;
+            R[j][l] = std::conj(dressed_kets[j][l]) * std::conj(ep);
+        }
+    }
+    out << "PROPAGATOR_DUMP_BEGIN backend=gpu mode=lindblad_dressed"
+        << " num_qubits=" << lm.num_qubits << " num_couplers=" << lm.num_couplers
+        << " hilbert_dim=" << D << " comp_dim=" << M << " density_dim=" << (M * M)
+        << " steps=" << lm.evolution.num_steps
+        << " result_frame=" << lm.evolution.result_frame
+        << " batch_size=" << timing.final_states.size()
+        << " num_states=" << timing.final_states.size() << "\n";
+    const std::streamsize old_prec = out.precision();
+    out << std::setprecision(17);
+    std::vector<std::vector<Complex>> W(M, std::vector<Complex>(Dz));   // W[j][k] = sum_l rho_R[k,l] P[j][l]
+    for (std::size_t s = 0; s < timing.final_states.size(); ++s) {
+        out << "STATE " << s << "\n";
+        const std::vector<Complex>& rho = timing.final_states[s];       // row-major rho_R[k*D+l], length D²
+        for (std::size_t k = 0; k < Dz; ++k) {
+            const Complex* rk = &rho[k * Dz];
+            for (std::size_t j = 0; j < M; ++j) {
+                const Complex* pj = P[j].data();
+                Complex acc(0.0, 0.0);
+                for (std::size_t l = 0; l < Dz; ++l) acc += rk[l] * pj[l];
+                W[j][k] = acc;
+            }
+        }
+        for (std::size_t i = 0; i < M; ++i) {
+            const Complex* ri = R[i].data();
+            for (std::size_t j = 0; j < M; ++j) {
+                const Complex* wj = W[j].data();
+                Complex acc(0.0, 0.0);
+                for (std::size_t k = 0; k < Dz; ++k) acc += ri[k] * wj[k];
+                out << acc.real() << " " << acc.imag() << "\n";        // <D_i|rho_lab|D_j>, row-major
+            }
+        }
+    }
+    out << std::setprecision(old_prec);
+    out << "PROPAGATOR_DUMP_END backend=gpu mode=lindblad_dressed\n";
+}
+
 // -load_model <json> [-results_out <path>]: deserialize a Julia-exported term-list model, evolve the
 // computational basis in the LAB frame (closed |psi> or open rho per the "system" field), and dump.
 int run_loaded_model(const std::string& model_path, const std::string& results_path,
@@ -1030,33 +1136,40 @@ int run_loaded_model(const std::string& model_path, const std::string& results_p
                   << lm.model.time_dependent_hamiltonian_terms.size() << "td" << std::endl;
         const std::vector<std::vector<Complex>>& explicit_states  = lm.initial_states.explicit_states;
         const std::vector<std::vector<Complex>>& explicit_density = lm.initial_states.explicit_density_states;
+        const std::vector<std::vector<Complex>>& dressed_kets     = lm.initial_states.dressed_kets;
+        const bool use_dressed  = !dressed_kets.empty();
         const bool use_density  = !explicit_density.empty();
         const bool use_explicit = !explicit_states.empty();
-        if (use_density && use_explicit) {
-            std::cerr << "[load_model] error: both 'explicit' and 'explicit_density' initial states set" << std::endl;
+        if (static_cast<int>(use_dressed) + static_cast<int>(use_density) + static_cast<int>(use_explicit) > 1) {
+            std::cerr << "[load_model] error: set at most one of explicit / explicit_density / dressed_comp_kets" << std::endl;
             return 1;
         }
-        if (use_density && !lm.is_open) {
-            std::cerr << "[load_model] error: 'explicit_density' is open-only (closed uses |psi> kets)" << std::endl;
+        if ((use_dressed || use_density) && !lm.is_open) {
+            std::cerr << "[load_model] error: dressed_comp_kets / explicit_density are open-only" << std::endl;
             return 1;
         }
-        if (use_density) {
+        const std::size_t Mk = dressed_kets.size();
+        if (use_dressed) {
+            std::cerr << "[load_model] dressed_comp_kets: " << Mk << " kets -> " << (Mk * Mk)
+                      << " |D_a><D_b| density inputs; projected " << Mk << "x" << Mk
+                      << " dressed comp channel dump" << std::endl;
+        } else if (use_density) {
             std::cerr << "[load_model] explicit_density initial states: " << explicit_density.size()
-                      << " (dressed comp density basis |D_a><D_b| -- rigorous dressed channel)" << std::endl;
+                      << " (dressed comp density basis |D_a><D_b|)" << std::endl;
         } else if (use_explicit) {
             std::cerr << "[load_model] explicit initial states: " << explicit_states.size()
                       << " (e.g. dressed comp kets)" << std::endl;
         }
-        // Build the full per-state index list (computational) or leave empty (explicit inputs carry the states).
+        // Build the computational index list only when no explicit inputs carry the states.
         std::vector<Index> idx;
-        if (!use_explicit && !use_density) {
+        if (!use_explicit && !use_density && !use_dressed) {
             idx = lm.is_open
                 ? computational_density_indices_for_dims(lm.model.local_dims, lm.num_qubits)
                 : computational_state_indices_for_dims(lm.model.local_dims, lm.num_qubits);
         }
-        // MPI state-sharding: capture the GLOBAL count N BEFORE shard_indices overwrites idx (else the
-        // empty-shard guard would compare against the post-shard local count).
-        const std::size_t N = use_density ? explicit_density.size()
+        // MPI state-sharding: GLOBAL count N (dressed => M² channel columns) BEFORE any sharding.
+        const std::size_t N = use_dressed  ? Mk * Mk
+                            : use_density  ? explicit_density.size()
                             : use_explicit ? explicit_states.size()
                             : idx.size();
         if (mpi_size > 1 && static_cast<std::size_t>(mpi_size) > N) {
@@ -1067,12 +1180,16 @@ int run_loaded_model(const std::string& model_path, const std::string& results_p
         }
         const std::vector<std::vector<Complex>> states_slice =
             shard_explicit_states(explicit_states, mpi_rank, mpi_size);
+        // dressed: build THIS rank's slice of |D_a><D_b| from the M kets (a-outer s=a*M+b); else shard the
+        // provided explicit_density verbatim. Both feed the SAME (unchanged) explicit_density evolve path.
         const std::vector<std::vector<Complex>> density_slice =
-            shard_explicit_states(explicit_density, mpi_rank, mpi_size);
+            use_dressed ? build_dressed_density_slice(dressed_kets, mpi_rank, mpi_size)
+                        : shard_explicit_states(explicit_density, mpi_rank, mpi_size);
         idx = shard_indices(idx, mpi_rank, mpi_size);   // identity for size<=1; safe AFTER N captured
         if (mpi_size > 1)
             std::cerr << "[rank " << mpi_rank << "/" << mpi_size << "] evolving "
-                      << (use_density ? density_slice.size() : use_explicit ? states_slice.size() : idx.size())
+                      << ((use_dressed || use_density) ? density_slice.size()
+                          : use_explicit ? states_slice.size() : idx.size())
                       << " state(s)" << std::endl;
 
         if (lm.is_open) {
@@ -1081,7 +1198,10 @@ int run_loaded_model(const std::string& model_path, const std::string& results_p
             std::cerr << "[load_model] evolution wall_seconds=" << timing.wall_seconds
                       << " (states=" << timing.final_states.size() << ", steps=" << num_steps << ")"
                       << std::endl;
-            dump_loaded_model_result(*out, lm, timing, "lindblad");
+            if (use_dressed)
+                dump_loaded_model_channel(*out, lm, timing, dressed_kets);   // projected M×M channel
+            else
+                dump_loaded_model_result(*out, lm, timing, "lindblad");
         } else {
             const TransmonChainBenchmarkTiming timing = evolve_loaded_model_schrodinger(
                 lm.model, idx, states_slice, lm.evolution.t0, lm.evolution.tfinal, num_steps);

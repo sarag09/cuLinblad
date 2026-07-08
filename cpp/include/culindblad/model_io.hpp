@@ -29,6 +29,11 @@ struct ModelInitialStates {
     // evolved VERBATIM (no ket*ket†) — e.g. the dressed comp basis |D_a><D_b| from Julia, giving the
     // rigorous dressed open channel (vs the bare |a><b| that "computational" injects).
     std::vector<std::vector<Complex>> explicit_density_states;
+    // "dressed_comp_kets" (OPEN only): M dressed computational kets (each length D). The SCALABLE
+    // rigorous path — cuLindblad builds the M² density inputs |D_a><D_b| internally (ships ~M*D, not
+    // M²*D²) and projects each evolved rho onto these kets, dumping only the M×M dressed comp channel
+    // block per state (<D_i|rho|D_j>). Avoids the 88GB explicit_density JSON at the 4Q4C anchor.
+    std::vector<std::vector<Complex>> dressed_kets;
 };
 
 // A deserialized handoff model: the matrix-free Model plus the run metadata the solver needs.
