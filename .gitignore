@@ -1,6 +1,7 @@
 # Build artifacts
 /build/
 /build_local/
+/build_local_fp32/
 /CMakeFiles/
 /cmake_install.cmake
 /CMakeCache.txt

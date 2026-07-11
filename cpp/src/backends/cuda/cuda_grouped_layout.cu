@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 
 #include "culindblad/types.hpp"
+#include "culindblad/cuda_complex_compat.cuh"
 
 namespace culindblad {
 
@@ -151,12 +152,12 @@ __global__ void grouped_to_flat_vec_batched_kernel(
 // -i exactly once. Grouped index g = ket_t*complement_dim + ket_c; the input element for column
 // `col` lives at the same complement (ket_c) with target `col`, i.e. left_base + col*complement_dim.
 __global__ void batched_grouped_sparse_left_to_flat_kernel(
-    const cuDoubleComplex* sparse_values,
+    const DevComplex* sparse_values,
     const Index* sparse_rows,
     const Index* sparse_cols,
     Index sparse_nnz,
-    const cuDoubleComplex* grouped_input,
-    cuDoubleComplex* flat_output,
+    const DevComplex* grouped_input,
+    DevComplex* flat_output,
     Index flat_size,
     Index grouped_size,
     Index target_hilbert_dim,
@@ -179,20 +180,20 @@ __global__ void batched_grouped_sparse_left_to_flat_kernel(
     const Index left_base = batch * grouped_size + ket_comp;
     const Index left_stride = complement_dim;
 
-    cuDoubleComplex left_sum = make_cuDoubleComplex(0.0, 0.0);
+    DevComplex left_sum = dev_mkc(0.0, 0.0);
     for (Index nz = 0; nz < sparse_nnz; ++nz) {
         if (sparse_rows[nz] == ket_target_out) {
-            left_sum = cuCadd(left_sum,
-                cuCmul(sparse_values[nz],
+            left_sum = dev_add(left_sum,
+                dev_mul(sparse_values[nz],
                        grouped_input[left_base + sparse_cols[nz] * left_stride]));
         }
     }
-    const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
-    const cuDoubleComplex val = cuCmul(minus_i, left_sum);
+    const DevComplex minus_i = dev_mkc(0.0, -1.0);
+    const DevComplex val = dev_mul(minus_i, left_sum);
 
     const Index f = grouped_to_flat_vec_index(local, complement_dim, tdesc, num_t, cdesc, num_c);
     const Index out = batch * flat_size + f;
-    flat_output[out] = cuCadd(flat_output[out], val);
+    flat_output[out] = dev_add(flat_output[out], val);
 }
 
 // CSR variant of the sparse left action: each output thread visits only its row's nonzeros via
@@ -200,11 +201,11 @@ __global__ void batched_grouped_sparse_left_to_flat_kernel(
 // row == ket_target. Bit-identical to batched_grouped_sparse_left_to_flat_kernel (the per-row
 // column order is preserved), but issues far fewer instructions on the gather-bound kernel.
 __global__ void batched_grouped_sparse_left_csr_to_flat_kernel(
-    const cuDoubleComplex* sparse_values,
+    const DevComplex* sparse_values,
     const Index* sparse_cols,
     const Index* sparse_row_ptr,
-    const cuDoubleComplex* grouped_input,
-    cuDoubleComplex* flat_output,
+    const DevComplex* grouped_input,
+    DevComplex* flat_output,
     Index flat_size,
     Index grouped_size,
     Index target_hilbert_dim,
@@ -227,20 +228,20 @@ __global__ void batched_grouped_sparse_left_csr_to_flat_kernel(
     const Index left_base = batch * grouped_size + ket_comp;
     const Index left_stride = complement_dim;
 
-    cuDoubleComplex left_sum = make_cuDoubleComplex(0.0, 0.0);
+    DevComplex left_sum = dev_mkc(0.0, 0.0);
     const Index begin = sparse_row_ptr[ket_target_out];
     const Index end = sparse_row_ptr[ket_target_out + 1];
     for (Index nz = begin; nz < end; ++nz) {
-        left_sum = cuCadd(left_sum,
-            cuCmul(sparse_values[nz],
+        left_sum = dev_add(left_sum,
+            dev_mul(sparse_values[nz],
                    grouped_input[left_base + sparse_cols[nz] * left_stride]));
     }
-    const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
-    const cuDoubleComplex val = cuCmul(minus_i, left_sum);
+    const DevComplex minus_i = dev_mkc(0.0, -1.0);
+    const DevComplex val = dev_mul(minus_i, left_sum);
 
     const Index f = grouped_to_flat_vec_index(local, complement_dim, tdesc, num_t, cdesc, num_c);
     const Index out = batch * flat_size + f;
-    flat_output[out] = cuCadd(flat_output[out], val);
+    flat_output[out] = dev_add(flat_output[out], val);
 }
 
 // Fused single-site diagonal: one regroup-free flat pass folding ALL single-site diagonals,
@@ -251,11 +252,11 @@ __global__ void batched_grouped_sparse_left_csr_to_flat_kernel(
 // small effective-diagonal assembly, so this wins at every batch size (unlike a host-built
 // d_total whose fixed cost dominates at small batch).
 __global__ void batched_psi_fused_diagonal_kernel(
-    const cuDoubleComplex* site_diags,
+    const DevComplex* site_diags,
     const Index* site_desc,
     Index num_folded,
-    const cuDoubleComplex* psi_flat,
-    cuDoubleComplex* flat_output,
+    const DevComplex* psi_flat,
+    DevComplex* flat_output,
     Index hilbert_dim,
     Index batch_size)
 {
@@ -267,16 +268,16 @@ __global__ void batched_psi_fused_diagonal_kernel(
         return;
     }
     const Index k = idx % hilbert_dim;
-    cuDoubleComplex d = make_cuDoubleComplex(0.0, 0.0);
+    DevComplex d = dev_mkc(0.0, 0.0);
     for (Index sfold = 0; sfold < num_folded; ++sfold) {
         const Index off = site_desc[3 * sfold];
         const Index stride = site_desc[3 * sfold + 1];
         const Index dim = site_desc[3 * sfold + 2];
-        d = cuCadd(d, site_diags[off + (k / stride) % dim]);
+        d = dev_add(d, site_diags[off + (k / stride) % dim]);
     }
-    const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
-    const cuDoubleComplex val = cuCmul(minus_i, cuCmul(d, psi_flat[idx]));
-    flat_output[idx] = cuCadd(flat_output[idx], val);
+    const DevComplex minus_i = dev_mkc(0.0, -1.0);
+    const DevComplex val = dev_mul(minus_i, dev_mul(d, psi_flat[idx]));
+    flat_output[idx] = dev_add(flat_output[idx], val);
 }
 
 // Open-system (density) fused single-site diagonal: one regroup-free flat-direct pass folding ALL
@@ -286,11 +287,11 @@ __global__ void batched_psi_fused_diagonal_kernel(
 // idx = ket_full*D + bra_full this applies f[idx] += (sum_s F_s[ket_s,bra_s]) * rho[idx]. The relax
 // (dense) jump still runs per-layer (it needs the regroup); only the diagonal kernels are folded.
 __global__ void batched_rho_fused_diagonal_kernel(
-    const cuDoubleComplex* site_factors,
+    const DevComplex* site_factors,
     const Index* site_desc,
     Index num_folded,
-    const cuDoubleComplex* rho_flat,
-    cuDoubleComplex* flat_output,
+    const DevComplex* rho_flat,
+    DevComplex* flat_output,
     Index hilbert_dim,
     Index batch_size)
 {
@@ -305,24 +306,24 @@ __global__ void batched_rho_fused_diagonal_kernel(
     const Index local = idx % density_dim;
     const Index ket_full = local / hilbert_dim;
     const Index bra_full = local % hilbert_dim;
-    cuDoubleComplex factor = make_cuDoubleComplex(0.0, 0.0);
+    DevComplex factor = dev_mkc(0.0, 0.0);
     for (Index sfold = 0; sfold < num_folded; ++sfold) {
         const Index off = site_desc[3 * sfold];
         const Index stride = site_desc[3 * sfold + 1];
         const Index dim = site_desc[3 * sfold + 2];
         const Index ket_s = (ket_full / stride) % dim;
         const Index bra_s = (bra_full / stride) % dim;
-        factor = cuCadd(factor, site_factors[off + ket_s * dim + bra_s]);
+        factor = dev_add(factor, site_factors[off + ket_s * dim + bra_s]);
     }
-    flat_output[idx] = cuCadd(flat_output[idx], cuCmul(factor, rho_flat[idx]));
+    flat_output[idx] = dev_add(flat_output[idx], dev_mul(factor, rho_flat[idx]));
 }
 
 // One-sided left action -i*H_diag|psi> for a single-site diagonal term (h_diag indexed by the
 // target-site occupation), accumulated into the flat RHS f.
 __global__ void batched_grouped_diagonal_left_to_flat_kernel(
-    const cuDoubleComplex* h_diag,
-    const cuDoubleComplex* grouped_input,
-    cuDoubleComplex* flat_output,
+    const DevComplex* h_diag,
+    const DevComplex* grouped_input,
+    DevComplex* flat_output,
     Index flat_size,
     Index grouped_size,
     Index target_hilbert_dim,
@@ -340,13 +341,13 @@ __global__ void batched_grouped_diagonal_left_to_flat_kernel(
     const Index local = idx % grouped_size;
     const Index ket_target_out = local / complement_dim;
 
-    const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
-    const cuDoubleComplex val =
-        cuCmul(minus_i, cuCmul(h_diag[ket_target_out], grouped_input[idx]));
+    const DevComplex minus_i = dev_mkc(0.0, -1.0);
+    const DevComplex val =
+        dev_mul(minus_i, dev_mul(h_diag[ket_target_out], grouped_input[idx]));
 
     const Index f = grouped_to_flat_vec_index(local, complement_dim, tdesc, num_t, cdesc, num_c);
     const Index out = (idx / grouped_size) * flat_size + f;
-    flat_output[out] = cuCadd(flat_output[out], val);
+    flat_output[out] = dev_add(flat_output[out], val);
 }
 
 __global__ void flat_to_grouped_kernel(
@@ -452,9 +453,9 @@ __global__ void grouped_to_flat_accumulate_batched_kernel(
     const Index f = grouped_to_flat_index(local_grouped, D, target_dim, complement_dim,
                                           tdesc, num_t, cdesc, num_c);
     const Index out = batch * flat_size + f;
-    cuDoubleComplex* fo = reinterpret_cast<cuDoubleComplex*>(flat_output);
-    const cuDoubleComplex* gi = reinterpret_cast<const cuDoubleComplex*>(grouped_input);
-    fo[out] = cuCadd(fo[out], gi[idx]);
+    DevComplex* fo = reinterpret_cast<DevComplex*>(flat_output);
+    const DevComplex* gi = reinterpret_cast<const DevComplex*>(grouped_input);
+    fo[out] = dev_add(fo[out], gi[idx]);
 }
 
 // Fused: compute -i[H_sparse, rho] for a 2-site sparse coupling and ACCUMULATE it straight
@@ -465,12 +466,12 @@ __global__ void grouped_to_flat_accumulate_batched_kernel(
 // grouped->flat index map is a bijection, so the result equals the separate-path result
 // (only the float-accumulation order across layers may differ -> rounding-level).
 __global__ void batched_grouped_sparse_commutator_to_flat_kernel(
-    const cuDoubleComplex* sparse_values,
+    const DevComplex* sparse_values,
     const Index* sparse_rows,
     const Index* sparse_cols,
     Index sparse_nnz,
-    const cuDoubleComplex* grouped_input,
-    cuDoubleComplex* flat_output,
+    const DevComplex* grouped_input,
+    DevComplex* flat_output,
     Index flat_size,
     Index grouped_size,
     Index target_hilbert_dim,
@@ -507,39 +508,39 @@ __global__ void batched_grouped_sparse_commutator_to_flat_kernel(
     const Index left_stride = complement_dim * target_hilbert_dim * complement_dim;
     const Index right_stride = complement_dim;
 
-    cuDoubleComplex left_sum = make_cuDoubleComplex(0.0, 0.0);
-    cuDoubleComplex right_sum = make_cuDoubleComplex(0.0, 0.0);
+    DevComplex left_sum = dev_mkc(0.0, 0.0);
+    DevComplex right_sum = dev_mkc(0.0, 0.0);
     for (Index nz = 0; nz < sparse_nnz; ++nz) {
         const Index row = sparse_rows[nz];
         const Index col = sparse_cols[nz];
-        const cuDoubleComplex value = sparse_values[nz];
+        const DevComplex value = sparse_values[nz];
         if (row == ket_target_out) {
-            left_sum = cuCadd(left_sum,
-                cuCmul(value, grouped_input[left_base + col * left_stride]));
+            left_sum = dev_add(left_sum,
+                dev_mul(value, grouped_input[left_base + col * left_stride]));
         }
         if (col == bra_target_out) {
-            right_sum = cuCadd(right_sum,
-                cuCmul(grouped_input[right_base + row * right_stride], value));
+            right_sum = dev_add(right_sum,
+                dev_mul(grouped_input[right_base + row * right_stride], value));
         }
     }
-    const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
-    const cuDoubleComplex val = cuCmul(minus_i, cuCsub(left_sum, right_sum));
+    const DevComplex minus_i = dev_mkc(0.0, -1.0);
+    const DevComplex val = dev_mul(minus_i, dev_sub(left_sum, right_sum));
 
     const Index f = grouped_to_flat_index(local, D, target_hilbert_dim, complement_dim,
                                           tdesc, num_t, cdesc, num_c);
     const Index out = batch * flat_size + f;
-    flat_output[out] = cuCadd(flat_output[out], val);
+    flat_output[out] = dev_add(flat_output[out], val);
 }
 
 // Fused single-site diagonal (commutator + anti-commutator + one diagonal jump) accumulated
 // straight into f. Mirrors batched_grouped_fused_diagonal_kernel (cuda_elementwise.cu) but
 // scatters into the flat RHS instead of the grouped accumulator.
 __global__ void batched_grouped_fused_diagonal_to_flat_kernel(
-    const cuDoubleComplex* h_diag,
-    const cuDoubleComplex* norm_diag,
-    const cuDoubleComplex* jump_diag,
-    const cuDoubleComplex* grouped_input,
-    cuDoubleComplex* flat_output,
+    const DevComplex* h_diag,
+    const DevComplex* norm_diag,
+    const DevComplex* jump_diag,
+    const DevComplex* grouped_input,
+    DevComplex* flat_output,
     Index flat_size,
     Index grouped_size,
     Index target_hilbert_dim,
@@ -566,34 +567,34 @@ __global__ void batched_grouped_fused_diagonal_to_flat_kernel(
     (void)bra_comp;
     (void)ket_comp;
 
-    cuDoubleComplex factor = make_cuDoubleComplex(0.0, 0.0);
+    DevComplex factor = dev_mkc(0.0, 0.0);
     if (h_diag != nullptr) {
-        const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
-        factor = cuCadd(factor,
-            cuCmul(minus_i, cuCsub(h_diag[ket_target], h_diag[bra_target])));
+        const DevComplex minus_i = dev_mkc(0.0, -1.0);
+        factor = dev_add(factor,
+            dev_mul(minus_i, dev_sub(h_diag[ket_target], h_diag[bra_target])));
     }
     if (norm_diag != nullptr) {
-        const cuDoubleComplex minus_half = make_cuDoubleComplex(-0.5, 0.0);
-        factor = cuCadd(factor,
-            cuCmul(minus_half, cuCadd(norm_diag[ket_target], norm_diag[bra_target])));
+        const DevComplex minus_half = dev_mkc(-0.5, 0.0);
+        factor = dev_add(factor,
+            dev_mul(minus_half, dev_add(norm_diag[ket_target], norm_diag[bra_target])));
     }
     if (jump_diag != nullptr) {
-        factor = cuCadd(factor,
-            cuCmul(jump_diag[ket_target], cuConj(jump_diag[bra_target])));
+        factor = dev_add(factor,
+            dev_mul(jump_diag[ket_target], dev_conj(jump_diag[bra_target])));
     }
-    const cuDoubleComplex val = cuCmul(factor, grouped_input[idx]);
+    const DevComplex val = dev_mul(factor, grouped_input[idx]);
     const Index f = grouped_to_flat_index(local, D, target_hilbert_dim, complement_dim,
                                           tdesc, num_t, cdesc, num_c);
     const Index out = batch * flat_size + f;
-    flat_output[out] = cuCadd(flat_output[out], val);
+    flat_output[out] = dev_add(flat_output[out], val);
 }
 
 // Single-site dense jump L rho L^dag accumulated straight into f. Mirrors
 // batched_grouped_dense_jump_kernel (cuda_elementwise.cu) but scatters into the flat RHS.
 __global__ void batched_grouped_dense_jump_to_flat_kernel(
-    const cuDoubleComplex* l_op,
-    const cuDoubleComplex* grouped_input,
-    cuDoubleComplex* flat_output,
+    const DevComplex* l_op,
+    const DevComplex* grouped_input,
+    DevComplex* flat_output,
     Index flat_size,
     Index grouped_size,
     Index target_hilbert_dim,
@@ -619,14 +620,14 @@ __global__ void batched_grouped_dense_jump_to_flat_kernel(
     const Index ket_target = t / complement_dim;
 
     const Index base = batch * grouped_size;
-    cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
+    DevComplex acc = dev_mkc(0.0, 0.0);
     for (Index k = 0; k < target_hilbert_dim; ++k) {
-        const cuDoubleComplex l_ik = l_op[ket_target * target_hilbert_dim + k];
+        const DevComplex l_ik = l_op[ket_target * target_hilbert_dim + k];
         if (l_ik.x == 0.0 && l_ik.y == 0.0) {
             continue;
         }
         for (Index l = 0; l < target_hilbert_dim; ++l) {
-            const cuDoubleComplex l_jl = l_op[bra_target * target_hilbert_dim + l];
+            const DevComplex l_jl = l_op[bra_target * target_hilbert_dim + l];
             if (l_jl.x == 0.0 && l_jl.y == 0.0) {
                 continue;
             }
@@ -634,8 +635,8 @@ __global__ void batched_grouped_dense_jump_to_flat_kernel(
                 base +
                 ((k * complement_dim + ket_comp) * target_hilbert_dim + l) * complement_dim +
                 bra_comp;
-            acc = cuCadd(acc,
-                cuCmul(cuCmul(l_ik, grouped_input[rho_idx]), cuConj(l_jl)));
+            acc = dev_add(acc,
+                dev_mul(dev_mul(l_ik, grouped_input[rho_idx]), dev_conj(l_jl)));
         }
     }
     // L rho L^dag is sparse: for a single super-diagonal jump (relaxation a) only ~16/81 of the
@@ -648,7 +649,7 @@ __global__ void batched_grouped_dense_jump_to_flat_kernel(
     const Index f = grouped_to_flat_index(local, D, target_hilbert_dim, complement_dim,
                                           tdesc, num_t, cdesc, num_c);
     const Index out = batch * flat_size + f;
-    flat_output[out] = cuCadd(flat_output[out], acc);
+    flat_output[out] = dev_add(flat_output[out], acc);
 }
 
 } // namespace
@@ -941,12 +942,12 @@ bool launch_grouped_sparse_left_to_flat_kernel(
     const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
 
     batched_grouped_sparse_left_to_flat_kernel<<<grid_size, block_size, 0, stream>>>(
-        reinterpret_cast<const cuDoubleComplex*>(sparse_values),
+        reinterpret_cast<const DevComplex*>(sparse_values),
         reinterpret_cast<const Index*>(sparse_rows),
         reinterpret_cast<const Index*>(sparse_cols),
         sparse_nnz,
-        reinterpret_cast<const cuDoubleComplex*>(d_grouped_input),
-        reinterpret_cast<cuDoubleComplex*>(d_flat_output),
+        reinterpret_cast<const DevComplex*>(d_grouped_input),
+        reinterpret_cast<DevComplex*>(d_flat_output),
         cuda_layout.flat_size,
         cuda_layout.grouped_size,
         cuda_layout.target_dim,
@@ -973,11 +974,11 @@ bool launch_grouped_sparse_left_csr_to_flat_kernel(
     const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
 
     batched_grouped_sparse_left_csr_to_flat_kernel<<<grid_size, block_size, 0, stream>>>(
-        reinterpret_cast<const cuDoubleComplex*>(sparse_values),
+        reinterpret_cast<const DevComplex*>(sparse_values),
         reinterpret_cast<const Index*>(sparse_cols),
         reinterpret_cast<const Index*>(sparse_row_ptr),
-        reinterpret_cast<const cuDoubleComplex*>(d_grouped_input),
-        reinterpret_cast<cuDoubleComplex*>(d_flat_output),
+        reinterpret_cast<const DevComplex*>(d_grouped_input),
+        reinterpret_cast<DevComplex*>(d_flat_output),
         cuda_layout.flat_size,
         cuda_layout.grouped_size,
         cuda_layout.target_dim,
@@ -1002,9 +1003,9 @@ bool launch_grouped_diagonal_left_to_flat_kernel(
     const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
 
     batched_grouped_diagonal_left_to_flat_kernel<<<grid_size, block_size, 0, stream>>>(
-        reinterpret_cast<const cuDoubleComplex*>(h_diag),
-        reinterpret_cast<const cuDoubleComplex*>(d_grouped_input),
-        reinterpret_cast<cuDoubleComplex*>(d_flat_output),
+        reinterpret_cast<const DevComplex*>(h_diag),
+        reinterpret_cast<const DevComplex*>(d_grouped_input),
+        reinterpret_cast<DevComplex*>(d_flat_output),
         cuda_layout.flat_size,
         cuda_layout.grouped_size,
         cuda_layout.target_dim,
@@ -1031,11 +1032,11 @@ bool launch_psi_fused_diagonal_kernel(
     const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
 
     batched_psi_fused_diagonal_kernel<<<grid_size, block_size, 0, stream>>>(
-        reinterpret_cast<const cuDoubleComplex*>(site_diags),
+        reinterpret_cast<const DevComplex*>(site_diags),
         reinterpret_cast<const Index*>(site_desc),
         num_folded,
-        reinterpret_cast<const cuDoubleComplex*>(psi_flat),
-        reinterpret_cast<cuDoubleComplex*>(flat_output),
+        reinterpret_cast<const DevComplex*>(psi_flat),
+        reinterpret_cast<DevComplex*>(flat_output),
         hilbert_dim,
         batch_size);
 
@@ -1057,11 +1058,11 @@ bool launch_rho_fused_diagonal_kernel(
     const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
 
     batched_rho_fused_diagonal_kernel<<<grid_size, block_size, 0, stream>>>(
-        reinterpret_cast<const cuDoubleComplex*>(site_factors),
+        reinterpret_cast<const DevComplex*>(site_factors),
         reinterpret_cast<const Index*>(site_desc),
         num_folded,
-        reinterpret_cast<const cuDoubleComplex*>(rho_flat),
-        reinterpret_cast<cuDoubleComplex*>(flat_output),
+        reinterpret_cast<const DevComplex*>(rho_flat),
+        reinterpret_cast<DevComplex*>(flat_output),
         hilbert_dim,
         batch_size);
 
@@ -1109,12 +1110,12 @@ bool launch_grouped_sparse_commutator_to_flat_kernel(
     const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
 
     batched_grouped_sparse_commutator_to_flat_kernel<<<grid_size, block_size, 0, stream>>>(
-        reinterpret_cast<const cuDoubleComplex*>(sparse_values),
+        reinterpret_cast<const DevComplex*>(sparse_values),
         reinterpret_cast<const Index*>(sparse_rows),
         reinterpret_cast<const Index*>(sparse_cols),
         sparse_nnz,
-        reinterpret_cast<const cuDoubleComplex*>(d_grouped_input),
-        reinterpret_cast<cuDoubleComplex*>(d_flat_output),
+        reinterpret_cast<const DevComplex*>(d_grouped_input),
+        reinterpret_cast<DevComplex*>(d_flat_output),
         cuda_layout.flat_size,
         cuda_layout.grouped_size,
         cuda_layout.target_dim,
@@ -1142,11 +1143,11 @@ bool launch_grouped_fused_diagonal_to_flat_kernel(
     const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
 
     batched_grouped_fused_diagonal_to_flat_kernel<<<grid_size, block_size, 0, stream>>>(
-        reinterpret_cast<const cuDoubleComplex*>(h_diag),
-        reinterpret_cast<const cuDoubleComplex*>(norm_diag),
-        reinterpret_cast<const cuDoubleComplex*>(jump_diag),
-        reinterpret_cast<const cuDoubleComplex*>(d_grouped_input),
-        reinterpret_cast<cuDoubleComplex*>(d_flat_output),
+        reinterpret_cast<const DevComplex*>(h_diag),
+        reinterpret_cast<const DevComplex*>(norm_diag),
+        reinterpret_cast<const DevComplex*>(jump_diag),
+        reinterpret_cast<const DevComplex*>(d_grouped_input),
+        reinterpret_cast<DevComplex*>(d_flat_output),
         cuda_layout.flat_size,
         cuda_layout.grouped_size,
         cuda_layout.target_dim,
@@ -1172,9 +1173,9 @@ bool launch_grouped_dense_jump_to_flat_kernel(
     const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
 
     batched_grouped_dense_jump_to_flat_kernel<<<grid_size, block_size, 0, stream>>>(
-        reinterpret_cast<const cuDoubleComplex*>(l_op),
-        reinterpret_cast<const cuDoubleComplex*>(d_grouped_input),
-        reinterpret_cast<cuDoubleComplex*>(d_flat_output),
+        reinterpret_cast<const DevComplex*>(l_op),
+        reinterpret_cast<const DevComplex*>(d_grouped_input),
+        reinterpret_cast<DevComplex*>(d_flat_output),
         cuda_layout.flat_size,
         cuda_layout.grouped_size,
         cuda_layout.target_dim,

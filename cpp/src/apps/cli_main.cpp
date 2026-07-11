@@ -34,7 +34,7 @@
 
 namespace {
 
-using Complex = std::complex<double>;
+using culindblad::Complex;   // follows the build precision (complex<double> fp64 / complex<float> fp32)
 
 constexpr double kStateZeroMin00 = 0.61;
 constexpr double kMatrixTolerance = 1.0e-4;
@@ -97,7 +97,7 @@ double max_abs_difference(
 
     double max_diff = 0.0;
     for (std::size_t i = 0; i < lhs.size(); ++i) {
-        max_diff = std::max(max_diff, std::abs(lhs[i] - rhs[i]));
+        max_diff = std::max<double>(max_diff, std::abs(lhs[i] - rhs[i]));
     }
     return max_diff;
 }
@@ -1295,7 +1295,7 @@ int run_psi_kernel_selftest() {
             std::vector<Complex> psi_b(psi.begin() + b * D, psi.begin() + (b + 1) * D);
             std::vector<Complex> ref = brute_force_minus_i_H_psi(c.dims, c.target, target_op, target_dim, psi_b);
             for (Index i = 0; i < D; ++i)
-                worst = std::max(worst, std::abs(f[b * D + i] - ref[i]));
+                worst = std::max<double>(worst, std::abs(f[b * D + i] - ref[i]));
         }
         std::cout << "  case dims=" << c.dims.size() << " target=" << c.target.size()
                   << "site " << (c.diagonal ? "diag" : "sparse") << " D=" << D
@@ -1358,7 +1358,7 @@ int run_psi_rhs_selftest() {
             for (const TimeDependentTerm& td : solver.model.time_dependent_hamiltonian_terms)
                 add_term(td.sites, td.matrix, td.rows, evaluate_time_dependent_coefficient(td, t));
             for (Index i = 0; i < D; ++i)
-                worst = std::max(worst, std::abs(static_cast<Complex>(farr[b * D + i]) - ref[i]));
+                worst = std::max<double>(worst, std::abs(static_cast<Complex>(farr[b * D + i]) - ref[i]));
         }
         VecRestoreArrayRead(f, &farr);
     }

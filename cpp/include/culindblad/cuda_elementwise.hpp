@@ -130,4 +130,13 @@ bool launch_batched_grouped_sparse_commutator_kernel(
     Index batch_size,
     cudaStream_t stream);
 
+// fp32 open-system stabilizer. Rescale each of `batch` D×D row-major density matrices in d_state
+// with Re(Tr) > 0.5 by 1/Re(Tr) (cancels the coherent fp32 trace drift); trace~0 channel inputs
+// |D_a><D_b| (a!=b) are left unchanged. Applied per RK4 step on the open path in the fp32 build.
+bool launch_density_trace_renorm_kernel(
+    void* d_state,
+    Index batch,
+    Index D,
+    cudaStream_t stream);
+
 } // namespace culindblad

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -15,6 +16,7 @@
 
 #include "culindblad/backend.hpp"
 #include "culindblad/batch_evolution.hpp"
+#include "culindblad/cuda_elementwise.hpp"
 #include "culindblad/petsc_cuda_ts_rhs.hpp"
 #include "culindblad/state_buffer.hpp"
 #include "culindblad/time_dependence.hpp"
@@ -358,6 +360,20 @@ inline void apply_rhs(
     ++matvecs;
 }
 
+#ifdef CULINDBLAD_FP32
+// fp32 open-system stabilizer helper for the PETSc-TS path (-tc_integrator 0): trace-renormalize the
+// bound solution Vec ctx.x IN PLACE (called between TSStep()s, mirroring the custom-RK4 renorm; the
+// kernel's Tr>0.5 guard touches only physical density matrices). Doing it via a manual TSStep loop
+// (not TSPostStep) is what makes the renorm feed back into the next step cleanly.
+inline void trace_renorm_solution_vec(Vec x, Index batch, Index D)
+{
+    PetscScalar* d_u = nullptr;
+    PetscCallAbort(PETSC_COMM_SELF, VecCUDAGetArray(x, &d_u));
+    launch_density_trace_renorm_kernel(static_cast<void*>(d_u), batch, D, nullptr);
+    PetscCallAbort(PETSC_COMM_SELF, VecCUDARestoreArray(x, &d_u));
+}
+#endif
+
 void evolve_batch_custom(
     CudaBatchExecutionContext& ctx,
     double t0,
@@ -365,7 +381,9 @@ void evolve_batch_custom(
     Index num_steps,
     CustomIntegrator kind,
     int expmv_order,
-    TcRhsFn rhs_fn = ts_rhs_function_cuda_full_model_liouvillian)
+    TcRhsFn rhs_fn = ts_rhs_function_cuda_full_model_liouvillian,
+    bool renorm_trace = false,   // fp32 open path: per-step per-density-matrix trace renormalization
+    Index renorm_D = 0)          // matrix dimension D (each state is a D×D density matrix)
 {
     Vec y = ctx.x;  // evolved in place
     Vec a = nullptr;
@@ -417,6 +435,22 @@ void evolve_batch_custom(
             }
             PetscCallAbort(PETSC_COMM_SELF, VecCopy(a, y));  // y = result
         }
+#ifdef CULINDBLAD_FP32
+        // fp32 stabilizer: after each step, renormalize each PHYSICAL density matrix (Tr~1) to Tr=1,
+        // cancelling the coherent single-precision trace drift. Off-diagonal channel inputs (Tr~0) are
+        // skipped by the kernel's (trace>0.5) guard. No-op / not compiled in the fp64 build. The kernel
+        // shares the default CUDA stream with the PETSc Vec ops, matching the RHS-kernel pattern.
+        if (renorm_trace && renorm_D > 0) {
+            PetscScalar* y_dev = nullptr;
+            PetscCallAbort(PETSC_COMM_SELF, VecCUDAGetArray(y, &y_dev));
+            launch_density_trace_renorm_kernel(
+                static_cast<void*>(y_dev), ctx.rhs_ctx.batch_size, renorm_D, nullptr);
+            PetscCallAbort(PETSC_COMM_SELF, VecCUDARestoreArray(y, &y_dev));
+        }
+#else
+        (void)renorm_trace;
+        (void)renorm_D;
+#endif
     }
 
     const auto wall1 = std::chrono::steady_clock::now();
@@ -482,7 +516,23 @@ std::vector<std::vector<Complex>> evolve_state_batch_cuda_ts(
         PetscCallAbort(PETSC_COMM_SELF, TSSetTimeStep(ctx.ts, dt_initial));
         PetscCallAbort(PETSC_COMM_SELF, TSSetMaxSteps(ctx.ts, static_cast<PetscInt>(num_steps)));
         PetscCallAbort(PETSC_COMM_SELF, TSSetMaxTime(ctx.ts, tfinal));
+#ifdef CULINDBLAD_FP32
+        // fp32 open: step manually so we trace-renormalize ctx.x IN PLACE after each step (feeding
+        // back into the next step), exactly as the custom RK4 does. (TSPostStep + TSGetSolution did NOT
+        // feed back cleanly -> corrupted the channel; a manual TSStep loop on the bound ctx.x does.)
+        PetscCallAbort(PETSC_COMM_SELF, TSSetSolution(ctx.ts, ctx.x));
+        PetscCallAbort(PETSC_COMM_SELF, TSSetUp(ctx.ts));
+        for (Index step = 0; step < num_steps; ++step) {
+            PetscCallAbort(PETSC_COMM_SELF, TSStep(ctx.ts));
+            trace_renorm_solution_vec(ctx.x, ctx.rhs_ctx.batch_size, solver.layout.hilbert_dim);
+        }
+        // NOTE: PETSc's TSRK4 is itself ~1e-3 inaccurate in fp32 for this open problem (verified vs the
+        // fp64 ground truth, WITHOUT renorm) -- ~600x worse than the custom RK4 (-tc_integrator 1). The
+        // per-step renorm above is applied correctly but cannot overcome that PETSc-TS fp32 error. Use
+        // the custom RK4 (-tc_integrator 1, ~3e-6) for accurate fp32 open runs; it is the default/anchor.
+#else
         PetscCallAbort(PETSC_COMM_SELF, TSSolve(ctx.ts, ctx.x));
+#endif
     } else {
         PetscInt expmv_order = 24;
         PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetInt(
@@ -491,7 +541,10 @@ std::vector<std::vector<Complex>> evolve_state_batch_cuda_ts(
             ctx, t0, tfinal, num_steps,
             (integrator == 1) ? CustomIntegrator::Rk4Custom
                               : CustomIntegrator::ExpmvMidpoint,
-            static_cast<int>(expmv_order));
+            static_cast<int>(expmv_order),
+            ts_rhs_function_cuda_full_model_liouvillian,
+            /*renorm_trace=*/true,                       // fp32 open: per-step trace renorm (no-op in fp64)
+            /*renorm_D=*/solver.layout.hilbert_dim);
     }
 
     PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
@@ -1193,7 +1246,7 @@ int run_psi_evolve_schrodinger_selftest()
         worst_norm = std::max(worst_norm, std::abs(n2 - 1.0));
         for (Index r = 0; r < D; ++r)
             for (Index c = 0; c < D; ++c)
-                worst = std::max(worst,
+                worst = std::max<double>(worst,
                     std::abs(rhoT[b][r * D + c] - psiT[b][r] * std::conj(psiT[b][c])));
     }
     const bool pass = (worst < 1.0e-3) && (worst_norm < 1.0e-4);

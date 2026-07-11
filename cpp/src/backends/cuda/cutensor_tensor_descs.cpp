@@ -45,7 +45,11 @@ bool create_cutensor_tensor_descs(
     }
 
     constexpr uint32_t alignment = 256;
+#ifdef CULINDBLAD_FP32
+    constexpr cutensorDataType_t data_type = CUTENSOR_C_32F;
+#else
     constexpr cutensorDataType_t data_type = CUTENSOR_C_64F;
+#endif
 
     const std::vector<int64_t> op_strides =
         make_row_major_strides(desc.operator_extents);

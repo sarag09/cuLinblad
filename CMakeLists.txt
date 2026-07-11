@@ -81,3 +81,14 @@ target_link_libraries(run_sim PRIVATE
     CUDA::cublas
     ${CUTENSOR_LIB}
 )
+
+# Single-precision (complex float) build. Default OFF = fp64. When ON, the solver's Complex/Real,
+# the cuTENSOR tensor/compute descriptors (32F), and the CUDA-kernel device complex type all switch
+# to single precision; run_sim MUST then be linked against a PETSc arch built --with-precision=single
+# --with-scalar-type=complex (PetscScalar = complex float). Build into a SEPARATE dir so the fp64
+# binary is untouched, e.g.:  cmake -DCULINDBLAD_FP32=ON -DPETSC_ARCH=arch-cuda-complex-single ...
+option(CULINDBLAD_FP32 "Build the solver in single precision (complex float)" OFF)
+if(CULINDBLAD_FP32)
+    target_compile_definitions(run_sim PRIVATE CULINDBLAD_FP32)
+    message(STATUS "cuLindblad: SINGLE-PRECISION (fp32) build enabled")
+endif()

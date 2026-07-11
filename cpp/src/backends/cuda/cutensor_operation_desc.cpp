@@ -30,7 +30,11 @@ bool create_cutensor_operation_desc(
         CUTENSOR_OP_IDENTITY,
         op_desc_bundle.tensor_descs.output_desc,
         desc.output_modes.data(),
+#ifdef CULINDBLAD_FP32
+        CUTENSOR_COMPUTE_DESC_32F);
+#else
         CUTENSOR_COMPUTE_DESC_64F);
+#endif
 
     if (op_status != CUTENSOR_STATUS_SUCCESS) {
         destroy_cutensor_tensor_descs(op_desc_bundle.tensor_descs);

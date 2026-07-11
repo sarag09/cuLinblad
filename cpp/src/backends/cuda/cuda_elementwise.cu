@@ -5,18 +5,19 @@
 #include <cuComplex.h>
 
 #include "culindblad/types.hpp"
+#include "culindblad/cuda_complex_compat.cuh"
 
 namespace culindblad {
 
 namespace {
 
-static_assert(sizeof(Complex) == sizeof(cuDoubleComplex),
-              "Complex must match cuDoubleComplex layout");
+static_assert(sizeof(Complex) == sizeof(DevComplex),
+              "Complex must match DevComplex layout");
 
 __global__ void commutator_combine_kernel(
-    const cuDoubleComplex* left,
-    const cuDoubleComplex* right,
-    cuDoubleComplex* out,
+    const DevComplex* left,
+    const DevComplex* right,
+    DevComplex* out,
     std::size_t n)
 {
     const std::size_t idx =
@@ -26,15 +27,15 @@ __global__ void commutator_combine_kernel(
         return;
     }
 
-    const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
-    out[idx] = cuCmul(minus_i, cuCsub(left[idx], right[idx]));
+    const DevComplex minus_i = dev_mkc(0.0, -1.0);
+    out[idx] = dev_mul(minus_i, dev_sub(left[idx], right[idx]));
 }
 
 __global__ void dissipator_combine_kernel(
-    const cuDoubleComplex* jump,
-    const cuDoubleComplex* left,
-    const cuDoubleComplex* right,
-    cuDoubleComplex* out,
+    const DevComplex* jump,
+    const DevComplex* left,
+    const DevComplex* right,
+    DevComplex* out,
     std::size_t n)
 {
     const std::size_t idx =
@@ -44,16 +45,16 @@ __global__ void dissipator_combine_kernel(
         return;
     }
 
-    const cuDoubleComplex half = make_cuDoubleComplex(0.5, 0.0);
-    out[idx] = cuCsub(
+    const DevComplex half = dev_mkc(0.5, 0.0);
+    out[idx] = dev_sub(
         jump[idx],
-        cuCmul(half, cuCadd(left[idx], right[idx])));
+        dev_mul(half, dev_add(left[idx], right[idx])));
 }
 
 __global__ void anti_commutator_combine_kernel(
-    const cuDoubleComplex* left,
-    const cuDoubleComplex* right,
-    cuDoubleComplex* out,
+    const DevComplex* left,
+    const DevComplex* right,
+    DevComplex* out,
     std::size_t n)
 {
     const std::size_t idx =
@@ -63,17 +64,17 @@ __global__ void anti_commutator_combine_kernel(
         return;
     }
 
-    const cuDoubleComplex minus_half = make_cuDoubleComplex(-0.5, 0.0);
-    out[idx] = cuCmul(minus_half, cuCadd(left[idx], right[idx]));
+    const DevComplex minus_half = dev_mkc(-0.5, 0.0);
+    out[idx] = dev_mul(minus_half, dev_add(left[idx], right[idx]));
 }
 
 __global__ void batched_grouped_sparse_commutator_kernel(
-    const cuDoubleComplex* sparse_values,
+    const DevComplex* sparse_values,
     const Index* sparse_rows,
     const Index* sparse_cols,
     Index sparse_nnz,
-    const cuDoubleComplex* grouped_input,
-    cuDoubleComplex* grouped_output,
+    const DevComplex* grouped_input,
+    DevComplex* grouped_output,
     Index target_hilbert_dim,
     Index complement_dim,
     Index batch_size)
@@ -106,8 +107,8 @@ __global__ void batched_grouped_sparse_commutator_kernel(
     local_idx /= complement_dim;
     const Index ket_target_out = static_cast<Index>(local_idx);
 
-    cuDoubleComplex left_sum = make_cuDoubleComplex(0.0, 0.0);
-    cuDoubleComplex right_sum = make_cuDoubleComplex(0.0, 0.0);
+    DevComplex left_sum = dev_mkc(0.0, 0.0);
+    DevComplex right_sum = dev_mkc(0.0, 0.0);
 
     const std::size_t batch_offset = (idx / grouped_size) * grouped_size;
     const std::size_t left_base =
@@ -129,30 +130,30 @@ __global__ void batched_grouped_sparse_commutator_kernel(
     for (Index nz = 0; nz < sparse_nnz; ++nz) {
         const Index row = sparse_rows[nz];
         const Index col = sparse_cols[nz];
-        const cuDoubleComplex value = sparse_values[nz];
+        const DevComplex value = sparse_values[nz];
 
         if (row == ket_target_out) {
-            left_sum = cuCadd(
+            left_sum = dev_add(
                 left_sum,
-                cuCmul(
+                dev_mul(
                     value,
                     grouped_input[left_base + static_cast<std::size_t>(col) * left_stride]));
         }
 
         if (col == bra_target_out) {
-            right_sum = cuCadd(
+            right_sum = dev_add(
                 right_sum,
-                cuCmul(
+                dev_mul(
                     grouped_input[right_base + static_cast<std::size_t>(row) * right_stride],
                     value));
         }
     }
 
-    const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
+    const DevComplex minus_i = dev_mkc(0.0, -1.0);
     // The commutator is the first term applied on every layer and writes every output
     // element, so it OVERWRITES the accumulator (the per-layer zeroing is skipped in the
     // RHS whenever a commutator is present). 0 += X is identical to = X, so bit-for-bit.
-    grouped_output[idx] = cuCmul(minus_i, cuCsub(left_sum, right_sum));
+    grouped_output[idx] = dev_mul(minus_i, dev_sub(left_sum, right_sum));
 }
 
 } // namespace
@@ -169,9 +170,9 @@ bool launch_commutator_combine_kernel(
         static_cast<int>((num_elements + block_size - 1) / block_size);
 
     commutator_combine_kernel<<<grid_size, block_size, 0, stream>>>(
-        reinterpret_cast<const cuDoubleComplex*>(d_left),
-        reinterpret_cast<const cuDoubleComplex*>(d_right),
-        reinterpret_cast<cuDoubleComplex*>(d_out),
+        reinterpret_cast<const DevComplex*>(d_left),
+        reinterpret_cast<const DevComplex*>(d_right),
+        reinterpret_cast<DevComplex*>(d_out),
         num_elements);
 
     return cudaGetLastError() == cudaSuccess;
@@ -190,10 +191,10 @@ bool launch_dissipator_combine_kernel(
         static_cast<int>((num_elements + block_size - 1) / block_size);
 
     dissipator_combine_kernel<<<grid_size, block_size, 0, stream>>>(
-        reinterpret_cast<const cuDoubleComplex*>(d_jump),
-        reinterpret_cast<const cuDoubleComplex*>(d_left),
-        reinterpret_cast<const cuDoubleComplex*>(d_right),
-        reinterpret_cast<cuDoubleComplex*>(d_out),
+        reinterpret_cast<const DevComplex*>(d_jump),
+        reinterpret_cast<const DevComplex*>(d_left),
+        reinterpret_cast<const DevComplex*>(d_right),
+        reinterpret_cast<DevComplex*>(d_out),
         num_elements);
 
     return cudaGetLastError() == cudaSuccess;
@@ -211,9 +212,9 @@ bool launch_anti_commutator_combine_kernel(
         static_cast<int>((num_elements + block_size - 1) / block_size);
 
     anti_commutator_combine_kernel<<<grid_size, block_size, 0, stream>>>(
-        reinterpret_cast<const cuDoubleComplex*>(d_left),
-        reinterpret_cast<const cuDoubleComplex*>(d_right),
-        reinterpret_cast<cuDoubleComplex*>(d_out),
+        reinterpret_cast<const DevComplex*>(d_left),
+        reinterpret_cast<const DevComplex*>(d_right),
+        reinterpret_cast<DevComplex*>(d_out),
         num_elements);
 
     return cudaGetLastError() == cudaSuccess;
@@ -248,12 +249,12 @@ bool launch_batched_grouped_sparse_commutator_kernel(
         static_cast<int>((total_elements + threads_per_block - 1) / threads_per_block);
 
     batched_grouped_sparse_commutator_kernel<<<blocks, threads_per_block, 0, stream>>>(
-        static_cast<const cuDoubleComplex*>(sparse_values),
+        static_cast<const DevComplex*>(sparse_values),
         sparse_rows,
         sparse_cols,
         sparse_nnz,
-        static_cast<const cuDoubleComplex*>(grouped_input),
-        static_cast<cuDoubleComplex*>(grouped_output),
+        static_cast<const DevComplex*>(grouped_input),
+        static_cast<DevComplex*>(grouped_output),
         target_hilbert_dim,
         complement_dim,
         batch_size);
@@ -274,13 +275,13 @@ __global__ void vector_add_kernel(
         return;
     }
 
-    const cuDoubleComplex a_val =
-        reinterpret_cast<const cuDoubleComplex*>(a)[idx];
-    const cuDoubleComplex b_val =
-        reinterpret_cast<const cuDoubleComplex*>(b)[idx];
+    const DevComplex a_val =
+        reinterpret_cast<const DevComplex*>(a)[idx];
+    const DevComplex b_val =
+        reinterpret_cast<const DevComplex*>(b)[idx];
 
-    reinterpret_cast<cuDoubleComplex*>(out)[idx] =
-        cuCadd(a_val, b_val);
+    reinterpret_cast<DevComplex*>(out)[idx] =
+        dev_add(a_val, b_val);
 }
 
 bool launch_vector_add_kernel(
@@ -315,13 +316,13 @@ __global__ void vector_accumulate_kernel(
         return;
     }
 
-    const cuDoubleComplex src_val =
-        reinterpret_cast<const cuDoubleComplex*>(src)[idx];
-    const cuDoubleComplex dst_val =
-        reinterpret_cast<const cuDoubleComplex*>(dst)[idx];
+    const DevComplex src_val =
+        reinterpret_cast<const DevComplex*>(src)[idx];
+    const DevComplex dst_val =
+        reinterpret_cast<const DevComplex*>(dst)[idx];
 
-    reinterpret_cast<cuDoubleComplex*>(dst)[idx] =
-        cuCadd(dst_val, src_val);
+    reinterpret_cast<DevComplex*>(dst)[idx] =
+        dev_add(dst_val, src_val);
 }
 
 bool launch_vector_accumulate_kernel(
@@ -355,13 +356,13 @@ __global__ void vector_scale_kernel(
         return;
     }
 
-    const cuDoubleComplex in_val =
-        reinterpret_cast<const cuDoubleComplex*>(in)[idx];
-    const cuDoubleComplex s =
-        make_cuDoubleComplex(scale, 0.0);
+    const DevComplex in_val =
+        reinterpret_cast<const DevComplex*>(in)[idx];
+    const DevComplex s =
+        dev_mkc(scale, 0.0);
 
-    reinterpret_cast<cuDoubleComplex*>(out)[idx] =
-        cuCmul(s, in_val);
+    reinterpret_cast<DevComplex*>(out)[idx] =
+        dev_mul(s, in_val);
 }
 
 bool launch_vector_scale_kernel(
@@ -397,15 +398,15 @@ __global__ void vector_scaled_accumulate_kernel(
         return;
     }
 
-    const cuDoubleComplex src_val =
-        reinterpret_cast<const cuDoubleComplex*>(src)[idx];
-    const cuDoubleComplex dst_val =
-        reinterpret_cast<const cuDoubleComplex*>(dst)[idx];
-    const cuDoubleComplex s =
-        make_cuDoubleComplex(scale, 0.0);
+    const DevComplex src_val =
+        reinterpret_cast<const DevComplex*>(src)[idx];
+    const DevComplex dst_val =
+        reinterpret_cast<const DevComplex*>(dst)[idx];
+    const DevComplex s =
+        dev_mkc(scale, 0.0);
 
-    reinterpret_cast<cuDoubleComplex*>(dst)[idx] =
-        cuCadd(dst_val, cuCmul(s, src_val));
+    reinterpret_cast<DevComplex*>(dst)[idx] =
+        dev_add(dst_val, dev_mul(s, src_val));
 }
 
 bool launch_vector_scaled_accumulate_kernel(
@@ -429,14 +430,14 @@ bool launch_vector_scaled_accumulate_kernel(
 }
 
 __global__ void zero_batched_buffer_kernel(
-    cuDoubleComplex* buffer,
+    DevComplex* buffer,
     std::size_t total_elements)
 {
     const std::size_t idx =
         static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
 
     if (idx < total_elements) {
-        buffer[idx] = make_cuDoubleComplex(0.0, 0.0);
+        buffer[idx] = dev_mkc(0.0, 0.0);
     }
 }
 
@@ -454,16 +455,16 @@ bool launch_zero_batched_buffer_kernel(
         static_cast<int>((total_elements + threads_per_block - 1) / threads_per_block);
 
     zero_batched_buffer_kernel<<<blocks, threads_per_block, 0, stream>>>(
-        static_cast<cuDoubleComplex*>(buffer),
+        static_cast<DevComplex*>(buffer),
         static_cast<std::size_t>(total_elements));
 
     return cudaGetLastError() == cudaSuccess;
 }
 
 __global__ void batched_grouped_left_diagonal_kernel(
-    const cuDoubleComplex* diagonal_op,
-    const cuDoubleComplex* grouped_input,
-    cuDoubleComplex* grouped_output,
+    const DevComplex* diagonal_op,
+    const DevComplex* grouped_input,
+    DevComplex* grouped_output,
     std::size_t target_hilbert_dim,
     std::size_t complement_dim,
     std::size_t batch_size)
@@ -496,16 +497,16 @@ __global__ void batched_grouped_left_diagonal_kernel(
     (void)bra_target;
     (void)ket_comp;
 
-    const cuDoubleComplex op_val = diagonal_op[ket_target];
-    const cuDoubleComplex rho_val = grouped_input[idx];
+    const DevComplex op_val = diagonal_op[ket_target];
+    const DevComplex rho_val = grouped_input[idx];
 
-    grouped_output[idx] = cuCmul(op_val, rho_val);
+    grouped_output[idx] = dev_mul(op_val, rho_val);
 }
 
 __global__ void batched_grouped_diagonal_dissipator_jump_kernel(
-    const cuDoubleComplex* diagonal_op,
-    const cuDoubleComplex* grouped_input,
-    cuDoubleComplex* grouped_output,
+    const DevComplex* diagonal_op,
+    const DevComplex* grouped_input,
+    DevComplex* grouped_output,
     std::size_t target_hilbert_dim,
     std::size_t complement_dim,
     std::size_t batch_size)
@@ -537,19 +538,19 @@ __global__ void batched_grouped_diagonal_dissipator_jump_kernel(
     (void)bra_comp;
     (void)ket_comp;
 
-    const cuDoubleComplex ket_factor = diagonal_op[ket_target];
-    const cuDoubleComplex bra_factor = cuConj(diagonal_op[bra_target]);
-    const cuDoubleComplex rho_val = grouped_input[idx];
+    const DevComplex ket_factor = diagonal_op[ket_target];
+    const DevComplex bra_factor = dev_conj(diagonal_op[bra_target]);
+    const DevComplex rho_val = grouped_input[idx];
 
-    grouped_output[idx] = cuCadd(
+    grouped_output[idx] = dev_add(
         grouped_output[idx],
-        cuCmul(cuCmul(ket_factor, rho_val), bra_factor));
+        dev_mul(dev_mul(ket_factor, rho_val), bra_factor));
 }
 
 __global__ void batched_grouped_diagonal_commutator_kernel(
-    const cuDoubleComplex* diagonal_op,
-    const cuDoubleComplex* grouped_input,
-    cuDoubleComplex* grouped_output,
+    const DevComplex* diagonal_op,
+    const DevComplex* grouped_input,
+    DevComplex* grouped_output,
     std::size_t target_hilbert_dim,
     std::size_t complement_dim,
     std::size_t batch_size)
@@ -581,16 +582,16 @@ __global__ void batched_grouped_diagonal_commutator_kernel(
     (void)bra_comp;
     (void)ket_comp;
 
-    const cuDoubleComplex ket_factor = diagonal_op[ket_target];
-    const cuDoubleComplex bra_factor = diagonal_op[bra_target];
-    const cuDoubleComplex rho_val = grouped_input[idx];
-    const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
+    const DevComplex ket_factor = diagonal_op[ket_target];
+    const DevComplex bra_factor = diagonal_op[bra_target];
+    const DevComplex rho_val = grouped_input[idx];
+    const DevComplex minus_i = dev_mkc(0.0, -1.0);
 
     // Commutator overwrites the accumulator (first term per layer; zero skipped in the RHS).
-    grouped_output[idx] = cuCmul(
+    grouped_output[idx] = dev_mul(
         minus_i,
-        cuCmul(
-            cuCsub(ket_factor, bra_factor),
+        dev_mul(
+            dev_sub(ket_factor, bra_factor),
             rho_val));
 }
 
@@ -598,9 +599,9 @@ __global__ void batched_grouped_diagonal_commutator_kernel(
 // (-1/2){D,rho}_rc = -1/2 (D_r + D_c) rho_rc. Drop-in for the general cuTENSOR
 // anti-commutator (same -1/2 (left+right) convention as anti_commutator_combine_kernel).
 __global__ void batched_grouped_diagonal_anti_commutator_kernel(
-    const cuDoubleComplex* diagonal_op,
-    const cuDoubleComplex* grouped_input,
-    cuDoubleComplex* grouped_output,
+    const DevComplex* diagonal_op,
+    const DevComplex* grouped_input,
+    DevComplex* grouped_output,
     std::size_t target_hilbert_dim,
     std::size_t complement_dim,
     std::size_t batch_size)
@@ -632,17 +633,17 @@ __global__ void batched_grouped_diagonal_anti_commutator_kernel(
     (void)bra_comp;
     (void)ket_comp;
 
-    const cuDoubleComplex ket_factor = diagonal_op[ket_target];
-    const cuDoubleComplex bra_factor = diagonal_op[bra_target];
-    const cuDoubleComplex rho_val = grouped_input[idx];
-    const cuDoubleComplex minus_half = make_cuDoubleComplex(-0.5, 0.0);
+    const DevComplex ket_factor = diagonal_op[ket_target];
+    const DevComplex bra_factor = diagonal_op[bra_target];
+    const DevComplex rho_val = grouped_input[idx];
+    const DevComplex minus_half = dev_mkc(-0.5, 0.0);
 
-    grouped_output[idx] = cuCadd(
+    grouped_output[idx] = dev_add(
         grouped_output[idx],
-        cuCmul(
+        dev_mul(
             minus_half,
-            cuCmul(
-                cuCadd(ket_factor, bra_factor),
+            dev_mul(
+                dev_add(ket_factor, bra_factor),
                 rho_val)));
 }
 
@@ -652,9 +653,9 @@ __global__ void batched_grouped_diagonal_anti_commutator_kernel(
 // The complement indices (ic, jc) pass through unchanged. Drop-in for the general
 // cuTENSOR jump path; cheap when target_hilbert_dim is small (single-site qutrit = 3).
 __global__ void batched_grouped_dense_jump_kernel(
-    const cuDoubleComplex* l_op,
-    const cuDoubleComplex* grouped_input,
-    cuDoubleComplex* grouped_output,
+    const DevComplex* l_op,
+    const DevComplex* grouped_input,
+    DevComplex* grouped_output,
     std::size_t target_hilbert_dim,
     std::size_t complement_dim,
     std::size_t batch_size)
@@ -685,15 +686,15 @@ __global__ void batched_grouped_dense_jump_kernel(
     const std::size_t ket_target = tmp1 / complement_dim;
 
     const std::size_t base = batch_idx * per_state_size;
-    cuDoubleComplex acc = make_cuDoubleComplex(0.0, 0.0);
+    DevComplex acc = dev_mkc(0.0, 0.0);
 
     for (std::size_t k = 0; k < target_hilbert_dim; ++k) {
-        const cuDoubleComplex l_ik = l_op[ket_target * target_hilbert_dim + k];
+        const DevComplex l_ik = l_op[ket_target * target_hilbert_dim + k];
         if (l_ik.x == 0.0 && l_ik.y == 0.0) {
             continue;
         }
         for (std::size_t l = 0; l < target_hilbert_dim; ++l) {
-            const cuDoubleComplex l_jl = l_op[bra_target * target_hilbert_dim + l];
+            const DevComplex l_jl = l_op[bra_target * target_hilbert_dim + l];
             if (l_jl.x == 0.0 && l_jl.y == 0.0) {
                 continue;
             }
@@ -701,13 +702,13 @@ __global__ void batched_grouped_dense_jump_kernel(
                 base +
                 ((k * complement_dim + ket_comp) * target_hilbert_dim + l) * complement_dim +
                 bra_comp;
-            acc = cuCadd(
+            acc = dev_add(
                 acc,
-                cuCmul(cuCmul(l_ik, grouped_input[rho_idx]), cuConj(l_jl)));
+                dev_mul(dev_mul(l_ik, grouped_input[rho_idx]), dev_conj(l_jl)));
         }
     }
 
-    grouped_output[idx] = cuCadd(grouped_output[idx], acc);
+    grouped_output[idx] = dev_add(grouped_output[idx], acc);
 }
 
 // Fused single-site DIAGONAL Liouvillian: combines the commutator, the anti-commutator,
@@ -717,11 +718,11 @@ __global__ void batched_grouped_dense_jump_kernel(
 // applying the three diagonal kernels in sequence (only the float summation order differs,
 // so rounding-level not bit-identical). The non-diagonal relaxation jump is applied after.
 __global__ void batched_grouped_fused_diagonal_kernel(
-    const cuDoubleComplex* h_diag,
-    const cuDoubleComplex* norm_diag,
-    const cuDoubleComplex* jump_diag,
-    const cuDoubleComplex* grouped_input,
-    cuDoubleComplex* grouped_output,
+    const DevComplex* h_diag,
+    const DevComplex* norm_diag,
+    const DevComplex* jump_diag,
+    const DevComplex* grouped_input,
+    DevComplex* grouped_output,
     std::size_t target_hilbert_dim,
     std::size_t complement_dim,
     std::size_t batch_size)
@@ -744,25 +745,25 @@ __global__ void batched_grouped_fused_diagonal_kernel(
     (void)bra_comp;
     (void)ket_comp;
 
-    cuDoubleComplex factor = make_cuDoubleComplex(0.0, 0.0);
+    DevComplex factor = dev_mkc(0.0, 0.0);
     if (h_diag != nullptr) {
-        const cuDoubleComplex minus_i = make_cuDoubleComplex(0.0, -1.0);
-        factor = cuCadd(
+        const DevComplex minus_i = dev_mkc(0.0, -1.0);
+        factor = dev_add(
             factor,
-            cuCmul(minus_i, cuCsub(h_diag[ket_target], h_diag[bra_target])));
+            dev_mul(minus_i, dev_sub(h_diag[ket_target], h_diag[bra_target])));
     }
     if (norm_diag != nullptr) {
-        const cuDoubleComplex minus_half = make_cuDoubleComplex(-0.5, 0.0);
-        factor = cuCadd(
+        const DevComplex minus_half = dev_mkc(-0.5, 0.0);
+        factor = dev_add(
             factor,
-            cuCmul(minus_half, cuCadd(norm_diag[ket_target], norm_diag[bra_target])));
+            dev_mul(minus_half, dev_add(norm_diag[ket_target], norm_diag[bra_target])));
     }
     if (jump_diag != nullptr) {
-        factor = cuCadd(
+        factor = dev_add(
             factor,
-            cuCmul(jump_diag[ket_target], cuConj(jump_diag[bra_target])));
+            dev_mul(jump_diag[ket_target], dev_conj(jump_diag[bra_target])));
     }
-    grouped_output[idx] = cuCmul(factor, grouped_input[idx]);
+    grouped_output[idx] = dev_mul(factor, grouped_input[idx]);
 }
 
 bool launch_batched_grouped_fused_diagonal_kernel(
@@ -791,11 +792,11 @@ bool launch_batched_grouped_fused_diagonal_kernel(
     const int blocks =
         static_cast<int>((total_elements + threads_per_block - 1) / threads_per_block);
     batched_grouped_fused_diagonal_kernel<<<blocks, threads_per_block, 0, stream>>>(
-        static_cast<const cuDoubleComplex*>(h_diag),
-        static_cast<const cuDoubleComplex*>(norm_diag),
-        static_cast<const cuDoubleComplex*>(jump_diag),
-        static_cast<const cuDoubleComplex*>(grouped_input),
-        static_cast<cuDoubleComplex*>(grouped_output),
+        static_cast<const DevComplex*>(h_diag),
+        static_cast<const DevComplex*>(norm_diag),
+        static_cast<const DevComplex*>(jump_diag),
+        static_cast<const DevComplex*>(grouped_input),
+        static_cast<DevComplex*>(grouped_output),
         target_hilbert_dim,
         complement_dim,
         batch_size);
@@ -829,9 +830,9 @@ bool launch_batched_grouped_left_diagonal_kernel(
         static_cast<int>((total_elements + threads_per_block - 1) / threads_per_block);
 
     batched_grouped_left_diagonal_kernel<<<blocks, threads_per_block, 0, stream>>>(
-        static_cast<const cuDoubleComplex*>(diagonal_op),
-        static_cast<const cuDoubleComplex*>(grouped_input),
-        static_cast<cuDoubleComplex*>(grouped_output),
+        static_cast<const DevComplex*>(diagonal_op),
+        static_cast<const DevComplex*>(grouped_input),
+        static_cast<DevComplex*>(grouped_output),
         static_cast<std::size_t>(target_hilbert_dim),
         static_cast<std::size_t>(complement_dim),
         static_cast<std::size_t>(batch_size));
@@ -866,9 +867,9 @@ bool launch_batched_grouped_diagonal_dissipator_jump_kernel(
         static_cast<int>((total_elements + threads_per_block - 1) / threads_per_block);
 
     batched_grouped_diagonal_dissipator_jump_kernel<<<blocks, threads_per_block, 0, stream>>>(
-        static_cast<const cuDoubleComplex*>(diagonal_op),
-        static_cast<const cuDoubleComplex*>(grouped_input),
-        static_cast<cuDoubleComplex*>(grouped_output),
+        static_cast<const DevComplex*>(diagonal_op),
+        static_cast<const DevComplex*>(grouped_input),
+        static_cast<DevComplex*>(grouped_output),
         static_cast<std::size_t>(target_hilbert_dim),
         static_cast<std::size_t>(complement_dim),
         static_cast<std::size_t>(batch_size));
@@ -903,9 +904,9 @@ bool launch_batched_grouped_diagonal_commutator_kernel(
         static_cast<int>((total_elements + threads_per_block - 1) / threads_per_block);
 
     batched_grouped_diagonal_commutator_kernel<<<blocks, threads_per_block, 0, stream>>>(
-        static_cast<const cuDoubleComplex*>(diagonal_op),
-        static_cast<const cuDoubleComplex*>(grouped_input),
-        static_cast<cuDoubleComplex*>(grouped_output),
+        static_cast<const DevComplex*>(diagonal_op),
+        static_cast<const DevComplex*>(grouped_input),
+        static_cast<DevComplex*>(grouped_output),
         static_cast<std::size_t>(target_hilbert_dim),
         static_cast<std::size_t>(complement_dim),
         static_cast<std::size_t>(batch_size));
@@ -940,9 +941,9 @@ bool launch_batched_grouped_diagonal_anti_commutator_kernel(
         static_cast<int>((total_elements + threads_per_block - 1) / threads_per_block);
 
     batched_grouped_diagonal_anti_commutator_kernel<<<blocks, threads_per_block, 0, stream>>>(
-        static_cast<const cuDoubleComplex*>(diagonal_op),
-        static_cast<const cuDoubleComplex*>(grouped_input),
-        static_cast<cuDoubleComplex*>(grouped_output),
+        static_cast<const DevComplex*>(diagonal_op),
+        static_cast<const DevComplex*>(grouped_input),
+        static_cast<DevComplex*>(grouped_output),
         static_cast<std::size_t>(target_hilbert_dim),
         static_cast<std::size_t>(complement_dim),
         static_cast<std::size_t>(batch_size));
@@ -977,13 +978,70 @@ bool launch_batched_grouped_dense_jump_kernel(
         static_cast<int>((total_elements + threads_per_block - 1) / threads_per_block);
 
     batched_grouped_dense_jump_kernel<<<blocks, threads_per_block, 0, stream>>>(
-        static_cast<const cuDoubleComplex*>(l_op),
-        static_cast<const cuDoubleComplex*>(grouped_input),
-        static_cast<cuDoubleComplex*>(grouped_output),
+        static_cast<const DevComplex*>(l_op),
+        static_cast<const DevComplex*>(grouped_input),
+        static_cast<DevComplex*>(grouped_output),
         static_cast<std::size_t>(target_hilbert_dim),
         static_cast<std::size_t>(complement_dim),
         static_cast<std::size_t>(batch_size));
 
+    return cudaGetLastError() == cudaSuccess;
+}
+
+// ---------------------------------------------------------------------------
+// fp32 open-system stabilizer: per-density-matrix TRACE RENORMALIZATION.
+// After each RK4 step, physical density matrices (Re Tr ~ 1) are rescaled rho <- rho / Re(Tr rho) to
+// cancel the coherent fp32 trace drift (the dominant single-precision open error). The dressed channel
+// basis also carries OFF-DIAGONAL inputs |D_a><D_b| (a!=b) whose trace is ~0 and must NOT be rescaled;
+// the (trace > 0.5) guard renormalizes ONLY the trace~1 physical matrices (matches the Julia
+// characterization's `renorm && a==b`). Trace summed in double for accuracy. One block per matrix.
+__global__ void density_trace_renorm_kernel(
+    culindblad::Complex* state,
+    culindblad::Index batch,
+    culindblad::Index D)
+{
+    const culindblad::Index b = static_cast<culindblad::Index>(blockIdx.x);
+    if (b >= batch) {
+        return;
+    }
+    DevComplex* rho = reinterpret_cast<DevComplex*>(state) + b * D * D;
+
+    __shared__ double sdata[256];
+    double partial = 0.0;
+    for (culindblad::Index i = threadIdx.x; i < D; i += blockDim.x) {
+        partial += static_cast<double>(rho[i * D + i].x);   // real part of the diagonal
+    }
+    sdata[threadIdx.x] = partial;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (static_cast<int>(threadIdx.x) < s) {
+            sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+    const double trace = sdata[0];
+    if (trace <= 0.5) {
+        return;   // off-diagonal channel input (Tr ~ 0) or degenerate -> leave unchanged
+    }
+    const double inv = 1.0 / trace;
+    for (culindblad::Index idx = threadIdx.x; idx < D * D; idx += blockDim.x) {
+        rho[idx].x *= inv;
+        rho[idx].y *= inv;
+    }
+}
+
+bool launch_density_trace_renorm_kernel(
+    void* d_state,
+    Index batch,
+    Index D,
+    cudaStream_t stream)
+{
+    if (batch == 0 || D == 0) {
+        return true;
+    }
+    constexpr int block_size = 256;   // matches sdata[256]
+    density_trace_renorm_kernel<<<static_cast<int>(batch), block_size, 0, stream>>>(
+        reinterpret_cast<Complex*>(d_state), batch, D);
     return cudaGetLastError() == cudaSuccess;
 }
 
