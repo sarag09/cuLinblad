@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "culindblad/model.hpp"
@@ -108,11 +109,32 @@ TransmonChainBenchmarkTiming evolve_loaded_model_schrodinger(
     const Model& model, const std::vector<Index>& selected_indices,
     const std::vector<std::vector<Complex>>& explicit_states,
     double t0, double tfinal, int num_steps);
+// Checkpoint/restart config for the long OPEN (Liouvillian) custom-RK4 runs (-tc_integrator 1). When
+// `every > 0` and `path` is set, evolve_batch_custom snapshots the batched density state to `path`
+// (atomically) every `every` steps; on (re)start evolve_loaded_model_liouvillian AUTO-RESUMES from
+// `path` if a checkpoint is present (a strict header guard hard-aborts on ANY config mismatch --
+// dtype, shape, shard identity, step window -- so a wrong checkpoint can never corrupt the anchor).
+// Same command both writes and resumes: absent file -> fresh start; present+valid -> resume. Disabled
+// by default (every == 0), so all non-checkpointed callers are unaffected.
+struct BatchCheckpoint {
+    Index       every = 0;        // write cadence in RK4 steps; 0 disables checkpointing
+    std::string path;             // per-rank checkpoint file, e.g. <dir>/<tag>_rank<r>.ckpt
+    int         shard_index = 0;  // MPI rank  (guarded on resume)
+    int         shard_total = 1;  // MPI size  (guarded on resume)
+    // Runtime shape/window, filled by evolve_loaded_model_liouvillian before use (guard fields):
+    Index       hilbert_dim = 0;  // D
+    Index       batch = 0;        // density matrices in this rank's shard
+    Index       total_steps = 0;  // num_steps this checkpoint belongs to
+    double      t0 = 0.0;
+    double      tfinal = 0.0;
+};
+
 TransmonChainBenchmarkTiming evolve_loaded_model_liouvillian(
     const Model& model, const std::vector<Index>& selected_density_indices,
     const std::vector<std::vector<Complex>>& explicit_kets,
     const std::vector<std::vector<Complex>>& explicit_density_states,
-    double t0, double tfinal, int num_steps);
+    double t0, double tfinal, int num_steps,
+    const BatchCheckpoint* ckpt = nullptr);
 
 Model build_tunable_coupler_model(const TunableCouplerBenchmarkConfig& config);
 

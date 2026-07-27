@@ -74,6 +74,21 @@ target_include_directories(run_sim PRIVATE
     cpp/third_party
 )
 
+# cuTENSOR headers (cutensor.h). The solver links CUTENSOR_LIB but the matching include dir was never
+# declared here -- it used to be supplied via an environment include path that the paper cleanup of
+# setup_env.sh dropped, and the $CUDA_MERGED/include/cutensor.h symlink can dangle per-node. Declare a
+# real cuTENSOR include dir explicitly so the build is self-contained. Prefer $CUTENSOR_ROOT/include
+# (a real header, no stray mpi.h to shadow the MPICH one PETSc needs); fall back to $CUDA_MERGED/include.
+if(DEFINED ENV{CUTENSOR_ROOT} AND EXISTS "$ENV{CUTENSOR_ROOT}/include/cutensor.h")
+    target_include_directories(run_sim PRIVATE "$ENV{CUTENSOR_ROOT}/include")
+    message(STATUS "cuLindblad: cuTENSOR include = $ENV{CUTENSOR_ROOT}/include")
+elseif(DEFINED ENV{CUDA_MERGED} AND EXISTS "$ENV{CUDA_MERGED}/include/cutensor.h")
+    target_include_directories(run_sim PRIVATE "$ENV{CUDA_MERGED}/include")
+    message(STATUS "cuLindblad: cuTENSOR include = $ENV{CUDA_MERGED}/include")
+else()
+    message(WARNING "cuLindblad: no cutensor.h found via CUTENSOR_ROOT/CUDA_MERGED; build may fail")
+endif()
+
 target_link_libraries(run_sim PRIVATE
     PkgConfig::PETSC
     MPI::MPI_CXX

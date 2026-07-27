@@ -60,3 +60,19 @@ __pycache__/
 /propcheck/*_dp_*.txt
 /propcheck/dp_steps*.txt
 /propcheck/mpishard_*.txt
+
+# Editor / agent local state
+/.claude/
+/.bash_history
+
+# Checkpoint-validation + cluster-job scratch: logs/results are regenerated per run
+# (the .sub / .sh validation harnesses themselves ARE tracked).
+/ckpt_val/
+/ckpt_validation_results.txt
+/ckpt_val_build.log
+/ckpt_validate.log
+/ckpt_validate.out
+/ckpt_validate.err
+/open_iswap_*.log
+/open_iswap_*.out
+/open_iswap_*.err

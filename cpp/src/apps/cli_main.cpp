@@ -1100,7 +1100,8 @@ void dump_loaded_model_channel(std::ostream& out, const culindblad::LoadedModel&
 // -load_model <json> [-results_out <path>]: deserialize a Julia-exported term-list model, evolve the
 // computational basis in the LAB frame (closed |psi> or open rho per the "system" field), and dump.
 int run_loaded_model(const std::string& model_path, const std::string& results_path,
-                     int mpi_rank, int mpi_size, const std::string& tag) {
+                     int mpi_rank, int mpi_size, const std::string& tag,
+                     int ckpt_every, const std::string& ckpt_dir) {
     using namespace culindblad;
     try {
         const LoadedModel lm = load_model_from_json(model_path);
@@ -1192,9 +1193,23 @@ int run_loaded_model(const std::string& model_path, const std::string& results_p
                           : use_explicit ? states_slice.size() : idx.size())
                       << " state(s)" << std::endl;
 
+        // Checkpoint/restart (open anchor only): every `ckpt_every` steps each rank snapshots its
+        // density-matrix shard to <ckpt_dir>/<tag>_rank<r>.ckpt (atomic); a (re)start auto-resumes from
+        // it if present. Same submit command creates and resumes -> survives Condor holds/NFS blips.
+        BatchCheckpoint ckpt;
+        const bool ckpt_on = (ckpt_every > 0) && !ckpt_dir.empty() && lm.is_open;
+        if (ckpt_on) {
+            std::error_code ck_ec;
+            std::filesystem::create_directories(ckpt_dir, ck_ec);
+            ckpt.every       = static_cast<Index>(ckpt_every);
+            ckpt.path        = ckpt_dir + "/" + tag + "_rank" + std::to_string(mpi_rank) + ".ckpt";
+            ckpt.shard_index = mpi_rank;
+            ckpt.shard_total = mpi_size;
+        }
         if (lm.is_open) {
             const TransmonChainBenchmarkTiming timing = evolve_loaded_model_liouvillian(
-                lm.model, idx, states_slice, density_slice, lm.evolution.t0, lm.evolution.tfinal, num_steps);
+                lm.model, idx, states_slice, density_slice, lm.evolution.t0, lm.evolution.tfinal,
+                num_steps, ckpt_on ? &ckpt : nullptr);
             std::cerr << "[load_model] evolution wall_seconds=" << timing.wall_seconds
                       << " (states=" << timing.final_states.size() << ", steps=" << num_steps << ")"
                       << std::endl;
@@ -1517,10 +1532,19 @@ int main(int argc, char** argv)
         char lm_tag_buf[128] = "loadmodel_shard";
         PetscOptionsGetString(nullptr, nullptr, "-dump_tag",
                               lm_tag_buf, sizeof(lm_tag_buf), nullptr);
+        // Checkpoint/restart for long open runs: -tc_checkpoint_every N (steps) + -tc_checkpoint_dir DIR.
+        // Absent -> no checkpointing (unchanged behavior). Present -> per-rank <DIR>/<tag>_rank<r>.ckpt,
+        // auto-resumed on (re)start. See BatchCheckpoint / evolve_loaded_model_liouvillian.
+        PetscInt lm_ckpt_every = 0;
+        PetscOptionsGetInt(nullptr, nullptr, "-tc_checkpoint_every", &lm_ckpt_every, nullptr);
+        char lm_ckpt_dir_buf[1024] = {};
+        PetscOptionsGetString(nullptr, nullptr, "-tc_checkpoint_dir",
+                              lm_ckpt_dir_buf, sizeof(lm_ckpt_dir_buf), nullptr);
         const int rc = run_loaded_model(
             std::string(model_path_buf),
             results_set == PETSC_TRUE ? std::string(results_buf) : std::string(),
-            static_cast<int>(mpi_rank), static_cast<int>(mpi_size), std::string(lm_tag_buf));
+            static_cast<int>(mpi_rank), static_cast<int>(mpi_size), std::string(lm_tag_buf),
+            static_cast<int>(lm_ckpt_every), std::string(lm_ckpt_dir_buf));
         PetscFinalize();
         return rc;
     }

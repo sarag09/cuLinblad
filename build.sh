@@ -13,10 +13,14 @@ cd "$BUILD"
 # on a SUCCESSFUL configure), not CMakeCache.txt (left behind by a FAILED configure).
 if [ ! -f Makefile ]; then
   rm -f CMakeCache.txt 2>/dev/null   # drop any stale cache from a failed configure
+  # Pin CMake's MPI to the SAME MPICH wrapper PETSc was configured with (first on PATH from setup_env);
+  # otherwise find_package(MPI) may auto-detect a stray OpenMPI and petscsys.h aborts with
+  # "configured with MPICH but ... non-MPICH mpi.h".
   cmake -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CUDA_ARCHITECTURES="$CULINDBLAD_CUDA_ARCH" \
         -DCUDAToolkit_ROOT="$CUDA_MERGED" \
         -DCMAKE_PREFIX_PATH="$CUDA_MERGED" \
+        -DMPI_C_COMPILER="$(command -v mpicc)" -DMPI_CXX_COMPILER="$(command -v mpicxx)" \
         -DCUTENSOR_LIB="$CUDA_MERGED/lib64/libcutensor.so" \
         "$HERE"
 fi

@@ -15,9 +15,13 @@ BUILD="$HERE/build_local_fp32"
 mkdir -p "$BUILD"; cd "$BUILD"
 if [ ! -f Makefile ]; then
   rm -f CMakeCache.txt 2>/dev/null
+  # Pin CMake's MPI to the SAME MPICH wrapper PETSc was configured with (first on PATH from setup_env);
+  # otherwise find_package(MPI) may auto-detect a stray OpenMPI and petscsys.h aborts with
+  # "configured with MPICH but ... non-MPICH mpi.h".
   cmake -DCMAKE_BUILD_TYPE=Release -DCULINDBLAD_FP32=ON \
         -DCMAKE_CUDA_ARCHITECTURES="$CULINDBLAD_CUDA_ARCH" \
         -DCUDAToolkit_ROOT="$CUDA_MERGED" -DCMAKE_PREFIX_PATH="$CUDA_MERGED" \
+        -DMPI_C_COMPILER="$(command -v mpicc)" -DMPI_CXX_COMPILER="$(command -v mpicxx)" \
         -DCUTENSOR_LIB="$CUDA_MERGED/lib64/libcutensor.so" "$HERE"
 fi
 make -j8

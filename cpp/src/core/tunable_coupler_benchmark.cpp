@@ -3,8 +3,12 @@
 #include <chrono>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -374,6 +378,113 @@ inline void trace_renorm_solution_vec(Vec x, Index batch, Index D)
 }
 #endif
 
+// ---- Checkpoint / restart for the long OPEN custom-RK4 runs -------------------------------------
+// Per-rank on-disk checkpoint: a fixed POD header (with a strict dtype/shape/shard guard so a wrong or
+// fp32-vs-fp64 checkpoint can NEVER be silently resumed into the anchor) followed by the batched
+// density state (batch * D*D Complex, row-major, native byte order -- resumed on the same machine).
+struct CkptFileHeader {
+    char    magic[8];    // "CULBCK01"
+    int32_t dtype_size;  // sizeof(Complex): 8 (fp32) or 16 (fp64)
+    int32_t shard_index; // MPI rank
+    int32_t shard_total; // MPI size
+    int32_t reserved;
+    int64_t hilbert_dim; // D
+    int64_t batch;       // density matrices in this rank's shard
+    int64_t total_steps; // num_steps this checkpoint belongs to
+    int64_t next_step;   // resume the RK4 loop at this step (state is rho AFTER step next_step-1)
+    double  t0;
+    double  tfinal;
+};
+
+// Snapshot ctx.x (device) to <path>.tmp then atomically rename to <path>. The device->host copy is
+// READ-ONLY (VecGetArrayRead) so the device state stays authoritative and the evolution is NOT
+// perturbed. Best-effort: a failed write (e.g. a transient NFS blip) logs a warning and returns false
+// -- the run continues and the NEXT interval retries -- rather than killing a multi-day job over one
+// I/O hiccup.
+bool write_batch_checkpoint(const BatchCheckpoint& cfg, Vec x, Index next_step)
+{
+    const PetscScalar* p = nullptr;
+    PetscCallAbort(PETSC_COMM_SELF, VecGetArrayRead(x, &p));
+    const std::size_t dd = static_cast<std::size_t>(cfg.hilbert_dim) *
+                           static_cast<std::size_t>(cfg.hilbert_dim);
+    const std::size_t n_elem = static_cast<std::size_t>(cfg.batch) * dd;
+    const std::string tmp = cfg.path + ".tmp";
+    bool ok = false;
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (f.is_open()) {
+            CkptFileHeader h{};
+            std::memcpy(h.magic, "CULBCK01", 8);
+            h.dtype_size  = static_cast<int32_t>(sizeof(Complex));
+            h.shard_index = cfg.shard_index;
+            h.shard_total = cfg.shard_total;
+            h.reserved    = 0;
+            h.hilbert_dim = static_cast<int64_t>(cfg.hilbert_dim);
+            h.batch       = static_cast<int64_t>(cfg.batch);
+            h.total_steps = static_cast<int64_t>(cfg.total_steps);
+            h.next_step   = static_cast<int64_t>(next_step);
+            h.t0          = cfg.t0;
+            h.tfinal      = cfg.tfinal;
+            f.write(reinterpret_cast<const char*>(&h), sizeof(h));
+            f.write(reinterpret_cast<const char*>(p),
+                    static_cast<std::streamsize>(n_elem * sizeof(Complex)));
+            f.flush();
+            ok = static_cast<bool>(f);
+        }
+    }
+    PetscCallAbort(PETSC_COMM_SELF, VecRestoreArrayRead(x, &p));
+    if (!ok) {
+        std::remove(tmp.c_str());
+        std::cerr << "[ckpt] WARN: write failed (" << cfg.path << "); will retry next interval\n";
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, cfg.path, ec);   // atomic on the same filesystem
+    if (ec) {
+        std::remove(tmp.c_str());
+        std::cerr << "[ckpt] WARN: rename failed (" << ec.message() << ")\n";
+        return false;
+    }
+    return true;
+}
+
+// If a VALID resumable checkpoint exists at cfg.path, load its states + next_step and return true.
+// Returns false if the file is ABSENT (=> fresh start). HARD-ABORTS (throws) on a present-but-
+// mismatched/corrupt checkpoint -- silently mis-resuming would corrupt the anchor.
+bool try_load_batch_checkpoint(const BatchCheckpoint& cfg,
+                               std::vector<std::vector<Complex>>& states, Index& next_step)
+{
+    if (cfg.every <= 0 || cfg.path.empty()) return false;
+    std::ifstream f(cfg.path, std::ios::binary);
+    if (!f.is_open()) return false;   // no checkpoint yet -> fresh start
+    auto fail = [&](const std::string& why) {
+        throw std::runtime_error("[ckpt] refusing to resume " + cfg.path + ": " + why);
+    };
+    CkptFileHeader h{};
+    f.read(reinterpret_cast<char*>(&h), sizeof(h));
+    if (!f || std::memcmp(h.magic, "CULBCK01", 8) != 0) fail("bad or short header");
+    if (h.dtype_size != static_cast<int32_t>(sizeof(Complex)))
+        fail("dtype size mismatch (fp32 vs fp64 checkpoint)");
+    if (h.shard_index != cfg.shard_index || h.shard_total != cfg.shard_total)
+        fail("shard identity mismatch (different rank/size)");
+    if (h.hilbert_dim != static_cast<int64_t>(cfg.hilbert_dim)) fail("hilbert_dim mismatch");
+    if (h.batch != static_cast<int64_t>(cfg.batch)) fail("batch/state-count mismatch");
+    if (h.total_steps != static_cast<int64_t>(cfg.total_steps)) fail("num_steps mismatch");
+    if (h.t0 != cfg.t0 || h.tfinal != cfg.tfinal) fail("time window mismatch");
+    if (h.next_step <= 0 || h.next_step > static_cast<int64_t>(cfg.total_steps))
+        fail("next_step out of range");
+    const std::size_t dd = static_cast<std::size_t>(cfg.hilbert_dim) *
+                           static_cast<std::size_t>(cfg.hilbert_dim);
+    states.assign(static_cast<std::size_t>(cfg.batch), std::vector<Complex>(dd));
+    for (std::size_t b = 0; b < static_cast<std::size_t>(cfg.batch); ++b) {
+        f.read(reinterpret_cast<char*>(states[b].data()),
+               static_cast<std::streamsize>(dd * sizeof(Complex)));
+        if (!f) fail("truncated state payload");
+    }
+    next_step = static_cast<Index>(h.next_step);
+    return true;
+}
+
 void evolve_batch_custom(
     CudaBatchExecutionContext& ctx,
     double t0,
@@ -383,7 +494,9 @@ void evolve_batch_custom(
     int expmv_order,
     TcRhsFn rhs_fn = ts_rhs_function_cuda_full_model_liouvillian,
     bool renorm_trace = false,   // fp32 open path: per-step per-density-matrix trace renormalization
-    Index renorm_D = 0)          // matrix dimension D (each state is a D×D density matrix)
+    Index renorm_D = 0,          // matrix dimension D (each state is a D×D density matrix)
+    Index start_step = 0,        // resume from this step index (checkpoint restart; 0 = from scratch)
+    const BatchCheckpoint* ckpt = nullptr)  // periodic checkpoint writer (nullptr = disabled)
 {
     Vec y = ctx.x;  // evolved in place
     Vec a = nullptr;
@@ -397,7 +510,7 @@ void evolve_batch_custom(
     long matvecs = 0;
     const auto wall0 = std::chrono::steady_clock::now();
 
-    for (Index step = 0; step < num_steps; ++step) {
+    for (Index step = start_step; step < num_steps; ++step) {
         const double t = t0 + static_cast<double>(step) * dt;
         if (kind == CustomIntegrator::Rk4Custom) {
             // Classic RK4: a = weighted accumulator, b = stage input, c = stage k.
@@ -451,6 +564,13 @@ void evolve_batch_custom(
         (void)renorm_trace;
         (void)renorm_D;
 #endif
+        // Periodic checkpoint: snapshot the POST-step (post-renorm) state at a clean step boundary.
+        // next_step = step+1 so a resume continues at the following step, bit-identically. Skip the
+        // final step (the normal dump handles it). A failed write is non-fatal (retried next interval).
+        if (ckpt != nullptr && ckpt->every > 0 && (step + 1) < num_steps &&
+            ((step + 1) % ckpt->every) == 0) {
+            write_batch_checkpoint(*ckpt, y, step + 1);
+        }
     }
 
     const auto wall1 = std::chrono::steady_clock::now();
@@ -474,7 +594,9 @@ std::vector<std::vector<Complex>> evolve_state_batch_cuda_ts(
     double t0,
     double tfinal,
     Index num_steps,
-    CudaBatchExecutionContext& ctx)
+    CudaBatchExecutionContext& ctx,
+    Index start_step = 0,                   // resume from this step (checkpoint restart; 0 = fresh)
+    const BatchCheckpoint* ckpt = nullptr)  // periodic checkpoint writer (nullptr = disabled)
 {
     if (!ctx.initialized || ctx.ts == nullptr || ctx.x == nullptr) {
         throw std::runtime_error(
@@ -510,6 +632,18 @@ std::vector<std::vector<Complex>> evolve_state_batch_cuda_ts(
     PetscInt integrator = 0;
     PetscCallAbort(PETSC_COMM_SELF, PetscOptionsGetInt(
         nullptr, nullptr, "-tc_integrator", &integrator, nullptr));
+    // Checkpoint/restart is wired ONLY through the custom RK4 (-tc_integrator 1, the open anchor path).
+    // A resume (start_step>0) on any other integrator would evolve the resumed state for the FULL step
+    // count (double-counting) -> hard-abort rather than silently corrupt the result. Checkpoint WRITING
+    // on a non-custom integrator is simply disabled (with a warning), not fatal.
+    if (start_step > 0 && integrator != 1) {
+        throw std::runtime_error(
+            "evolve_state_batch_cuda_ts: checkpoint resume requires -tc_integrator 1 (custom RK4)");
+    }
+    if (ckpt != nullptr && ckpt->every > 0 && integrator != 1) {
+        std::cerr << "[ckpt] WARN: checkpointing requires -tc_integrator 1; disabled for this run\n";
+        ckpt = nullptr;
+    }
     if (integrator == 0) {
         PetscCallAbort(PETSC_COMM_SELF, TSSetTime(ctx.ts, t0));
         PetscCallAbort(PETSC_COMM_SELF, TSSetStepNumber(ctx.ts, 0));
@@ -544,7 +678,8 @@ std::vector<std::vector<Complex>> evolve_state_batch_cuda_ts(
             static_cast<int>(expmv_order),
             ts_rhs_function_cuda_full_model_liouvillian,
             /*renorm_trace=*/true,                       // fp32 open: per-step trace renorm (no-op in fp64)
-            /*renorm_D=*/solver.layout.hilbert_dim);
+            /*renorm_D=*/solver.layout.hilbert_dim,
+            start_step, ckpt);                           // checkpoint restart + periodic writer
     }
 
     PetscCallAbort(PETSC_COMM_SELF, VecGetArray(ctx.x, &x_ptr));
@@ -1023,7 +1158,8 @@ TransmonChainBenchmarkTiming evolve_loaded_model_liouvillian(
     const Model& model, const std::vector<Index>& selected_density_indices,
     const std::vector<std::vector<Complex>>& explicit_kets,
     const std::vector<std::vector<Complex>>& explicit_density_states,
-    double t0, double tfinal, int num_steps)
+    double t0, double tfinal, int num_steps,
+    const BatchCheckpoint* ckpt_in)
 {
     const Solver solver = make_solver(model);
     const std::size_t D = static_cast<std::size_t>(solver.layout.hilbert_dim);
@@ -1056,6 +1192,33 @@ TransmonChainBenchmarkTiming evolve_loaded_model_liouvillian(
             initial.push_back(std::move(rho));
         }
     }
+    // Checkpoint/restart (open custom-RK4 anchor). If enabled and a VALID per-rank checkpoint exists,
+    // resume from its state + step; otherwise start fresh and write every ckpt->every steps. The strict
+    // header guard in try_load_batch_checkpoint hard-aborts on any config/shape/shard mismatch, so the
+    // same submit command safely both creates and resumes checkpoints across Condor restarts.
+    Index start_step = 0;
+    BatchCheckpoint ckpt_run;
+    const BatchCheckpoint* ckpt_ptr = nullptr;
+    if (ckpt_in != nullptr && ckpt_in->every > 0 && !ckpt_in->path.empty()) {
+        ckpt_run             = *ckpt_in;
+        ckpt_run.hilbert_dim = solver.layout.hilbert_dim;
+        ckpt_run.batch       = static_cast<Index>(initial.size());
+        ckpt_run.total_steps = static_cast<Index>(num_steps);
+        ckpt_run.t0          = t0;
+        ckpt_run.tfinal      = tfinal;
+        ckpt_ptr             = &ckpt_run;
+        std::vector<std::vector<Complex>> resumed;
+        Index resume_next = 0;
+        if (try_load_batch_checkpoint(ckpt_run, resumed, resume_next)) {
+            initial    = std::move(resumed);
+            start_step = resume_next;
+            std::cerr << "[ckpt] rank " << ckpt_run.shard_index << " RESUMING from step "
+                      << start_step << "/" << num_steps << " (" << ckpt_run.path << ")" << std::endl;
+        } else {
+            std::cerr << "[ckpt] rank " << ckpt_run.shard_index << " fresh start; checkpoint every "
+                      << ckpt_run.every << " steps -> " << ckpt_run.path << std::endl;
+        }
+    }
     CudaBatchExecutionContext ctx{};
     PetscCallAbort(PETSC_COMM_SELF,
         create_cuda_batch_execution_context(solver, initial.size(), ctx));
@@ -1073,7 +1236,7 @@ TransmonChainBenchmarkTiming evolve_loaded_model_liouvillian(
     timing.num_evolved_states = initial.size();
     const auto t_start = std::chrono::steady_clock::now();
     timing.final_states =
-        evolve_state_batch_cuda_ts(solver, initial, t0, tfinal, num_steps, ctx);
+        evolve_state_batch_cuda_ts(solver, initial, t0, tfinal, num_steps, ctx, start_step, ckpt_ptr);
     const auto t_end = std::chrono::steady_clock::now();
     timing.wall_seconds = std::chrono::duration<double>(t_end - t_start).count();
     PetscCallAbort(PETSC_COMM_SELF, destroy_cuda_batch_execution_context(ctx));

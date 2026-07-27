@@ -1,0 +1,20 @@
+# HTCondor: 2Q1C OPEN fp32 CHECKPOINT dress-rehearsal on qis4 (2 GPUs). Proves the checkpoint-enabled
+# fp32 binary reproduces F_open AND survives a mid-run kill+resume (bit-identical), before the 1.8-day
+# 4Q4C run. Report -> /nfs_scratch/kunnumbrath/lambda_4/4Q4C/ckpt_2q1c_validation.txt
+#   condor_submit /nfs_scratch/kunnumbrath/cuLinblad/ckpt_2q1c_validate.sub
+universe   = vanilla
+executable = /nfs_scratch/kunnumbrath/lambda_4/4Q4C/opensystem/ckpt_2q1c_dress_rehearsal.sh
+
+requirements = (TARGET.IsOttenComputer =?= True) && (TARGET.Machine == "qis4.hep.wisc.edu")
+
+log    = /nfs_scratch/kunnumbrath/cuLinblad/ckpt_2q1c_validate.log
+output = /nfs_scratch/kunnumbrath/cuLinblad/ckpt_2q1c_validate.out
+error  = /nfs_scratch/kunnumbrath/cuLinblad/ckpt_2q1c_validate.err
+transfer_output_files = ""
+
+request_gpus   = 2
+request_cpus   = 8
+request_memory = 32768
+request_disk   = 8000000
+
+queue
