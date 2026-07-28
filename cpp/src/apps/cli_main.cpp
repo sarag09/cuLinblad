@@ -1193,11 +1193,12 @@ int run_loaded_model(const std::string& model_path, const std::string& results_p
                           : use_explicit ? states_slice.size() : idx.size())
                       << " state(s)" << std::endl;
 
-        // Checkpoint/restart (open anchor only): every `ckpt_every` steps each rank snapshots its
-        // density-matrix shard to <ckpt_dir>/<tag>_rank<r>.ckpt (atomic); a (re)start auto-resumes from
-        // it if present. Same submit command creates and resumes -> survives Condor holds/NFS blips.
+        // Checkpoint/restart (open density rho OR closed |psi> shards): every `ckpt_every` steps each
+        // rank snapshots its shard to <ckpt_dir>/<tag>_rank<r>.ckpt (atomic); a (re)start auto-resumes
+        // from it if present. Same submit command creates and resumes -> survives Condor holds/NFS blips.
+        // The checkpoint header records the state kind (density vs |psi>) and is guarded on resume.
         BatchCheckpoint ckpt;
-        const bool ckpt_on = (ckpt_every > 0) && !ckpt_dir.empty() && lm.is_open;
+        const bool ckpt_on = (ckpt_every > 0) && !ckpt_dir.empty();
         if (ckpt_on) {
             std::error_code ck_ec;
             std::filesystem::create_directories(ckpt_dir, ck_ec);
@@ -1219,7 +1220,8 @@ int run_loaded_model(const std::string& model_path, const std::string& results_p
                 dump_loaded_model_result(*out, lm, timing, "lindblad");
         } else {
             const TransmonChainBenchmarkTiming timing = evolve_loaded_model_schrodinger(
-                lm.model, idx, states_slice, lm.evolution.t0, lm.evolution.tfinal, num_steps);
+                lm.model, idx, states_slice, lm.evolution.t0, lm.evolution.tfinal, num_steps,
+                ckpt_on ? &ckpt : nullptr);
             std::cerr << "[load_model] evolution wall_seconds=" << timing.wall_seconds
                       << " (states=" << timing.final_states.size() << ", steps=" << num_steps << ")"
                       << std::endl;
@@ -1492,9 +1494,30 @@ int main(int argc, char** argv)
         // (PETSc TSRK4, the custom-RK4 whose VECCUDA registers + cuTENSOR matrix-free RHS both ride
         // this current device, and Taylor) -- it is the ONLY cudaSetDevice in the process. PETSc
         // already captured the same device inside PetscInitialize via the LOCAL_RANK we exported.
-        if (cudaSetDevice(local_dev) != cudaSuccess) {
-            std::cerr << "[rank " << mpi_rank << "] cudaSetDevice(" << local_dev << ") failed."
-                      << std::endl;
+        // RETRY a transiently-unavailable GPU instead of aborting the WHOLE multi-GPU job on the first
+        // failure. cudaSetDevice can fail with cudaErrorDeviceAlreadyInUse / cudaErrorDevicesUnavailable
+        // when the (often exclusive-mode) device is still held by a just-finished process, or briefly
+        // during a driver/ECC recovery -- one flaky rank should NOT kill all N ranks in 3 s. Report the
+        // actual cudaError string so a PERSISTENT failure (occupied by another job, or a bad GPU) is
+        // diagnosable, then abort with a clear hint (exclude that GPU / free the node).
+        cudaError_t serr = cudaSetDevice(local_dev);
+        for (int attempt = 1; serr != cudaSuccess && attempt <= 20; ++attempt) {
+            char pci[64] = "?";
+            cudaDeviceGetPCIBusId(pci, static_cast<int>(sizeof(pci)), local_dev);
+            std::cerr << "[rank " << mpi_rank << "] cudaSetDevice(" << local_dev << ", PCI " << pci
+                      << ") attempt " << attempt << "/20 failed: " << cudaGetErrorString(serr)
+                      << " -- retrying in 3s" << std::endl;
+            cudaGetLastError();   // clear the sticky error before retrying
+            sleep(3);
+            serr = cudaSetDevice(local_dev);
+        }
+        if (serr != cudaSuccess) {
+            char pci[64] = "?";
+            cudaDeviceGetPCIBusId(pci, static_cast<int>(sizeof(pci)), local_dev);
+            std::cerr << "[rank " << mpi_rank << "] cudaSetDevice(" << local_dev << ", PCI " << pci
+                      << ") FAILED after 20 retries (~60s): " << cudaGetErrorString(serr)
+                      << " -- that GPU is occupied or unhealthy; free the node or exclude it "
+                         "(require_gpus) and resubmit." << std::endl;
             MPI_Abort(PETSC_COMM_WORLD, 1);
         }
     }
@@ -1532,9 +1555,10 @@ int main(int argc, char** argv)
         char lm_tag_buf[128] = "loadmodel_shard";
         PetscOptionsGetString(nullptr, nullptr, "-dump_tag",
                               lm_tag_buf, sizeof(lm_tag_buf), nullptr);
-        // Checkpoint/restart for long open runs: -tc_checkpoint_every N (steps) + -tc_checkpoint_dir DIR.
-        // Absent -> no checkpointing (unchanged behavior). Present -> per-rank <DIR>/<tag>_rank<r>.ckpt,
-        // auto-resumed on (re)start. See BatchCheckpoint / evolve_loaded_model_liouvillian.
+        // Checkpoint/restart for long runs (open density rho OR closed |psi>): -tc_checkpoint_every N
+        // (steps) + -tc_checkpoint_dir DIR. Absent -> no checkpointing (unchanged behavior). Present ->
+        // per-rank <DIR>/<tag>_rank<r>.ckpt, auto-resumed on (re)start. Requires -tc_integrator 1.
+        // See BatchCheckpoint / evolve_loaded_model_{liouvillian,schrodinger}.
         PetscInt lm_ckpt_every = 0;
         PetscOptionsGetInt(nullptr, nullptr, "-tc_checkpoint_every", &lm_ckpt_every, nullptr);
         char lm_ckpt_dir_buf[1024] = {};

@@ -100,30 +100,36 @@ std::vector<Index> computational_state_indices_for_dims(
 std::vector<Index> computational_density_indices_for_dims(
     const std::vector<Index>& local_dims, Index num_qubits);
 
+struct BatchCheckpoint;  // defined below; used as an optional pointer arg to the evolve entries
+
 // Evolve a deserialized handoff Model in the LAB frame (matches the Julia reference; closed = |psi>
 // Schrodinger, open = rho Lindblad). If explicit_states is non-empty it is used as the initial states
 // (e.g. the dressed comp kets exported from Julia): closed evolves them as |psi>, open evolves the
 // outer products |k><k|. Otherwise the selected computational kets / density columns are used.
-// Uses the -tc_integrator dispatch (pass -tc_integrator 1 for the custom RK4).
+// Uses the -tc_integrator dispatch (pass -tc_integrator 1 for the custom RK4). Checkpoint/restart of
+// the closed |psi> shard works exactly like the open path (ckpt != nullptr, -tc_integrator 1).
 TransmonChainBenchmarkTiming evolve_loaded_model_schrodinger(
     const Model& model, const std::vector<Index>& selected_indices,
     const std::vector<std::vector<Complex>>& explicit_states,
-    double t0, double tfinal, int num_steps);
-// Checkpoint/restart config for the long OPEN (Liouvillian) custom-RK4 runs (-tc_integrator 1). When
-// `every > 0` and `path` is set, evolve_batch_custom snapshots the batched density state to `path`
-// (atomically) every `every` steps; on (re)start evolve_loaded_model_liouvillian AUTO-RESUMES from
-// `path` if a checkpoint is present (a strict header guard hard-aborts on ANY config mismatch --
-// dtype, shape, shard identity, step window -- so a wrong checkpoint can never corrupt the anchor).
-// Same command both writes and resumes: absent file -> fresh start; present+valid -> resume. Disabled
-// by default (every == 0), so all non-checkpointed callers are unaffected.
+    double t0, double tfinal, int num_steps,
+    const BatchCheckpoint* ckpt = nullptr);
+// Checkpoint/restart config for the long custom-RK4 runs (-tc_integrator 1), OPEN (Liouvillian rho)
+// and CLOSED (Schrodinger |psi>) alike. When `every > 0` and `path` is set, evolve_batch_custom
+// snapshots the batched state to `path` (atomically) every `every` steps; on (re)start the matching
+// evolve_loaded_model_* AUTO-RESUMES from `path` if a checkpoint is present (a strict header guard
+// hard-aborts on ANY config mismatch -- dtype, state kind, shape, shard identity, step window -- so a
+// wrong checkpoint can never corrupt the anchor). Same command both writes and resumes: absent file
+// -> fresh start; present+valid -> resume. Disabled by default (every == 0), so all non-checkpointed
+// callers are unaffected.
 struct BatchCheckpoint {
     Index       every = 0;        // write cadence in RK4 steps; 0 disables checkpointing
     std::string path;             // per-rank checkpoint file, e.g. <dir>/<tag>_rank<r>.ckpt
     int         shard_index = 0;  // MPI rank  (guarded on resume)
     int         shard_total = 1;  // MPI size  (guarded on resume)
-    // Runtime shape/window, filled by evolve_loaded_model_liouvillian before use (guard fields):
+    // Runtime shape/window, filled by evolve_loaded_model_{liouvillian,schrodinger} before use:
+    int         state_kind = 0;   // 0 = density (D*D Complex/state, open), 1 = state vector (D, closed)
     Index       hilbert_dim = 0;  // D
-    Index       batch = 0;        // density matrices in this rank's shard
+    Index       batch = 0;        // states (density matrices / |psi>) in this rank's shard
     Index       total_steps = 0;  // num_steps this checkpoint belongs to
     double      t0 = 0.0;
     double      tfinal = 0.0;

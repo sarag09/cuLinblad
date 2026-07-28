@@ -93,6 +93,29 @@ python validation/merge_ranks.py propcheck/prod4q4c propcheck/prod4q4c_merged.tx
 Condor wrappers are in `cluster/` (submit from the repo root, e.g.
 `condor_submit cluster/mpi_shard.sub`; edit `requirements`/`request_gpus` for your site).
 
+### Closed system (Schrödinger |ψ⟩) multi-GPU
+
+The closed path shards the same way, but over the **2ᴺQ computational kets** instead of the density
+columns — each rank evolves a disjoint slice as its batch (no inter-rank comms). It works on both the
+self-contained `-dump_tc -tc_schrodinger` route and the `-load_model` route, in fp32 and fp64. The
+convenience launcher (parametric, no `model.json` needed) is `cluster/run_closed_shard.sh`:
+
+```bash
+# 4Q4C closed, 4 GPUs, fp64, self-verifying (single-process == 4-rank merged, bit-identical):
+cluster/run_closed_shard.sh 4 4 4 200 fp64 validate
+# 4Q4C closed gate, 8 GPUs, fp32:
+cluster/run_closed_shard.sh 8 4 4 12000 fp32 run
+```
+
+`condor_submit cluster/closed_shard.sub` runs it on the cluster (edit `arguments`/`request_gpus`).
+**Sizing:** ket-sharding parallelizes up to `2ᴺQ` ranks (16 for 4Q4C, 64 for 6Q7C, 256 for 8Q10C).
+8Q10C is `D = 3¹⁸ ≈ 3.9·10⁸`/state ⇒ ~31 GB/ket fp64 (~16 GB fp32) with the custom RK4, so plan
+~1 ket/GPU fp64 (≈256 GPUs) or ~2–3/GPU fp32; always use `-tc_integrator 1`.
+
+For long runs, add checkpoint/restart on the `-load_model` closed path (blip-proof, auto-resume):
+`-tc_checkpoint_every N -tc_checkpoint_dir DIR` (requires `-tc_integrator 1`; per-rank `.ckpt`, strict
+header guard). The same flags work for the open anchor.
+
 ## Validation
 
 Run from the repo root with the QuTiP venv active.
@@ -107,6 +130,11 @@ Run from the repo root with the QuTiP venv active.
 - **Rotating frame:** `validation/verify_rotating_frame.py` (vs lab QuTiP); self-contained,
   Julia-free, QuTiP-free check: `validation/validate_rotating_frame.py [path-to-run_sim]`.
 - **Closed / Schrödinger vs QuTiP `sesolve`:** `validation/verify_schrodinger.py`.
+- **Closed multi-GPU sharding** (single-process == N-rank merged, bit-identical; fp32 & fp64):
+  `validation/validate_closed_multigpu.sh <run_sim> <NQ> <NC> <d> <steps> <nranks> [flags]`.
+- **Closed checkpoint/restart** (resume is bit-identical; open or closed model): first
+  `source setup_env.sh`, then
+  `validation/validate_closed_checkpoint.sh <run_sim> <closed_model.json> <ckpt_every> [nranks]`.
 - **Driven regression gate** (golden master + QuTiP): `cluster/validate_gpu.sh <tag> <NQ> <NC> <d>`.
 - **Julia-free handoff validator** (proves the C++ half of the bridge against analytic answers):
   `python validation/validate_load_model.py ./build_local/run_sim`.
@@ -138,10 +166,12 @@ executor reuse to keep GPU residency low.
 
 ## Limitations
 
-- **`-load_model` is currently single-process.** MPI multi-GPU state-sharding is implemented only
-  on the internal `-dump_tc -tc_computational` path. The full Julia-driven 4Q4C open anchor
-  therefore cannot yet be sharded across GPUs through `-load_model` alone — adding sharding to the
-  `run_loaded_model` path is **planned work**.
+- **State-sharding parallelizes across states, not within one.** Each rank evolves whole density
+  matrices / kets; a *single* state vector or density matrix is not split across GPUs. So the useful
+  rank count is capped at the number of independent states — `(2ᴺQ)²` density columns (open) or `2ᴺQ`
+  kets (closed). This suffices through 8Q10C closed (256 kets, ~31 GB/ket fp64 ⇒ ~1 ket/GPU), but a
+  problem needing a single state too large for one GPU would require intra-state (domain) decomposition,
+  which is not implemented.
 - The full-stack export to reduced process matrices / effective error channels (for downstream
   resource-estimation / QEC tools) is not yet built.
 
