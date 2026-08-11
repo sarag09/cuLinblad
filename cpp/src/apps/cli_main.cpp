@@ -574,14 +574,21 @@ std::vector<std::vector<culindblad::Complex>> shard_explicit_states(
 // contiguous partition as shard_indices, so the merged dump reconstructs global s order. Only the
 // rank's slice is materialized (never all M² D×D matrices at once).
 std::vector<std::vector<culindblad::Complex>> build_dressed_density_slice(
-    const std::vector<std::vector<culindblad::Complex>>& kets, int rank, int size)
+    const std::vector<std::vector<culindblad::Complex>>& kets, int rank, int size,
+    std::size_t win_off = 0, std::size_t win_cnt = 0)
 {
     using culindblad::Complex; using culindblad::Index;
     const std::size_t M = kets.size();
     const std::size_t D = (M > 0) ? kets[0].size() : 0;
-    const std::size_t N = M * M;
-    std::vector<Index> all(N);
-    for (std::size_t s = 0; s < N; ++s) all[s] = static_cast<Index>(s);
+    const std::size_t Nfull = M * M;
+    // Optional global window [win_off, win_off+win_cnt) into the M² inputs (win_cnt==0 => full M²).
+    // Lets a shard-recovery run recompute ONLY a contiguous sub-range of the |D_a><D_b| channel inputs;
+    // a,b (hence the density matrix) are derived from the GLOBAL index s=win_off+i, so the recomputed
+    // states match a full run's states bit-for-bit. Default (0,0) reproduces the original all-M² behavior.
+    std::size_t off = win_off, cnt = win_cnt;
+    if (cnt == 0) { off = 0; cnt = Nfull; }
+    std::vector<Index> all(cnt);
+    for (std::size_t i = 0; i < cnt; ++i) all[i] = static_cast<Index>(off + i);
     const std::vector<Index> mine = shard_indices(all, rank, size);
     std::vector<std::vector<Complex>> out;
     out.reserve(mine.size());
@@ -1168,8 +1175,30 @@ int run_loaded_model(const std::string& model_path, const std::string& results_p
                 ? computational_density_indices_for_dims(lm.model.local_dims, lm.num_qubits)
                 : computational_state_indices_for_dims(lm.model.local_dims, lm.num_qubits);
         }
-        // MPI state-sharding: GLOBAL count N (dressed => M² channel columns) BEFORE any sharding.
-        const std::size_t N = use_dressed  ? Mk * Mk
+        // Optional dressed-input WINDOW for shard-recovery: recompute only a contiguous sub-range
+        // [off, off+cnt) of the M² |D_a><D_b| inputs (defaults reproduce the full-M² behavior). Lets a
+        // single crashed rank's states be regenerated without a full 256-input rerun. Dressed path only.
+        std::size_t dressed_off = 0, dressed_win = 0;   // win==0 => full M²
+        if (use_dressed) {
+            PetscInt so = 0, sc = -1;
+            PetscOptionsGetInt(nullptr, nullptr, "-tc_state_offset", &so, nullptr);
+            PetscOptionsGetInt(nullptr, nullptr, "-tc_state_count",  &sc, nullptr);
+            const PetscInt Ng = static_cast<PetscInt>(Mk * Mk);
+            if (so < 0 || sc == 0 || so > Ng || (sc > 0 && so + sc > Ng)) {
+                if (mpi_rank == 0)
+                    std::cerr << "[load_model] error: -tc_state_offset/-tc_state_count window out of range "
+                              << "[0," << Ng << ") (got offset=" << so << " count=" << sc << ")" << std::endl;
+                MPI_Abort(PETSC_COMM_WORLD, 1);
+            }
+            dressed_off = static_cast<std::size_t>(so);
+            dressed_win = (sc > 0) ? static_cast<std::size_t>(sc) : 0;
+            if (dressed_win && mpi_rank == 0)
+                std::cerr << "[load_model] dressed WINDOW: recomputing global inputs ["
+                          << dressed_off << "," << (dressed_off + dressed_win) << ") of " << Ng
+                          << " (shard-recovery)" << std::endl;
+        }
+        // MPI state-sharding: GLOBAL count N (dressed => windowed M² channel columns) BEFORE any sharding.
+        const std::size_t N = use_dressed  ? (dressed_win ? dressed_win : Mk * Mk)
                             : use_density  ? explicit_density.size()
                             : use_explicit ? explicit_states.size()
                             : idx.size();
@@ -1184,7 +1213,7 @@ int run_loaded_model(const std::string& model_path, const std::string& results_p
         // dressed: build THIS rank's slice of |D_a><D_b| from the M kets (a-outer s=a*M+b); else shard the
         // provided explicit_density verbatim. Both feed the SAME (unchanged) explicit_density evolve path.
         const std::vector<std::vector<Complex>> density_slice =
-            use_dressed ? build_dressed_density_slice(dressed_kets, mpi_rank, mpi_size)
+            use_dressed ? build_dressed_density_slice(dressed_kets, mpi_rank, mpi_size, dressed_off, dressed_win)
                         : shard_explicit_states(explicit_density, mpi_rank, mpi_size);
         idx = shard_indices(idx, mpi_rank, mpi_size);   // identity for size<=1; safe AFTER N captured
         if (mpi_size > 1)
