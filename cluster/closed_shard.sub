@@ -1,0 +1,42 @@
+# Condor submit for the CLOSED (Schrodinger |psi>) multi-GPU state-sharding run.
+# Runs cluster/run_closed_shard.sh: shards the 2^NQ computational kets across NRANKS GPUs, evolves each
+# rank's slice as its batch, merges the per-rank shards to global order, and (mode=validate) asserts
+# bit-identical vs a single-process run. Parametric -- no model.json needed (H(t) built in C++).
+#
+# ONLY runs on qis4 (8x RTX PRO 6000, sm_120) -- the sole node the binary targets. "Multi-GPU" here
+# means up to 8 GPUs on the single qis4 node; for a true multi-NODE run, request more machines and set
+# NRANKS accordingly (the launcher binds one node-local GPU per rank by hostname).
+#
+# EDIT `arguments` + `request_gpus` before submitting, then FROM THE REPO ROOT:
+#   condor_submit cluster/closed_shard.sub
+#
+#   arguments = <NRANKS> <NQ> <NC> <STEPS> <PRECISION> <MODE>
+#   request_gpus MUST equal NRANKS (<= 8 on qis4).  request_cpus ~2/GPU + headroom.
+#
+# Ready-made arguments (uncomment ONE; keep request_gpus == NRANKS):
+#   4Q4C bit-identical confirmation (fast):     4 4 4 200   fp64 validate   -> request_gpus = 4
+#   4Q4C fp32 gate (8 GPUs):                    8 4 4 12000 fp32 run        -> request_gpus = 8
+#   6Q7C fp32 (64 kets; up to 8 GPUs here):     8 6 7 12000 fp32 run        -> request_gpus = 8
+#   8Q10C needs ~256 GPUs fp64 (1 ket/GPU) or ~128 fp32 (2/GPU): a true multi-node launch, not this
+#         single-node submit. See cluster/run_closed_shard.sh header for the per-ket memory sizing.
+universe   = vanilla
+executable = cluster/run_closed_shard.sh
+arguments  = 4 4 4 200 fp64 validate
+
+# qis4 = the only sm_120 (Blackwell) node the binary targets.
+requirements = (TARGET.IsOttenComputer =?= True) && (TARGET.Machine == "qis4.hep.wisc.edu")
+
+log    = closed_shard.log
+error  = closed_shard.err
+output = closed_shard.out
+
++WantGPULab   = true
++GPUJobLength = "medium"
+
+# request_gpus MUST equal NRANKS (arguments field 1). One MPI rank per GPU.
+request_gpus   = 4
+request_cpus   = 8
+request_memory = 262144
+request_disk   = 20000000
+
+queue
