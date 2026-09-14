@@ -17,6 +17,17 @@
 #include "culindblad/petsc_cuda_apply.hpp"
 #include "culindblad/time_dependent_term.hpp"
 
+// ---- error path only: name the actual CUDA fault in the PETSc error banner ----
+// The RHS/setup CUDA calls below return a bare PETSC_ERR_LIB on failure, so a GPU fault (e.g. an
+// uncorrectable-ECC relapse surfacing at cudaStreamSynchronize) shows up as a BLANK-bodied
+// "[rank]PETSC ERROR: Error in external library" -- undiagnosable (this is exactly what the faulty-GPU
+// crash produced). This macro attaches the specific CUDA error string via SETERRQ, so the banner reads
+//   [0]PETSC ERROR: cudaStreamSynchronize failed: uncorrectable ECC error encountered
+// cudaGetLastError() is used because ECC / illegal-address faults are sticky (it returns the same error
+// the failing call reported). Success path is unchanged -- these only run on the != cudaSuccess branch.
+#define CULB_RETURN_CUDA_ERR(site) \
+    SETERRQ(PETSC_COMM_SELF, PETSC_ERR_LIB, "%s failed: %s", (site), cudaGetErrorString(cudaGetLastError()))
+
 namespace culindblad {
 
 namespace {
@@ -584,13 +595,13 @@ PetscErrorCode apply_grouped_layout_terms_to_psi_rhs(
                 if (cudaMalloc(&layout_entry.d_dynamic_diagonal, bytes) != cudaSuccess) {
                     layout_entry.d_dynamic_diagonal = nullptr;
                     layout_entry.dynamic_diagonal_capacity = 0;
-                    return PETSC_ERR_LIB;
+                    CULB_RETURN_CUDA_ERR("cudaMalloc(d_dynamic_diagonal)");
                 }
                 layout_entry.dynamic_diagonal_capacity = diagonal.size();
             }
             if (cudaMemcpyAsync(layout_entry.d_dynamic_diagonal, diagonal.data(), bytes,
                                 cudaMemcpyHostToDevice, s) != cudaSuccess) {
-                return PETSC_ERR_LIB;
+                CULB_RETURN_CUDA_ERR("cudaMemcpyAsync(dynamic diagonal, psi)");
             }
             d_diag = layout_entry.d_dynamic_diagonal;
         } else {
@@ -698,7 +709,7 @@ PetscErrorCode apply_fused_psi_diagonal_prepass(
         cudaMemcpyAsync(rhs_ctx.grouped_scratch.d_psi_site_desc, site_desc.data(),
                         site_desc.size() * sizeof(Index),
                         cudaMemcpyHostToDevice, s) != cudaSuccess) {
-        return PETSC_ERR_LIB;
+        CULB_RETURN_CUDA_ERR("cudaMemcpyAsync(psi fused-diagonal descriptors)");
     }
     PetscCall(apply_psi_fused_diagonal_to_petsc_vec(
         rhs_ctx.grouped_scratch.d_psi_site_diags,
@@ -800,7 +811,7 @@ PetscErrorCode apply_open_fused_diagonal_prepass(
         cudaMemcpyAsync(rhs_ctx.grouped_scratch.d_open_diag_desc, desc.data(),
                         desc.size() * sizeof(Index),
                         cudaMemcpyHostToDevice, s) != cudaSuccess) {
-        return PETSC_ERR_LIB;
+        CULB_RETURN_CUDA_ERR("cudaMemcpyAsync(rho fused-diagonal descriptors)");
     }
     PetscCall(apply_rho_fused_diagonal_to_petsc_vec(
         rhs_ctx.grouped_scratch.d_open_diag_factors,
@@ -916,13 +927,13 @@ PetscErrorCode apply_grouped_layout_terms_to_rhs(
                 if (cudaMalloc(&layout_entry.d_dynamic_diagonal, bytes) != cudaSuccess) {
                     layout_entry.d_dynamic_diagonal = nullptr;
                     layout_entry.dynamic_diagonal_capacity = 0;
-                    return PETSC_ERR_LIB;
+                    CULB_RETURN_CUDA_ERR("cudaMalloc(d_dynamic_diagonal)");
                 }
                 layout_entry.dynamic_diagonal_capacity = h_diagonal.size();
             }
             if (cudaMemcpyAsync(layout_entry.d_dynamic_diagonal, h_diagonal.data(), bytes,
                                 cudaMemcpyHostToDevice, s) != cudaSuccess) {
-                return PETSC_ERR_LIB;
+                CULB_RETURN_CUDA_ERR("cudaMemcpyAsync(dynamic diagonal, rho)");
             }
             // First diagonal-jump dissipator is folded into the fused kernel.
             const void* fused_jump = nullptr;
@@ -1330,7 +1341,7 @@ PetscErrorCode ts_rhs_function_cuda_grouped_commutator(
         rhs_ctx->elementwise_stream));
 
     if (cudaStreamSynchronize(rhs_ctx->elementwise_stream) != cudaSuccess) {
-        return PETSC_ERR_LIB;
+        CULB_RETURN_CUDA_ERR("cudaStreamSynchronize(elementwise_stream)");
     }
 
     return 0;
@@ -1390,7 +1401,7 @@ PetscErrorCode ts_rhs_function_cuda_grouped_liouvillian(
         s));
 
     if (cudaStreamSynchronize(s) != cudaSuccess) {
-        return PETSC_ERR_LIB;
+        CULB_RETURN_CUDA_ERR("cudaStreamSynchronize");
     }
 
     return 0;
@@ -1425,7 +1436,7 @@ PetscErrorCode ts_rhs_function_cuda_static_model_liouvillian(
     }
 
     if (cudaStreamSynchronize(s) != cudaSuccess) {
-        return PETSC_ERR_LIB;
+        CULB_RETURN_CUDA_ERR("cudaStreamSynchronize");
     }
 
     return 0;
@@ -1477,7 +1488,7 @@ PetscErrorCode ts_rhs_function_cuda_full_model_liouvillian(
     }
 
     if (cudaStreamSynchronize(s) != cudaSuccess) {
-        return PETSC_ERR_LIB;
+        CULB_RETURN_CUDA_ERR("cudaStreamSynchronize");
     }
 
     return 0;
@@ -1522,7 +1533,7 @@ PetscErrorCode ts_rhs_function_cuda_full_model_schrodinger(
     }
 
     if (cudaStreamSynchronize(s) != cudaSuccess) {
-        return PETSC_ERR_LIB;
+        CULB_RETURN_CUDA_ERR("cudaStreamSynchronize");
     }
 
     return 0;
