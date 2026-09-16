@@ -934,7 +934,11 @@ Model build_tunable_coupler_model(const TunableCouplerBenchmarkConfig& config)
 
         std::vector<Complex> dephase_op = n_local;
         for (Complex& x : dephase_op) {
-            x *= std::sqrt(1.0 / config.tphi[i]);
+            // sqrt(2/tphi), not sqrt(1/tphi): with L = sqrt(c/tphi) n the 0-1
+            // coherence decays at c/(2 tphi), so only c=2 makes the parameter
+            // named tphi actually BE the dephasing time. Matches the production
+            // 4Q4C models ingested via -load_model.
+            x *= std::sqrt(2.0 / config.tphi[i]);
         }
         dissipator_terms.push_back(OperatorTerm{
             TermKind::Dissipator, "dephase_" + std::to_string(i),
