@@ -3,14 +3,17 @@
 A **matrix-free GPU solver for open-quantum-system (Lindblad) and closed-system (Schrödinger)
 dynamics** of tunable-coupler superconducting devices. Instead of assembling the `D²×D²`
 Liouvillian, it evaluates the right-hand side directly on the density matrix via grouped local
-tensor contractions, integrated with a fixed-step RK4 (PETSc `TS`), and runs on one or many GPUs.
+tensor contractions, integrated with fixed-step classic RK4 (PETSc `TS` or a custom lower-memory
+stepper), and runs on one or many GPUs.
 
-This repository is the **open-system engine** behind a paper that walks up a ladder of gate
-complexity on a ring of tunable-coupler transmons — iSWAP/CZ on 2Q1C → single 2Q on 4Q4C →
-simultaneous 2Q → CCZ (3Q) → ring CCZ / CCCZ (4Q) — and for each rung reports the
-**open-system gate fidelity at T1 = T2 = 100 µs**. The gate models are constructed in a separate
-Julia repository and handed to this solver as a JSON term-list (see **Julia bridge** below); the
-paper anchor is the 4Q4C device (8 modes, `n_basis = 3`, Hilbert dim `D = 3⁸ = 6561`).
+This solver computes the direct open-system (Lindblad) results in *Gate errors and multiqubit
+operations in a tunable-coupler qubit ring* (S. Kunnumbrath and M. Otten, in preparation): the
+single-pair iSWAP and CZ channels at 40, 50 and 60 ns on the full four-qubit, four-coupler ring
+(4Q4C: 8 three-level modes, Hilbert dim `D = 3⁸ = 6561`) at **T1 = Tφ = 100 µs**, and the 40 ns
+gates at T1 = Tφ = 50 µs. The paper uses these direct solves to check a first-order decoherence
+estimate that it then applies to its CCZ and C3Z gates. The gate models are built in a separate,
+private Julia repository and handed to this solver as a JSON term-list (see **Julia bridge** below).
+See **Reproducing the paper's open-system runs** for the exact build and flags.
 
 ## Status
 
@@ -27,11 +30,12 @@ paper anchor is the 4Q4C device (8 modes, `n_basis = 3`, Hilbert dim `D = 3⁸ =
 cpp/          solver: apps/ (CLI) · backends/{cpu,cuda}/ · core/ · io/ · petsc/ · include/culindblad/
 validation/   QuTiP cross-checks + golden-master regression + the Julia-free handoff validator
 cluster/      HTCondor submit files + MPI/multi-node launch scripts
-docs/         design notes, the propagator-verification protocol, the Julia↔C++ schema, multinode
+docs/         design notes, the propagator-verification protocol, the Julia↔C++ schema, multinode;
+              anchors/ = log + result of one of the paper's open-system runs
 profiling/    nsys profiling notes / bottleneck write-ups
 propcheck/    tracked golden validation data (regenerated run outputs are gitignored)
 archive/      original course-project report + notebook (provenance)
-CMakeLists.txt · build.sh · setup_env.sh.example · LICENSE
+CMakeLists.txt · build.sh · build_fp32.sh · setup_env.sh.example · LICENSE
 ```
 
 ## Dependencies
@@ -55,6 +59,9 @@ cp setup_env.sh.example setup_env.sh   # then edit paths: CUDA, PETSC_DIR/ARCH, 
 source setup_env.sh
 ./build.sh                             # configures into build_local/ and makes -> build_local/run_sim
                                        # ./build.sh clean  wipes build_local first
+./build_fp32.sh                        # single-precision build -> build_local_fp32/run_sim
+                                       # (needs a single-precision complex PETSc arch,
+                                       #  PETSC_ARCH=arch-cuda-complex-single)
 ```
 
 `CULINDBLAD_CUDA_ARCH` is the GPU compute capability with no `sm_` prefix (e.g. `90` = H100,
@@ -62,25 +69,53 @@ source setup_env.sh
 
 ## Run — open-system Lindblad (Julia-handoff path)
 
-The Julia exporter writes `model.json` (`system: "open"`, single-site `√(rate)·L` dissipator
-blocks with **T1 = T2 = 100 µs baked into the magnitudes**, rotating-frame couplings,
-`frame_omegas`, `result_frame: "rotating"`). Then:
+The Julia exporter writes `model.json` (`system: "open"`; single-site dissipator blocks
+`L_rel = b/√T1` and `L_dep = √(2/Tφ)·n` on every mode, with **T1 and Tφ baked into the
+magnitudes**; rotating-frame couplings, `frame_omegas`, `result_frame: "rotating"`). Tφ is the
+pure-dephasing time, so the paper's T1 = Tφ = 100 µs gives T2 = [(2T1)⁻¹ + Tφ⁻¹]⁻¹ = 66.7 µs. Then:
 
 ```bash
 source setup_env.sh
 ./build_local/run_sim -tc_integrator 1 -load_model model.json -results_out results.txt
 ```
 
-Everything physical — dissipators, T1/T2, the rotating frame, step count, and the lab
-back-transform — comes from the JSON; the only CLI flags `-load_model` reads are `-load_model`
-and `-results_out`. `-tc_integrator`: `0` = PETSc TSRK4 (QuTiP-validated reference), **`1` = custom
-RK4 (recommended, ~46% less GPU memory)**, `2` = Taylor. Optional 4Q4C fast path (additive):
-`-tc_fused_diagonal 1 -tc_fuse_coupling 1 -tc_fused_diag_prepass 1`.
+The JSON fixes the physics: dissipators, T1/Tφ, the rotating frame, step count, and the lab
+back-transform. Command-line flags only choose how the calculation runs and where results are saved:
+`-results_out` (single-process output file), `-dump_tag` (per-rank output names under MPI),
+`-tc_checkpoint_every N -tc_checkpoint_dir DIR` (checkpoint/restart), `-tc_integrator`, and the
+fast-path flags. `-tc_integrator`: `0` = PETSc TSRK4 (default; QuTiP-validated reference), **`1` =
+custom RK4 (recommended: ~46% less GPU memory, agrees with TSRK4 to rounding level, 3.2e-14 in the
+rotating frame; required for checkpointing and for accurate fp32 open runs)**, `2` = Taylor.
+Optional 4Q4C fast path (additive): `-tc_fused_diagonal 1 -tc_fuse_coupling 1 -tc_fused_diag_prepass 1`.
+
+## Reproducing the paper's open-system runs
+
+The paper's open-system channels were computed with the single-precision build, the custom RK4,
+the 4Q4C fast path, checkpointing, and the independent density matrices split across GPUs. The run
+recorded in `docs/anchors/` used:
+
+```bash
+./build_fp32.sh
+mpiexec -n 7 ./build_local_fp32/run_sim -tc_integrator 1 -use_gpu_aware_mpi 0 \
+  -tc_fused_diagonal 1 -tc_fuse_coupling 1 -tc_fused_diag_prepass 1 \
+  -load_model model_open.json -dump_tag prod_cz_T40_fp32 \
+  -tc_checkpoint_every 1000 -tc_checkpoint_dir ckpt
+python validation/merge_ranks.py propcheck/prod_cz_T40_fp32 merged.txt 7 256
+```
+
+- The model propagates all 256 dressed computational matrix units (16 × 16 inputs) in the full
+  `D = 6561` space. RK4 steps are about 3.3 ps (12000 steps for a 40 ns gate).
+- In the fp32 build, the open path divides every density matrix with Re Tr ρ > 0.5 by its real trace
+  after each step. This cancels single-precision trace drift; the near-zero-trace off-diagonal inputs
+  are left alone. It is automatic (no flag) and is not compiled into the fp64 build.
+- `docs/anchors/` holds the log and result of the 40 ns CZ at T1 = Tφ = 50 µs: F_closed = 0.99903
+  and F_open = 0.99551, matching the paper's Table I and Appendix F.
 
 ## Run — multi-GPU state-sharding
 
-The 256 independent density matrices of the 4Q4C open anchor shard across GPUs; node-local GPU
-binding is automatic by hostname (no flag). Launch from the repo root:
+The independent density matrices (256 for a 4Q4C open channel) shard across GPUs; node-local GPU
+binding is automatic by hostname (no flag). This self-contained route builds the 4Q4C model in C++
+(no `model.json`); the `-load_model` route shards the same way. Launch from the repo root:
 
 ```bash
 mpiexec -n $((NODES*GPUS_PER_NODE)) [-ppn GPUS_PER_NODE] \
@@ -108,13 +143,16 @@ cluster/run_closed_shard.sh 8 4 4 12000 fp32 run
 ```
 
 `condor_submit cluster/closed_shard.sub` runs it on the cluster (edit `arguments`/`request_gpus`).
-**Sizing:** ket-sharding parallelizes up to `2ᴺQ` ranks (16 for 4Q4C, 64 for 6Q7C, 256 for 8Q10C).
-8Q10C is `D = 3¹⁸ ≈ 3.9·10⁸`/state ⇒ ~31 GB/ket fp64 (~16 GB fp32) with the custom RK4, so plan
-~1 ket/GPU fp64 (≈256 GPUs) or ~2–3/GPU fp32; always use `-tc_integrator 1`.
+**Sizing:** ket-sharding uses at most `2ᴺQ` ranks (16 for 4Q4C). Use `-tc_integrator 1` for its
+lower memory.
 
 For long runs, add checkpoint/restart on the `-load_model` closed path (blip-proof, auto-resume):
 `-tc_checkpoint_every N -tc_checkpoint_dir DIR` (requires `-tc_integrator 1`; per-rank `.ckpt`, strict
-header guard). The same flags work for the open anchor.
+header guard). The same flags work for open runs; the paper's open runs used them. The open fp32
+checkpoint test builds the fp32 binary, checks that a resumed run matches an uninterrupted one bit for
+bit, and checks that a checkpoint from a different step count is refused:
+`cluster/ckpt_build_validate.sh <open_model_200_steps.json> <same_model_400_steps.json>`
+(HTCondor wrapper: `cluster/ckpt_validate.sub`).
 
 ## Validation
 
@@ -144,9 +182,10 @@ consistency must hold, and the physical result must stay within tolerance.
 
 ## Julia bridge
 
-The 4Q4C Julia repo's `opensystem/gpu_export.jl` decomposes the model into **local k-site dense
+The 4Q4C Julia repository is private (available on request). Its `opensystem/gpu_export.jl`
+decomposes the model into **local k-site dense
 blocks** (re-walked from `destroy(d)` primitives, never the assembled `6561×6561` operator),
-classifies pulse envelopes into shape + params, encodes the T1=T2 collapse operators as
+classifies pulse envelopes into shape + params, encodes the T1/Tφ collapse operators as
 single-site `√(rate)·L` dissipator blocks, and writes `model.json`. It shells out to
 `run_sim -load_model`, parses the lab-frame `PROPAGATOR_DUMP`, and applies the dressed projection
 Julia-side. The two repos stay separate, communicating only through the JSON term-list. Schema:
@@ -169,9 +208,11 @@ executor reuse to keep GPU residency low.
 - **State-sharding parallelizes across states, not within one.** Each rank evolves whole density
   matrices / kets; a *single* state vector or density matrix is not split across GPUs. So the useful
   rank count is capped at the number of independent states — `(2ᴺQ)²` density columns (open) or `2ᴺQ`
-  kets (closed). This suffices through 8Q10C closed (256 kets, ~31 GB/ket fp64 ⇒ ~1 ket/GPU), but a
-  problem needing a single state too large for one GPU would require intra-state (domain) decomposition,
-  which is not implemented.
+  kets (closed). A problem needing a single state too large for one GPU would require intra-state
+  (domain) decomposition, which is not implemented.
+- **Single precision is checked only on a small system.** The paper's open runs use the fp32 build.
+  fp32 and fp64 were compared only on the reduced two-qubit, one-coupler cell (`D = 27`), where they
+  agree to 8.6e-7 in process fidelity; this does not certify fp32 precision on the full ring.
 - The full-stack export to reduced process matrices / effective error channels (for downstream
   resource-estimation / QEC tools) is not yet built.
 

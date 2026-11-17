@@ -1,0 +1,25 @@
+# HTCondor: build the checkpoint-enabled fp32 solver on a GPU node (it has the CUDA driver, so the
+# CUDA-aware MPICH links) and validate checkpoint+resume bit-identically on a small open model.
+# 1 GPU is only needed for the validation run_sim (the build itself needs the node's driver libs).
+# Report -> <repo>/ckpt_validation_results.txt
+#
+# EDIT before submitting, then `condor_submit cluster/ckpt_validate.sub` FROM THE REPO ROOT:
+#   - arguments:    <open_model_200_steps.json> <same_model_400_steps.json>  (absolute paths)
+#   - requirements: a GPU node your binary targets
+universe   = vanilla
+executable = cluster/ckpt_build_validate.sh
+arguments  = /path/to/test_ckpt_2q1c.json /path/to/test_ckpt_2q1c_400.json
+
+requirements = (TARGET.IsOttenComputer =?= True) && (TARGET.Machine == "qis4.hep.wisc.edu")
+
+log    = ckpt_validate.log
+output = ckpt_validate.out
+error  = ckpt_validate.err
+transfer_output_files = ""
+
+request_gpus   = 1
+request_cpus   = 8
+request_memory = 16384
+request_disk   = 8000000
+
+queue

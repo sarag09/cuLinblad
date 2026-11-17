@@ -12,11 +12,11 @@
 #       N_states = (2^n_q)^2 for a computational/dressed open channel (256 for 4Q4C), or #explicit inputs.
 #       D = prod(local_dims) (6561 for 4Q4C, 243 for 3Q2C).
 #   - request_gpus MUST equal NRANKS (<= 8 on qis4).
-#   4Q4C anchor (8 GPUs):  arguments = /nfs_scratch/kunnumbrath/cuLinblad/model_4q4c_openchan.json 8 256 6561 run
+#   4Q4C anchor (8 GPUs):  arguments = /path/to/model_4q4c_open.json 8 256 6561 run
 #                          request_gpus = 8
 universe = vanilla
 executable = cluster/run_mpi_shard_loadmodel.sh
-arguments = /nfs_scratch/kunnumbrath/cuLinblad/model_4q4c_openchan.json 8 256 6561 run
+arguments = /path/to/model_4q4c_open.json 8 256 6561 run
 
 # qis4 = the only sm_120 (Blackwell) node the binary targets.
 requirements = (TARGET.IsOttenComputer =?= True) && (TARGET.Machine == "qis4.hep.wisc.edu")

@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# Build the fp32 solver (with the new checkpoint/restart) on a GPU node, then validate checkpoint+resume
-# bit-identically on a small 2Q1C open model. HTCondor executable (runs on qis4). Writes a PASS/FAIL
-# report. Prereq test models: 4Q4C/test_ckpt_2q1c.json (200 steps) + 4Q4C/test_ckpt_2q1c_400.json (400).
+# Build the fp32 solver (with checkpoint/restart) on a GPU node, then validate checkpoint+resume
+# bit-identically on a small open model (e.g. 2Q1C). Writes a PASS/FAIL report to
+# <repo>/ckpt_validation_results.txt. HTCondor wrapper: cluster/ckpt_validate.sub.
+#
+# Usage:  cluster/ckpt_build_validate.sh <open_model_200_steps.json> <same_model_400_steps.json>
+#   The first model is checkpointed every 100 steps. The second is the same model with a different
+#   step count; resuming it from the first model's checkpoint must be refused (guard test).
 set -u
-REPO=/nfs_scratch/kunnumbrath/cuLinblad
+MODEL=$(cd "$(dirname "${1:?open model.json, 200 steps}")" && pwd)/$(basename "$1")
+MODEL400=$(cd "$(dirname "${2:?same model, 400 steps}")" && pwd)/$(basename "$2")
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 source "$REPO/setup_env.sh"
 RESULTS=$REPO/ckpt_validation_results.txt
 BIN=$REPO/build_local_fp32/run_sim
-MODEL=/nfs_scratch/kunnumbrath/4Q4C/test_ckpt_2q1c.json          # open, 200 steps
-MODEL400=/nfs_scratch/kunnumbrath/4Q4C/test_ckpt_2q1c_400.json   # open, 400 steps (guard test)
 
 {
   echo "=============================================================="

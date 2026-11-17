@@ -47,7 +47,7 @@ H from the lab H via U(t)(H−D)U†(t) at several t.
 2. **Julia exporter rf path** (diagonal subtract + h1–h4 + rf coeffs); reassembly check H_R(t)==U(H−D)U†.
 3. **Round-trip**: export 2Q1C rotating-frame model; C++ closed at ~10k rot steps == lab at 120k
    (self-consistency) and (on a working Julia node) == U_dress_comp.
-4. **Open cross-check** (the payoff): C++ open at ~10k rot steps, T1=T2=100µs → ρ ≈ closed |ψ><ψ| to
+4. **Open cross-check** (the payoff): C++ open at ~10k rot steps, T1=Tφ=100µs → ρ ≈ closed |ψ><ψ| to
    ~6e-4, for 2Q1C → 3Q2C → 4Q4C. Now feasible (rotating frame).
 
 ## Validation invariants
